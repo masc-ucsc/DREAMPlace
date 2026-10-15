@@ -4,7 +4,9 @@
  * @date   Aug 2018
  * @brief  Compute electric force according to e-place
  */
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
+#endif
 #include "utility/src/utils.h"
 // local dependency
 #include "electric_potential/src/density_function.h"
@@ -73,6 +75,7 @@ int computeElectricForceLauncher(
 /// @param bin_size_y bin height
 /// @param num_movable_nodes number of movable cells
 /// @param num_filler_nodes number of filler cells
+#ifndef DREAMPLACE_TORCH_FREE
 at::Tensor electric_force(
     at::Tensor grad_pos, int num_bins_x, int num_bins_y,
     int num_movable_impacted_bins_x, int num_movable_impacted_bins_y,
@@ -101,6 +104,7 @@ at::Tensor electric_force(
 
   return grad_out.mul_(grad_pos);
 }
+#endif
 
 template <typename T>
 int computeElectricForceLauncher(

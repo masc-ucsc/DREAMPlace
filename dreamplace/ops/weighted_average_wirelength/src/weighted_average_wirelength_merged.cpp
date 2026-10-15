@@ -1,4 +1,6 @@
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
+#endif
 #include "utility/src/utils.h"
 #include "weighted_average_wirelength/src/functional.h"
 
@@ -131,6 +133,7 @@ int computeWeightedAverageWirelengthMergedLauncher(
 /// @param inv_gamma the inverse number of gamma coefficient in weighted average
 /// wirelength.
 /// @return total wirelength cost.
+#ifndef DREAMPLACE_TORCH_FREE
 std::vector<at::Tensor> weighted_average_wirelength_forward(
     at::Tensor pos, at::Tensor flat_netpin, at::Tensor netpin_start,
     at::Tensor pin2net_map, at::Tensor net_weights, at::Tensor net_mask,
@@ -228,12 +231,20 @@ at::Tensor weighted_average_wirelength_backward(
       });
   return grad_out;
 }
+#endif
+
+#ifdef DREAMPLACE_TORCH_FREE
+template int computeWeightedAverageWirelengthMergedLauncher<double>(const double*, const double*, const int*, const int*, const unsigned char*, int, const double*, double*, double*, double*, int);
+#endif
 
 DREAMPLACE_END_NAMESPACE
 
+#ifndef DREAMPLACE_TORCH_FREE
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &DREAMPLACE_NAMESPACE::weighted_average_wirelength_forward,
         "WeightedAverageWirelength forward");
   m.def("backward", &DREAMPLACE_NAMESPACE::weighted_average_wirelength_backward,
         "WeightedAverageWirelength backward");
 }
+
+#endif

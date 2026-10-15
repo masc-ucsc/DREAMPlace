@@ -1,0 +1,70 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+config_setting(
+    name = "openmp",
+    define_values = {"dreamplace_openmp": "true"},
+)
+
+config_setting(
+    name = "openmp_macos",
+    constraint_values = ["@platforms//os:macos"],
+    define_values = {"dreamplace_openmp": "true"},
+)
+
+cc_library(
+    name = "native_kernels",
+    srcs = [
+        "global_swap/src/global_swap.cpp",
+        "greedy_legalize/src/greedy_legalize_cpu.cpp",
+        "greedy_legalize/src/legalize_bin_cpu.cpp",
+        "greedy_legalize/src/merge_bin_cpu.cpp",
+        "independent_set_matching/src/independent_set_matching.cpp",
+        "k_reorder/src/k_reorder.cpp",
+        "macro_legalize/src/macro_legalize.cpp",
+        "utility/src/msg.cpp",
+        "weighted_average_wirelength/src/weighted_average_wirelength_merged.cpp",
+    ],
+    hdrs = glob(
+        [
+            "utility/src/*.h",
+            "abacus_legalize/src/*.h",
+            "greedy_legalize/src/*.h",
+            "macro_legalize/src/*.h",
+            "legality_check/src/*.h",
+            "weighted_average_wirelength/src/*.h",
+            "k_reorder/src/*.h",
+            "global_swap/src/*.h",
+            "independent_set_matching/src/*.h",
+            "electric_potential/src/*.h",
+        ],
+        exclude = [
+            "utility/src/torch.h",
+            "utility/src/torch_fft_api.h",
+            "utility/src/make_placedb.h",
+            "independent_set_matching/src/*cuda*",
+            "independent_set_matching/src/hungarian_cpu.h",
+            "independent_set_matching/src/min_cost_flow_cpu.h",
+            "weighted_average_wirelength/src/*cuda*",
+        ],
+    ) + [
+        # Template implementation files used by the native density bridges.
+        "electric_potential/src/electric_density_map.cpp",
+        "electric_potential/src/electric_force.cpp",
+    ],
+    copts = ["-Wno-unknown-pragmas"] + select({
+        ":openmp_macos": [
+            "-Xpreprocessor",
+            "-fopenmp",
+        ],
+        ":openmp": ["-fopenmp"],
+        "//conditions:default": [],
+    }),
+    defines = ["DREAMPLACE_TORCH_FREE"],
+    includes = ["."],
+    deps = ["@coin-or-lemon//:graph"] + select({
+        ":openmp": ["@openmp"],
+        "//conditions:default": [],
+    }),
+)

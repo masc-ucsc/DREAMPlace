@@ -6,11 +6,15 @@
 #ifndef DREAMPLACE_LEGALIZE_FUNCTION_CPU_H
 #define DREAMPLACE_LEGALIZE_FUNCTION_CPU_H
 
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
+#endif
 #include "utility/src/utils.h"
 // database dependency
 #include "utility/src/legalization_db.h"
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/make_placedb.h"
+#endif
 // local dependency
 #include "greedy_legalize/src/bin_assignment_cpu.h"
 #include "greedy_legalize/src/compare_cpu.h"

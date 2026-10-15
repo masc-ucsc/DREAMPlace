@@ -1,0 +1,56 @@
+module(
+    name = "dreamplace",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "rules_cc", version = "0.2.25")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "openmp", version = "21.1.5.bcr.3")
+bazel_dep(name = "coin-or-lemon", version = "1.3.1.bcr.1")
+
+# The registered :lemon target includes GLPK. Placement needs only graph
+# algorithms and network simplex. Keep the registry source/compatibility
+# patches, adding a separate target that does not link the LP frontend.
+single_version_override(
+    module_name = "coin-or-lemon",
+    patch_strip = 1,
+    patches = ["//packages:lemon_graph.patch"],
+    version = "1.3.1.bcr.1",
+)
+
+bazel_dep(name = "apple_support", version = "2.8.3", dev_dependency = True, repo_name = "build_bazel_apple_support")
+
+# Plain repositories match LiveHD's dependency model. Only the optional HHDS
+# adapter pulls these into its build; the placement library is independent.
+bazel_dep(name = "abseil-cpp", version = "20250814.2")
+
+git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+git_repository(
+    name = "hhds",
+    commit = "a632b5b1c144b19654241e05e91216ae5c6eeb6c",
+    remote = "https://github.com/masc-ucsc/hhds.git",
+)
+
+git_repository(
+    name = "hlop",
+    commit = "b0a61425993d2b88ddea8eda614004090e5bd2c9",
+    remote = "https://github.com/masc-ucsc/hlop.git",
+)
+
+http_archive(
+    name = "emhash",
+    build_file = "//packages:emhash.BUILD",
+    sha256 = "9ec42a978c34653bc6f0c02b5c2e874d34265f8543cede787c79eb71f6e22f0f",
+    strip_prefix = "emhash-60127291d95b5e345ed26c719554130f3dab3bbd",
+    urls = ["https://github.com/renau/emhash/archive/60127291d95b5e345ed26c719554130f3dab3bbd.zip"],
+)
+
+http_archive(
+    name = "iassert",
+    integrity = "sha256-sMOp2bzYfLhVMYfFoliGIXKHAi3bZpTVTSD+2oXjMp8=",
+    strip_prefix = "iassert-0460fbd8405a96b3615be425df9066eba835fcf0",
+    urls = ["https://github.com/masc-ucsc/iassert/archive/0460fbd8405a96b3615be425df9066eba835fcf0.zip"],
+)

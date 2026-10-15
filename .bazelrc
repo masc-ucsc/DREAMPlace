@@ -1,0 +1,10 @@
+build --cxxopt=-std=c++23 --host_cxxopt=-std=c++23
+build --features=external_include_paths
+build --enable_platform_specific_config
+build:macos --macos_minimum_os=13.3 --host_macos_minimum_os=13.3
+build:macos --xcode_version_config=//packages/macos:command_line_tools
+build:darwin --config=macos
+build:openmp --define=dreamplace_openmp=true
+build:asan --features=asan --copt=-fsanitize=address --linkopt=-fsanitize=address --strip=never
+build:ubsan --copt=-fsanitize=undefined --linkopt=-fsanitize=undefined --strip=never
+test --test_output=errors

@@ -10,11 +10,15 @@
 #include <vector>
 #include <array>
 #include <functional>
+#ifdef DREAMPLACE_TORCH_FREE
+#include "macro_legalize/src/native_lp.h"
+#else
 #include <limbo/solvers/DualMinCostFlow.h>
+#endif
 #include <lemon/list_graph.h>
 #include <lemon/smart_graph.h>
 #include <lemon/connectivity.h>
-#include "place_io/src/Util.h"
+#include "utility/src/direction.h"
 
 DREAMPLACE_BEGIN_NAMESPACE
 
@@ -502,7 +506,7 @@ void longestPathLegalizeLauncher(LegalizationDB<T> db, const std::vector<int>& m
     unset_slack(); 
     compute_slack();
     //print_slack();
-    evaluate_slack();
+    evaluate_slack("after constraint graph repair");
 
     for (int xy = 0; xy < 2; ++xy)
     {
@@ -535,6 +539,56 @@ void longestPathLegalizeLauncher(LegalizationDB<T> db, const std::vector<int>& m
 /// 
 /// If the input macro solution is not legal, there is no guarantee to find a legal solution. 
 /// But if it is legal, the output should still be legal. 
+#ifdef DREAMPLACE_TORCH_FREE
+// Reuse DREAMPlace's Hannan/longest-path constraint graph. Solve its integer
+// L1 displacement LP directly with LEMON, preserving the macro separation
+// choices while removing the general-purpose Limbo modeling dependency.
+template <typename T>
+void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macros,
+                            const std::vector<int>& fixed_macros) {
+    std::array<lemon::ListDigraph, 2> cg;
+    unsigned int source, terminal;
+    longestPathLegalizeLauncher(db, macros, fixed_macros, cg, source, terminal);
+    for (int xy = 0; xy < 2; ++xy) {
+        const T* pos = xy == kX ? db.x : db.y;
+        const T* init = xy == kX ? db.init_x : db.init_y;
+        const T* size = xy == kX ? db.node_size_x : db.node_size_y;
+        T lo = xy == kX ? db.xl : db.yl, hi = xy == kX ? db.xh : db.yh;
+        MacroDifferenceLP lp;
+        for (auto id : macros) {
+            lp.lower.push_back(MacroDifferenceLP::coordinate(std::ceil(lo)));
+            lp.upper.push_back(MacroDifferenceLP::coordinate(std::floor(hi-size[id])));
+            lp.anchor.push_back(MacroDifferenceLP::coordinate(std::round(init[id])));
+        }
+        for (lemon::ListDigraph::ArcIt a(cg[xy]); a != lemon::INVALID; ++a) {
+            unsigned int v = cg[xy].id(cg[xy].source(a));
+            unsigned int u = cg[xy].id(cg[xy].target(a));
+            if (v < macros.size()) {
+                if (u < macros.size()) {
+                    // x_v + width_v <= x_u.
+                    lp.constraints.push_back({static_cast<int>(u), static_cast<int>(v),
+                        MacroDifferenceLP::coordinate(-size[macros[v]])});
+                } else if (u != source && u != terminal) {
+                    lp.upper[v] = std::min(lp.upper[v], MacroDifferenceLP::coordinate(
+                        std::floor(pos[fixed_macros.at(u-macros.size())]-size[macros[v]])));
+                }
+            } else if (v != source && v != terminal && u < macros.size()) {
+                int fixed = fixed_macros.at(v-macros.size());
+                lp.lower[u] = std::max(lp.lower[u], MacroDifferenceLP::coordinate(std::ceil(pos[fixed]+size[fixed])));
+            }
+        }
+        auto result = lp.solve();
+        T* output = xy == kX ? db.x : db.y;
+        for (size_t i = 0; i < macros.size(); ++i) output[macros[i]] = result[i];
+    }
+}
+
+template <typename T>
+void lpLegalizeLauncher(LegalizationDB<T> db, const std::vector<int>& macros,
+                       const std::vector<int>& fixed_macros) {
+    lpLegalizeGraphLauncher(db, macros, fixed_macros);
+}
+#else
 template <typename T>
 void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macros, const std::vector<int>& fixed_macros)
 {
@@ -961,6 +1015,8 @@ void lpLegalizeLauncher(LegalizationDB<T> db, const std::vector<int>& macros, co
     model_vcg.printSolution("vcg.sol");
 #endif
 }
+
+#endif  // DREAMPLACE_TORCH_FREE
 
 DREAMPLACE_END_NAMESPACE
 

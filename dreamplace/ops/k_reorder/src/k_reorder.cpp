@@ -3,7 +3,7 @@
  * @author Yibo Lin
  * @date   Jan 2019
  */
-#include <omp.h>
+#include "utility/src/omp.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -11,11 +11,15 @@
 #include <limits>
 #include <numeric>
 #include <vector>
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
+#endif
 #include "utility/src/utils.h"
 // database dependency
 #include "utility/src/detailed_place_db.h"
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/make_placedb.h"
+#endif
 // local dependency
 #include "k_reorder/src/compute_independent_rows.h"
 #include "k_reorder/src/compute_reorder_instances.h"
@@ -250,24 +254,6 @@ int kreorderCPULauncher(DetailedPlaceDB<T>& db, int K, int max_iters,
                             space, node_id, db.node_size_x[node_id], space_xl,
                             space_xh, db.site_width);
       }
-#ifdef DEBUG
-      if (node_id < db.num_movable_nodes) {
-        if (!(space >= db.node_size_x[node_id])) {
-          dreamplacePrint(
-              kNONE, "space (%g, %g), node %d (%g, %g), layout (%g, %g)\n",
-              space_xl, space_xh, node_id, db.x[node_id],
-              db.x[node_id] + db.node_size_x[node_id], db.xl, db.xh);
-          if (j + 1 < state.row2node_map[i].size()) {
-            int right_node_id = state.row2node_map[i][j + 1];
-            dreamplacePrint(
-                kNONE, "right node %d (%g, %g)\n", right_node_id,
-                db.x[right_node_id],
-                db.x[right_node_id] + db.node_size_x[right_node_id]);
-          }
-        }
-        dreamplaceAssert(space >= db.node_size_x[node_id]);
-      }
-#endif
     }
   }
 
@@ -282,14 +268,13 @@ int kreorderCPULauncher(DetailedPlaceDB<T>& db, int K, int max_iters,
       kDEBUG, "compute_independent_rows takes %g ms\n",
       CPUTimer::getTimerPeriod() * (timer_stop[0] - timer_start[0]));
 
-  // fix random seed
-  std::srand(1000);
+  // This CPU implementation uses deterministic ordering, with no global RNG.
 
   std::vector<T> best_target_x[MAX_NUM_THREADS];
 
   // count number of movement
   state.num_moved = 0;
-  T hpwls[max_iters + 1];
+  std::vector<T> hpwls(max_iters + 1);
   hpwls[0] = db.compute_total_hpwl();
   dreamplacePrint(kINFO, "initial hpwl = %.3f\n", hpwls[0]);
 
@@ -393,6 +378,7 @@ int kreorderCPULauncher(DetailedPlaceDB<T>& db, int K, int max_iters,
   return 0;
 }
 
+#ifndef DREAMPLACE_TORCH_FREE
 at::Tensor k_reorder_forward(
     at::Tensor init_pos, at::Tensor node_size_x, at::Tensor node_size_y,
     at::Tensor flat_region_boxes, at::Tensor flat_region_boxes_start,
@@ -431,9 +417,17 @@ at::Tensor k_reorder_forward(
 
   return pos;
 }
+#endif
+
+#ifdef DREAMPLACE_TORCH_FREE
+template int kreorderCPULauncher<double>(DetailedPlaceDB<double>&, int, int, int);
+#endif
 
 DREAMPLACE_END_NAMESPACE
 
+#ifndef DREAMPLACE_TORCH_FREE
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("k_reorder", &DREAMPLACE_NAMESPACE::k_reorder_forward, "K-reorder");
 }
+
+#endif

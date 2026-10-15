@@ -1,0 +1,6 @@
+load("@build_bazel_apple_support//xcode:xcode_config.bzl", "xcode_config")
+
+xcode_config(
+    name = "command_line_tools",
+    visibility = ["//visibility:public"],
+)

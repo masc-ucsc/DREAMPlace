@@ -1,0 +1,15 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+alias(
+    name = "dreamplace",
+    actual = "//dreamplace/native:placer",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "hhds",
+    actual = "//dreamplace/native:hhds",
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["LICENSE"])

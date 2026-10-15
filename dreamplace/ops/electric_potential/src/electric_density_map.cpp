@@ -5,7 +5,9 @@
  * @brief  Compute density map according to e-place
  * (http://cseweb.ucsd.edu/~jlu/papers/eplace-todaes14/paper.pdf)
  */
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
+#endif
 #include "utility/src/utils.h"
 // local dependency
 #include "electric_potential/src/density_function.h"
@@ -97,6 +99,7 @@ int computeExactDensityMapLauncher(
 /// cell in x direction
 /// @param num_filler_impacted_bins_y number of impacted bins for any filler
 /// cell in y direction
+#ifndef DREAMPLACE_TORCH_FREE
 at::Tensor density_map(
     at::Tensor pos, at::Tensor node_size_x_clamped,
     at::Tensor node_size_y_clamped, at::Tensor offset_x, at::Tensor offset_y,
@@ -250,6 +253,7 @@ at::Tensor electric_force(
     at::Tensor bin_center_x, at::Tensor bin_center_y, double xl, double yl,
     double xh, double yh, double bin_size_x, double bin_size_y,
     int num_movable_nodes, int num_filler_nodes);
+#endif
 
 template <typename T, typename AtomicOp>
 int computeTriangleDensityMapLauncher(
@@ -362,6 +366,7 @@ int computeExactDensityMapLauncher(
 
 DREAMPLACE_END_NAMESPACE
 
+#ifndef DREAMPLACE_TORCH_FREE
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("density_map", &DREAMPLACE_NAMESPACE::density_map,
         "ElectricPotential Density Map");
@@ -370,3 +375,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("electric_force", &DREAMPLACE_NAMESPACE::electric_force,
         "ElectricPotential Electric Force");
 }
+
+#endif

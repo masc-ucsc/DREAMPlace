@@ -37,7 +37,7 @@ void make_bin2node_3d_map(const DetailedPlaceDBType& db, const typename Detailed
     }
     int num_sizes = state.size2num_node_map.size();
 #ifdef DEBUG
-    dreamplacePrint(kDEBUG, "%lu width values\n", size2num_node_map.size());
+    dreamplacePrint(kDEBUG, "%lu width values\n", state.size2num_node_map.size());
     for (auto kv : state.size2num_node_map)
     {
         dreamplacePrint(kDEBUG, "width %d has %d cells\n", kv.first, kv.second);

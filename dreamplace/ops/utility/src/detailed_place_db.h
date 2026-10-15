@@ -9,7 +9,9 @@
 
 #include "utility/src/utils.h"
 // helper functions
+#ifndef DREAMPLACE_TORCH_FREE
 #include "draw_place/src/draw_place.h"
+#endif
 #include "legality_check/src/legality_check.h"
 
 DREAMPLACE_BEGIN_NAMESPACE
@@ -334,7 +336,7 @@ struct DetailedPlaceDB {
     return legalityCheckKernelCPU(
         x, y, node_size_x, node_size_y, flat_region_boxes,
         flat_region_boxes_start, node2fence_region_map, xl, yl, xh, yh,
-        site_width, row_height, num_nodes, num_movable_nodes, num_regions);
+        site_width, row_height, T(1), num_nodes, num_movable_nodes, num_regions);
   }
   /// @brief check whether a cell is within its fence region
   bool inside_fence(int node_id, T xx, T yy) const {
@@ -374,6 +376,7 @@ struct DetailedPlaceDB {
     }
     return legal_flag;
   }
+#ifndef DREAMPLACE_TORCH_FREE
   /// @brief draw placement
   void draw_place(const char* filename) const {
     drawPlaceLauncher<T>(x, y, node_size_x, node_size_y, pin_offset_x,
@@ -382,6 +385,7 @@ struct DetailedPlaceDB {
                          xl, yl, xh, yh, site_width, row_height, bin_size_x,
                          bin_size_y, filename);
   }
+#endif
 };
 
 DREAMPLACE_END_NAMESPACE

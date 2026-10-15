@@ -11,11 +11,15 @@
 #include <numeric>
 #include <vector>
 #include "global_swap/src/SwapCandidate.h"
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
+#endif
 #include "utility/src/utils.h"
 // database dependency
 #include "utility/src/detailed_place_db.h"
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/make_placedb.h"
+#endif
 
 DREAMPLACE_BEGIN_NAMESPACE
 
@@ -143,11 +147,16 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
   // check row2node_map
   for (unsigned int i = 0; i < row2node_map.size(); ++i) {
     for (unsigned int j = 1; j < row2node_map[i].size(); ++j) {
-      assert(y[row2node_map.at(i).at(j - 1)] == y[row2node_map.at(i).at(j)] &&
-             x[row2node_map.at(i).at(j - 1)] +
-                     node_size_x[row2node_map.at(i).at(j - 1)] <=
-                 x[row2node_map.at(i).at(j)]);
-      assert(node2row2node_index_map.at(row2node_map.at(i).at(j)) == j);
+      int left = row2node_map.at(i).at(j - 1);
+      int right = row2node_map.at(i).at(j);
+      // Fixed obstacles may span several rows (and overlap other fixed
+      // obstacles). Their one node-to-row index is overwritten per row;
+      // only movable single-row cells use that inverse map during swapping.
+      assert((left >= db.num_movable_nodes && right >= db.num_movable_nodes) ||
+             db.x[left] + db.node_size_x[left] <= db.x[right]);
+      if (right < db.num_movable_nodes && db.node_size_y[right] == db.row_height) {
+        assert(node2row2node_index_map.at(right) == j);
+      }
     }
   }
   dreamplacePrint(kDEBUG, "passed row2node_map check\n");
@@ -246,8 +255,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
   // nodes
   std::vector<int> ordered_nodes(db.num_movable_nodes);
   std::iota(ordered_nodes.begin(), ordered_nodes.end(), 0);
-  // fix random seed
-  std::srand(1000);
+  // This CPU implementation uses deterministic ordering, with no global RNG.
   // generate bin search sequence
   int grid_size = 10;  // width and height of the diamond shape
   const float stop_threshold = 0.1 / 100;
@@ -506,6 +514,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
   return 0;
 }
 
+#ifndef DREAMPLACE_TORCH_FREE
 at::Tensor global_swap_forward(
     at::Tensor init_pos, at::Tensor node_size_x, at::Tensor node_size_y,
     at::Tensor flat_region_boxes, at::Tensor flat_region_boxes_start,
@@ -543,10 +552,18 @@ at::Tensor global_swap_forward(
 
   return pos;
 }
+#endif
+
+#ifdef DREAMPLACE_TORCH_FREE
+template int globalSwapCPULauncher<double>(DetailedPlaceDB<double>, int);
+#endif
 
 DREAMPLACE_END_NAMESPACE
 
+#ifndef DREAMPLACE_TORCH_FREE
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("global_swap", &DREAMPLACE_NAMESPACE::global_swap_forward,
         "Global swap");
 }
+
+#endif

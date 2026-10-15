@@ -33,6 +33,11 @@ int dreamplacePrintStream(MessageType m, FILE* stream, const char* format,
 
 int dreamplaceVPrintStream(MessageType m, FILE* stream, const char* format,
                            va_list args) {
+#ifdef DREAMPLACE_TORCH_FREE
+  // An embedded library must not flood the host's normal output. Keep
+  // diagnostics; the native API returns its placement metrics to the caller.
+  if (m == kINFO || m == kDEBUG || m == kNONE) return 0;
+#endif
   // print prefix
   char prefix[16];
   dreamplaceSPrintPrefix(m, prefix);

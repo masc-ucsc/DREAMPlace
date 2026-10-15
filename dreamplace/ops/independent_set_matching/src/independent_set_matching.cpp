@@ -3,19 +3,27 @@
  * @author Yibo Lin
  * @date   Jan 2019
  */
-#include <omp.h>
+#include "utility/src/omp.h"
 #include <chrono>
 #include <limits>
 
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
+#endif
 #include "utility/src/utils.h"
 // database dependency
 #include "utility/src/detailed_place_db.h"
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/make_placedb.h"
+#endif
 // local dependency
 #include "independent_set_matching/src/auction_cpu.h"
+#ifndef DREAMPLACE_TORCH_FREE
 #include "independent_set_matching/src/hungarian_cpu.h"
+#endif
+#ifndef DREAMPLACE_TORCH_FREE
 #include "independent_set_matching/src/min_cost_flow_cpu.h"
+#endif
 
 //#define DEBUG
 //#define DEBUG_PROFILE
@@ -74,8 +82,7 @@ template <typename T>
 void independentSetMatchingCPULauncher(DetailedPlaceDB<T> db, int batch_size,
                                        int set_size, int max_iters,
                                        int num_threads) {
-  // fix random seed
-  std::srand(1000);
+  // This CPU implementation uses deterministic ordering, with no global RNG.
   // const double threshold = 0.00001/100;
   IndependentSetMatchingState<T> state;
   state.batch_size = batch_size;
@@ -301,6 +308,7 @@ void independentSetMatchingCPULauncher(DetailedPlaceDB<T> db, int batch_size,
   //        );
 }
 
+#ifndef DREAMPLACE_TORCH_FREE
 at::Tensor independent_set_matching_forward(
     at::Tensor init_pos, at::Tensor node_size_x, at::Tensor node_size_y,
     at::Tensor flat_region_boxes, at::Tensor flat_region_boxes_start,
@@ -339,11 +347,19 @@ at::Tensor independent_set_matching_forward(
 
   return pos;
 }
+#endif
+
+#ifdef DREAMPLACE_TORCH_FREE
+template void independentSetMatchingCPULauncher<double>(DetailedPlaceDB<double>, int, int, int, int);
+#endif
 
 DREAMPLACE_END_NAMESPACE
 
+#ifndef DREAMPLACE_TORCH_FREE
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("independent_set_matching",
         &DREAMPLACE_NAMESPACE::independent_set_matching_forward,
         "Independent set matching");
 }
+
+#endif

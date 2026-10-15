@@ -1,0 +1,11 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "flute",
+    srcs = ["flute.cpp"],
+    hdrs = ["flute.hpp"],
+    data = glob(["lut.ICCAD2015/*"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["LICENSE"])

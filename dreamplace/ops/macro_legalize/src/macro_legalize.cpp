@@ -3,11 +3,15 @@
  * @author Yibo Lin
  * @date   Jun 2018
  */
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
+#endif
 #include "utility/src/utils.h"
 // database dependency
 #include "utility/src/legalization_db.h"
+#ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/make_placedb.h"
+#endif
 // local dependency
 #include "macro_legalize/src/hannan_legalize.h"
 #include "macro_legalize/src/lp_legalize.h"
@@ -48,6 +52,7 @@ bool macroLegalizationLauncher(LegalizationDB<T> db);
 /// range of [0, num_movable_nodes)
 /// @param number of filler nodes, filler nodes are in the range of
 /// [num_nodes-num_filler_nodes, num_nodes)
+#ifndef DREAMPLACE_TORCH_FREE
 at::Tensor macro_legalization_forward(
     at::Tensor init_pos, at::Tensor pos, at::Tensor node_size_x,
     at::Tensor node_size_y, at::Tensor node_weights,
@@ -80,6 +85,8 @@ at::Tensor macro_legalization_forward(
 
   return pos_copy;
 }
+
+#endif
 
 template <typename T>
 bool check_macro_legality(LegalizationDB<T> db, const std::vector<int>& macros,
@@ -494,9 +501,16 @@ bool macroLegalizationLauncher(LegalizationDB<T> db) {
   return legal;
 }
 
+#ifdef DREAMPLACE_TORCH_FREE
+template bool macroLegalizationLauncher<double>(LegalizationDB<double>);
+#endif
+
 DREAMPLACE_END_NAMESPACE
 
+#ifndef DREAMPLACE_TORCH_FREE
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &DREAMPLACE_NAMESPACE::macro_legalization_forward,
         "Macro legalization forward");
 }
+
+#endif

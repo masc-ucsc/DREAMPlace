@@ -597,10 +597,10 @@ int collect_independent_sets(const DetailedPlaceDBType& db, IndependentSetMatchi
         max_set_size = std::max(max_set_size, (int)state.independent_sets.at(i).size());
     }
     dreamplacePrint(kDEBUG, "%d sets, average set size %d, max set size %d\n", 
-            num_independent_sets, avg_set_size/num_independent_sets, max_set_size);
+            num_independent_sets, (num_independent_sets ? avg_set_size/num_independent_sets : 0), max_set_size);
 
 #ifdef DEBUG
-    dreamplacePrint(kDEBUG, "#sizes = %lu, actual %d\n", size2id_map.size(), num_independent_sets);
+    dreamplacePrint(kDEBUG, "independent sets = %d\n", num_independent_sets);
     for (int i = 0; i < num_independent_sets; ++i)
     {
         auto const& independent_set = state.independent_sets.at(i);

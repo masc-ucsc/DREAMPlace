@@ -1,5 +1,20 @@
 # DREAMPlace
 
+This masc-ucsc fork provides a **CPU C++ library for LiveHD**, built with Bazel,
+with an optional HHDS graph adapter. Start with the
+[native build and integration guide](dreamplace/native/README.md):
+
+```sh
+bazel test -c opt //...
+bazel run -c opt //dreamplace/native:example
+bazel run -c opt //dreamplace/native:synthetic_place -- --out results/synthetic
+```
+
+The native targets do not use Torch, Python placement code, CUDA, Boost, Limbo,
+or the legacy PlaceDB. CPU OpenMP is optional (`--config=openmp`) and comes
+from the Bazel Central Registry. The original Python/CMake flow and its
+documentation are retained below.
+
 Deep learning toolkit-enabled VLSI placement.
 With the analogy between nonlinear VLSI placement and deep learning training problem, this tool is developed with deep learning toolkit for flexibility and efficiency.
 The tool runs on both CPU and GPU.

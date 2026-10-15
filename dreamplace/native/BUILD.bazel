@@ -1,0 +1,100 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "placer",
+    srcs = [
+        "density_force.cpp",
+        "density_map.cpp",
+        "kernels.cpp",
+        "placement.cpp",
+        "spectral.cpp",
+    ],
+    hdrs = [
+        "placement.hpp",
+        "spectral.hpp",
+    ],
+    copts = select({
+        "//dreamplace/ops:openmp_macos": [
+            "-Xpreprocessor",
+            "-fopenmp",
+        ],
+        "//dreamplace/ops:openmp": ["-fopenmp"],
+        "//conditions:default": ["-Wno-unknown-pragmas"],
+    }),
+    deps = ["//dreamplace/ops:native_kernels"],
+)
+
+cc_library(
+    name = "hhds",
+    srcs = ["hhds.cpp"],
+    hdrs = ["hhds.hpp"],
+    deps = [
+        ":placer",
+        "@hhds//hhds:graph",
+    ],
+)
+
+cc_binary(
+    name = "example",
+    srcs = ["example.cpp"],
+    deps = [":placer"],
+)
+
+cc_library(
+    name = "synthetic",
+    srcs = [
+        "synthetic.cpp",
+        "synthetic_animation.cpp",
+        "synthetic_io.cpp",
+        "synthetic_png.cpp",
+    ],
+    hdrs = ["synthetic.hpp"],
+    deps = [":hhds"],
+)
+
+cc_binary(
+    name = "synthetic_place",
+    srcs = ["synthetic_main.cpp"],
+    deps = [":synthetic"],
+)
+
+[cc_test(
+    name = "synthetic_" + kind + "_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["synthetic_test.cpp"],
+    args = [kind],
+    deps = [":synthetic"],
+) for kind in [
+    "mesh",
+    "mesh_grid",
+    "mesh_grid_io",
+    "torus",
+    "tree",
+]]
+
+cc_test(
+    name = "placement_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["placement_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "hhds_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["hhds_test.cpp"],
+    deps = [":hhds"],
+)
+
+cc_test(
+    name = "macro_lp_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["macro_lp_test.cpp"],
+    deps = ["//dreamplace/ops:native_kernels"],
+)

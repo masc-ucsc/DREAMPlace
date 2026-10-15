@@ -1,6 +1,7 @@
 build
 lib
 obj
+MODULE.bazel.lock
 *.o
 *.a
 *.pyc
@@ -13,3 +14,4 @@ install
 *.so
 .DS_Store
 .vscode/*
+/bazel-*

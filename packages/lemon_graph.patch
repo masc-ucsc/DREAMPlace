@@ -1,0 +1,19 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -31,6 +31,16 @@
+     srcs = glob(["lemon/**/*.h"]),
+ )
+ 
++# Graph algorithms only. No GLPK/LP frontend is needed for network simplex.
++cc_library(
++    name = "graph",
++    srcs = ["lemon/base.cc"],
++    hdrs = glob(["lemon/**/*.h"], exclude = ["lemon/glpk.h", "lemon/lp*.h", "lemon/cbc.h", "lemon/clp.h", "lemon/cplex.h", "lemon/soplex.h"]),
++    includes = ["."],
++    copts = ["-fexceptions"],
++    visibility = ["//visibility:public"],
++)
++
+ cc_library(
+     name = "lemon",
+     srcs = [

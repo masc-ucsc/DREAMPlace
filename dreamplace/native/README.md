@@ -1,0 +1,439 @@
+# Native CPU placement for LiveHD
+
+The public targets are `//:dreamplace` (flat-array C++ placement) and `//:hhds`
+(the optional HHDS adapter). Neither target uses the Python placement loop,
+Torch tensors, pybind11, CUDA, Boost, Limbo, Cairo, OpenTimer, or PlaceDB.
+The upstream Python/CMake workflow is separate and retains its old dependencies.
+No submodule initialization or pip installation is needed for the Bazel build.
+
+## Build and run
+
+Use Bazel 9.3.0 (selected by `.bazelversion`) and a C++23 toolchain.
+
+```sh
+bazel test -c opt //...
+bazel run -c opt //dreamplace/native:example
+
+# Work against the sibling graphs without editing either repository.
+bazel test -c opt //... \
+  --override_repository=hhds=../hhds \
+  --override_repository=hlop=../hlop
+
+# CPU parallelism, using the registry OpenMP runtime, including on macOS.
+bazel test -c opt --config=openmp //...
+
+# Raw-pointer boundary and solver checks with assertions and sanitizers.
+bazel test --config=asan --config=ubsan //dreamplace/native:all
+```
+
+The default build runs the same kernels serially. OpenMP compiles the runtime
+from the registry; it needs Python **at build time** to generate the runtime's
+message tables. Placement itself never starts or embeds Python. Serial native
+build actions do not use Python. On macOS the standalone build explicitly
+selects Command Line Tools instead of discovering an unrelated Xcode install.
+
+## Dependency boundary
+
+| Dependency | Source | Used by |
+| --- | --- | --- |
+| rules_cc, platforms | Bazel Central Registry | C++ build rules |
+| apple_support | Bazel Central Registry, development dependency | Standalone macOS toolchain |
+| coin-or-lemon 1.3.1.bcr.1 | Bazel Central Registry | Macro difference-constraint LP, network simplex |
+| openmp 21.1.5.bcr.3 | Bazel Central Registry | Optional CPU threading |
+| HHDS, HLOP, iassert, emhash | Pinned masc-ucsc/upstream revisions in `MODULE.bazel` | HHDS adapter only |
+| Abseil | Bazel Central Registry | HHDS/HLOP public API |
+| FLUTE | Already vendored, separate `//thirdparty/flute:flute` target | Future parasitic estimator |
+
+`packages/lemon_graph.patch` adds a public `:graph` target to registered LEMON. It
+uses the registry's patched headers and `base.cc`, retaining its C++ allocator
+compatibility fixes. The default LEMON target also builds the GLPK frontend;
+this target avoids compiling or linking GLPK. GLPK still appears in LEMON's
+module metadata, but is outside the native placement action/link graph.
+The direct macro solver expresses the L1 displacement LP as a min-cost
+circulation, so neither Limbo nor a general LP solver is required.
+
+Boost is used by the legacy database/I/O code: Geometry/R-tree, Polygon,
+Bind, and small string/sort helpers. None of those files is compiled by these
+native targets. The placement kernels and HHDS adapter need no Boost subset.
+
+## Flat arrays
+
+Include `dreamplace/native/placement.hpp` and construct a `Design`:
+
+- Layout: rectangular core bounds, site width and row height. The core contains
+  whole sites/rows; arbitrary row gaps, fence regions and orientations are not
+  represented in this initial boundary.
+- Nodes: `node_x/y`, `node_size_x/y`, ordered movable then fixed then zero-area
+  IO terminals. FIXED and LOCKED both belong in the fixed suffix.
+- Pins: `pin2node`, `pin_offset_x/y` and net-to-pin CSR
+  (`flat_net2pin`, `flat_net2pin_start`). One pin belongs to one net.
+- Nets: optional weights and masks. `build_maps()` fills unit weights/default
+  masks, `pin2net`, and node-to-pin CSR. Empty/singleton nets are disabled by
+  default. Explicitly enabled nets must have at least two pins.
+
+All coordinates, dimensions and pin offsets use the same unit. Use integer
+DBU for mixed-size placement: macro LP coefficients and displacement anchors
+are rounded to integer units, as in upstream. Pin offsets must already reflect
+cell orientation; the placer does not rotate cells. Movable cell dimensions
+are integral numbers of sites and rows. Zero-area terminals have no density
+or overlap contribution, and their positions are preserved exactly.
+
+```cpp
+DreamPlace::native::Design design;
+// Fill layout, node/pin arrays, and net CSR from the mapped physical netlist.
+design.build_maps();
+DreamPlace::native::Placer placer;
+placer.options().num_threads = 4; // requires --config=openmp for actual parallelism
+placer.options().max_iterations = 1500;
+placer.options().target_density = 0.8;
+placer.options().initial_density_weight = 0.01;
+const auto result = placer.place(design);
+// design.node_x/y now hold the placed coordinates.
+```
+
+`Placer` owns its typed `Options`; hosts can configure an instance once, change
+its options between calls, or create multiple independently configured instances.
+An existing `Options` value can also be passed to `Placer(options)` or assigned
+through `placer.options()`. The caller retains ownership of `Design` and any
+HHDS mapping. For HHDS, pass `exported.design` to `placer.place()` and then
+call `apply_positions(exported, writer)` as below.
+
+This is a reusable configuration object: each call starts fresh solver scratch
+state from the supplied coordinates. It does not retain optimization momentum
+or provide incremental-placement caches. The free function
+`place(design, options)` remains available. Both APIs expose all current native
+controls in `Options`; upstream Python-only knobs require a native implementation
+before they can be added here. No CLI, JSON, Python or file I/O is required.
+
+Independent `Placer` instances can run concurrently on independent `Design`
+objects with different options. The linked native kernels keep their placement,
+random-generator and LP state local to each call. Configure each instance before
+launching it; host callbacks must own their mutable data or synchronize it.
+HHDS export/writeback is a separate host operation: exporting independent arrays
+does not make concurrent edits to a shared HHDS graph/library safe.
+
+```cpp
+// a_design and b_design are independent owning arrays, e.g. two HHDS exports.
+DreamPlace::native::Placer a, b;
+a.options().num_threads = b.options().num_threads = 1;
+a.options().target_density = 0.7;
+b.options().target_density = 0.8;
+auto first = std::async(std::launch::async, [&] { return a.place(a_design); });
+auto second = std::async(std::launch::async, [&] { return b.place(b_design); });
+auto a_result = first.get();
+auto b_result = second.get();
+```
+
+Include `<future>` for this example. `num_threads` is the OpenMP worker count
+inside a placement, separate from the host's concurrent placement jobs. Use 1
+when the host already fills the available cores, or budget jobs times workers
+when using both levels. Parallel tests compare four simultaneous instances
+against serial references and exercise simultaneous two-worker OpenMP teams,
+including the macro LP path.
+
+`place()` validates all maps before entering raw-pointer kernels. It uses
+private work arrays and internal fillers; exceptions leave the caller's arrays
+unchanged. Fixed nodes are checked after placement and never written back.
+Malformed inputs raise `invalid_argument`; failed legalization raises
+`runtime_error`. The returned metrics distinguish global-placement convergence
+from final legality. `overflow` is the physical bin overflow at the end of GP,
+excluding fillers, normalized by movable area and measured against
+`target_density` times available bin area. `hpwl` is weighted, masked HPWL after
+the requested stages. A legal result does not imply the GP overflow goal was met.
+
+The global loop uses the upstream merged weighted-average wirelength and
+stretched-density/electric-force CPU kernels, with C++ Nesterov extrapolation,
+preconditioning, gamma/density-weight schedules and filler insertion. The
+Poisson solve uses a separable orthonormal DCT, with no FFT dependency. It costs
+`O(nx * ny * (nx + ny))`; the default grid is 32 by 32. This plain DCT is a
+portable starting point, not a large-design performance claim.
+
+Full mode applies Hannan/LP macro legalization, greedy and Abacus cell
+legalization, then k-reorder, auction-based independent-set matching, and global
+swap. Both a separate site/row/overlap checker and the upstream checker validate
+legalization. Detailed passes are accepted only if they preserve legality and
+HPWL. The legacy detailed kernels optimize unweighted HPWL, so they are skipped
+when net weights differ from one. The native direct LP reuses DREAMPlace's
+constraint graph for both initial macro legalization and LP refinement.
+
+For GP only, set both `legalize=false` and `detailed_place=false`. Coordinates
+may overlap, and `Result::legal` is an observation, not a promise. To legalize
+an existing placement without GP, set `max_iterations=0`.
+
+## HHDS adapter
+
+Include `dreamplace/native/hhds.hpp`. `from_hhds()` accepts a flat, mapped HHDS
+body and three caller-owned geometry functions. This keeps the fork independent
+of LiveHD's LEF/Liberty database and placement attribute definitions.
+
+```cpp
+hhds::GraphLibrary library;
+library.load(database_directory);
+auto io = library.find_io(top_name);
+if (!io || !io->has_graph()) throw std::runtime_error("missing top body");
+auto graph = io->get_graph();
+
+DreamPlace::native::HhdsGeometry geometry;
+geometry.cell = [&](hhds::Node node) {
+  // Look up the mapped cell's dimensions, current DBU position and status.
+  return physical_cell_geometry(node);
+};
+geometry.pin_offset = [&](hhds::Pin pin) { return physical_pin_offset(pin); };
+geometry.terminal_position = [&](hhds::Pin pin) { return top_pin_position(pin); };
+// Optional: geometry.net = [&](hhds::Pin driver) { return NetProperties{weight, enabled}; };
+auto exported = DreamPlace::native::from_hhds(*graph, layout, geometry);
+DreamPlace::native::Placer placer;
+placer.options().target_density = 0.8;
+auto result = placer.place(exported.design);
+DreamPlace::native::apply_positions(exported, [&](hhds::Node node, double x, double y) {
+  // Round as appropriate and update LiveHD place_t/status here.
+  write_physical_position(node, x, y);
+});
+```
+
+Every physical driver pin becomes one hypernet, including multi-output cells
+and fanout. Connected top pins become separate fixed zero-area terminals.
+Constants have no physical driver and their nets are excluded; insert physical
+tie cells first when those wires must be placed. Leaf black-box GraphIO stubs
+are accepted; subnodes with bodies are rejected so that hierarchy cannot be
+silently interpreted as flat connectivity. Hierarchy flattening belongs to
+LiveHD. The graph/library must outlive the exported handles. Do not mutate
+structure while exporting or writing positions. Writeback rejects a graph
+whose structural epoch changed since export and only visits movable cells.
+
+## Import into a host that already uses HHDS (LiveHD)
+
+Use a pinned `http_archive` for this fork and its shipped BUILD files. This
+keeps `@hhds` and `@hlop` bound to the **host's existing repositories**, avoiding
+a second HHDS implementation or attribute system in the same process. The host
+supplies its normal C++23 toolchain and dependencies; archive `.bazelrc` files
+are not imported.
+
+```starlark
+# Host MODULE.bazel (insert the published commit/archive checksum).
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+    name = "dreamplace",
+    urls = ["https://github.com/masc-ucsc/DREAMPlace/archive/<commit>.tar.gz"],
+    strip_prefix = "DREAMPlace-<commit>",
+    sha256 = "<archive sha256>",
+)
+bazel_dep(name = "coin-or-lemon", version = "1.3.1.bcr.1")
+bazel_dep(name = "openmp", version = "21.1.5.bcr.3")
+single_version_override(
+    module_name = "coin-or-lemon",
+    version = "1.3.1.bcr.1",
+    patches = ["//packages:dreamplace_lemon_graph.patch"],
+    patch_strip = 1,
+)
+# Host BUILD: deps = ["@dreamplace//:hhds"] or ["@dreamplace//:dreamplace"].
+```
+
+Copy `packages/lemon_graph.patch` into the host as
+`packages/dreamplace_lemon_graph.patch` and export it from that package. Bazel
+requires module-override patches to live in the root workspace, so a label
+pointing into `@dreamplace` is not accepted here. No overlay
+`packages/dreamplace.BUILD` is needed. The host retains its existing
+rules_cc, platforms, HHDS, HLOP, Abseil, iassert and emhash declarations. For a
+core-only consumer those HHDS dependencies are not needed. Enable CPU threading
+in a host with `--define=dreamplace_openmp=true`; only the standalone repository
+owns the convenient `--config=openmp` alias. If importing as a Bzlmod module
+instead, the root module must still apply the LEMON graph-target patch, since
+Bazel only honors version overrides from the root module.
+
+## Synthetic HHDS fixtures and visual debugging
+
+```sh
+# Generate and place all five fixtures, then export physical files and images.
+bazel run -c opt //dreamplace/native:synthetic_place -- --out results/synthetic
+
+# Compare against the random-start mesh using a mesh-shaped initial placement.
+bazel run -c opt //dreamplace/native:synthetic_place -- \
+  --case mesh-grid --out results/synthetic
+
+# Record actual iterates and create a local playback/seek viewer.
+bazel run -c opt //dreamplace/native:synthetic_place -- \
+  --case mesh-grid --animate --frame-step 20 --out results/synthetic
+
+# Increase the core area while keeping cell sizes, connectivity and solver settings.
+bazel run -c opt //dreamplace/native:synthetic_place -- \
+  --case mesh-grid --utilization 0.5 --animate --out results/synthetic-u50
+
+# Add row-aligned input/output pairs on the left/right sides of the grid mesh.
+bazel run -c opt //dreamplace/native:synthetic_place -- \
+  --case mesh-grid-io --utilization 0.45 --animate --out results/synthetic-u45
+
+# Select a fixture, change the seed, or increase the 4-way expansion depth.
+bazel run -c opt //dreamplace/native:synthetic_place -- \
+  --case tree --tree-depth 4 --seed 7 --out results/synthetic
+
+# Read an existing HHDS checkpoint instead of regenerating the connectivity.
+bazel run -c opt //dreamplace/native:synthetic_place -- \
+  --load results/synthetic/mesh_16x16/initial.hhds --out results/reloaded
+
+# Optional parallel CPU run.
+bazel run -c opt --config=openmp //dreamplace/native:synthetic_place -- \
+  --threads 4 --out results/synthetic-openmp
+```
+
+| Default fixture | Cells | Nets | Connectivity |
+| --- | ---: | ---: | --- |
+| `mesh_16x16` | 256 | 960 | Four nearest neighbors; bidirectional links; open grid boundaries |
+| `mesh_16x16_grid` | 256 | 960 | Same mesh, initialized as a regular grid instead of random positions |
+| `mesh_16x16_grid_io` | 256 | 992 | Same grid-start mesh plus 16 left inputs and 16 right outputs, one pair per logical row |
+| `torus_12x8` | 96 | 384 | Four nearest neighbors; bidirectional links; wraparound in both dimensions |
+| `tree_4to2_d3` | 148 | 212 | One input, three 4-way expansion levels (64 leaves), six pairwise reduction levels, one output |
+
+Each directed link is a separate two-pin net with unit weight. The tree's count
+includes its two IO nets. These fixtures exercise connectivity and placement;
+no timing model or STA dependency is needed. The tree has fixed zero-area IO
+anchors at the left/right die-edge midpoints (input/output), outside the 2um
+core margin. For the default tree these are (0, 11) and (32, 11) microns.
+The PNG shows the margin and labels these anchors IN/OUT; DEF exports fixed
+metal1 pin shapes extending inward from the die edges.
+`--mesh-width/--mesh-height`,
+`--torus-width/--torus-height`, and `--tree-depth` configure graph size. The
+original fixtures start at deterministic random positions independent of logical
+grid/tree coordinates. The additional `--case mesh-grid` uses logical row/column
+coordinates to seed an evenly spaced grid over the same core, with identical
+cell sizes and connectivity. Every cell remains movable; there are no persistent
+relative constraints. Its 16 columns of 2um cells slightly overlap in the 29um
+core, so final legalization can increase HPWL over that seed. Compare final
+legal placements between the two mesh cases. `--mesh-width/--mesh-height`
+configure both meshes; `_grid` keeps their output directories separate.
+`--case mesh-grid-io` adds one input net to each leftmost cell and one output
+net from each rightmost cell. The original mesh links, cell sizes, core and
+starting coordinates are preserved. Fixed zero-area pins `in_0..in_15` and
+`out_0..out_15` sit on the left/right die edges at matching initial row-center
+heights (row 0 at the bottom). There are no top/bottom pins. Dimensions control
+the pin count; each added two-pin IO net has unit weight. The `_grid_io`
+directory keeps this variant separate. The image labels each pin, and DEF
+preserves its declared HHDS name. All mesh cells remain movable.
+`--utilization` sets requested cell area / core area for generated fixtures
+(0.1..0.8, default 0.6), with site/row rounding. Lower values give more space;
+the default mesh grows from 29x30um to 32x32um at 0.5. Use a separate `--out`
+directory to retain comparisons. This is separate from the solver's 0.8 target
+density, which remains unchanged. Saved `--load` fixtures retain their floorplan.
+
+The fixture flow defaults to a 16x16 density grid, target density 0.8 and up to
+1,500 GP iterations, followed by legalization and detailed placement. This
+iteration budget lets all five default fixtures reach the 0.1 overflow goal;
+the library's general defaults are unchanged. `--iterations`, `--bins`, and
+`--threads` override the fixture settings. The output path is relative to the
+workspace when invoked with `bazel run`.
+
+The fixture CLI also exposes the library's existing GP controls:
+
+| Flag | Default | Effect |
+| --- | ---: | --- |
+| `--stop-overflow` | 0.1 | Lower values require less physical bin-density overflow before GP stops |
+| `--target-density` | 0.8 | Sets bin capacity and filler area; lower values encourage more whitespace |
+| `--density-weight` | 0.01 | Initial density-force multiplier, normalized against wirelength forces at startup |
+| `--max-step` | 0.5 | Bounds the step-size calculation relative to bin dimensions; Nesterov extrapolation also moves cells |
+
+`--iterations` is a budget, not a convergence guarantee; check `gp_converged`
+and `gp_overflow` in `qor.json`. These flags affect global placement. The native
+legalizer currently runs macro legalization, greedy cell packing, then Abacus
+within the rows chosen by greedy. Its packing preferences are inherited from
+upstream and are not exposed as a local repulsion or displacement-limit knob.
+The legacy Python flow separately exposes `abacus_legalize_flag`.
+
+Bin-density convergence does not imply nonoverlapping rectangles or legal
+row/site coordinates. The animation now reports physical overlapping pairs
+and their summed pairwise intersection area in its frames, viewer and CSV.
+Pairwise area is not union area; zero-area terminals and fixed-fixed pairs are
+excluded. This separates the remaining overlap from the density stopping test.
+A stricter example, retaining the baseline files, is:
+
+```sh
+bazel run -c opt //dreamplace/native:synthetic_place -- \
+  --case mesh-grid-io --utilization 0.45 --stop-overflow 0.02 \
+  --iterations 4000 --animate --frame-step 40 --out results/synthetic-stricter-long
+```
+
+Each fixture directory contains:
+
+- `initial.hhds/` and `placed.hhds/`: real HHDS libraries and a `fixture.txt`
+  manifest. A fixture-specific persisted node attribute stores coordinates,
+  logical provenance and placed status. It is separate from LiveHD's attrs.
+  The V3 manifest records side IO along with layout and initialization; saved
+  V1/V2 fixtures remain readable.
+- `cells.lef`: synthetic two-layer technology, a 1um site and one 2um by 1um
+  `SYNTH4` macro with physical `I0..I3` / `O0..O3` pin rectangles.
+- `placed.def`: die, rows, placed components, fixed IO and net connectivity at
+  1,000 DBU/um. LEF describes the library geometry; DEF carries the placement.
+- `placement.png`: 1600x900 comparison of initial seed and final placement,
+  with colors for logical grid columns or tree stages, unrouted net lines and
+  HPWL/convergence labels. The image uses the reloaded, placed HHDS checkpoint.
+- `positions.csv` and `qor.json`: individual coordinates and metrics/settings,
+  including the initialization mode and whether the initial placement was legal,
+  distinguishing GP overflow/convergence from final legality. `internal_hpwl`
+  excludes nets connected to top IO, and `io_hpwl` reports the remainder so the
+  additional IO nets do not obscure comparisons of the original mesh links.
+
+Before physical export, the flow saves/reloads the initial graph, places its
+arrays, writes coordinates back through the HHDS adapter, and saves/reloads
+the final graph. It checks coordinates, connectivity and legality after reload.
+The adapter now retains original pin handles alongside the flat pin arrays,
+allowing physical exporters to preserve port identities exactly.
+
+PNG rendering is native C++ with a small RGB rasterizer and PNG encoder using
+stored DEFLATE blocks. It introduces no image/compression library, Python,
+display server, or GPU dependency. Images are about 4.3 MB each. The fixture
+LEF/DEF writers deliberately support this one synthetic technology; a general
+LEF database or real technology export remains a separate integration task.
+
+With `--animate`, the flow also writes `animation.html`, `animation.csv`,
+`animation.ffconcat` and an `animation_frames/` directory of 800x450 PNGs
+(about 1.1 MB per frame). Open the HTML locally to play, pause, step or scrub
+through the actual iterates alongside the initial placement. Keep the frames
+directory with the HTML. GP is sampled every `--frame-step` iterations (20 by
+default), plus its last iteration and the initial, legalized, detailed and final
+states. Fillers are hidden. Phase changes pause longer; there is no position
+interpolation, and legalization/detailed placement each appear as one transition.
+The native trace/viewer has no new dependencies and observation does not change
+the placement result. The fixture's core observer API is also available to a host:
+
+```cpp
+options.observer_interval = 20;
+options.observer = [](const Design& physical, PlacementStage stage, int iteration) {
+  // Read-only physical state; copy positions here if retaining the snapshot.
+};
+```
+
+An already-installed FFmpeg can optionally turn these frames into a portable
+video or GIF; it is not a Bazel or native runtime dependency:
+
+```sh
+ffmpeg -safe 0 -i results/synthetic/mesh_16x16_grid/animation.ffconcat \
+  -vf fps=20 -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
+  results/synthetic/mesh_16x16_grid/placement.mp4
+ffmpeg -safe 0 -i results/synthetic/mesh_16x16_grid/animation.ffconcat \
+  -filter_complex 'fps=10,split[a][b];[a]palettegen[p];[b][p]paletteuse' \
+  -loop 0 results/synthetic/mesh_16x16_grid/placement.gif
+```
+
+`synthetic_mesh_test`, `synthetic_mesh_grid_test`, `synthetic_mesh_grid_io_test`,
+`synthetic_torus_test`, and `synthetic_tree_test` run
+the complete flow. They check exact topology (including torus wraparound),
+reachability, checkpoint persistence, GP convergence, legal placement, HPWL
+improvement over random seeds, grid seed ordering/alignment, per-row IO connectivity,
+fixed side anchors and exported component/pin/net identities.
+The DEF subset is independently read back in the tests. The initial generated
+LEF/DEF files have also been parsed with the independent Si2 5.8 readers in the
+sibling LiveHD checkout; these readers are not build dependencies here.
+
+## Validation and remaining integration work
+
+The tests cover weighted wirelength finite differences, Poisson eigenmodes,
+exact HPWL, malformed CSR, locked/fixed obstacles and terminals, deterministic
+serial runs, threaded runs, GP-only and legalization-only modes, multi-row
+macros, negative core origins, failed legalization without partial writeback,
+and export/place/writeback of a persisted HHDS graph. The direct macro LP is
+checked against exhaustive integer optima for small problems.
+
+This fork supplies the native engine, adapter and synthetic debug flow. LiveHD
+still owns production technology LEF/DEF integration, floorplan generation, IO
+slot assignment, orientations, STA/RC integration and incremental cache policy.
+No stock-DREAMPlace benchmark QoR parity or large-design scalability is claimed
+by these tests.

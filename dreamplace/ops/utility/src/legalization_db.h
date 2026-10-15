@@ -54,7 +54,7 @@ struct LegalizationDB {
   /// legalization.
   inline bool is_dummy_fixed(int node_id) const {
 #ifdef DEBUG
-    dreamplaceAssert(node_id < db.num_nodes);
+    dreamplaceAssert(node_id < num_nodes);
 #endif
     T height = node_size_y[node_id];
     return (node_id < num_movable_nodes &&
@@ -77,7 +77,7 @@ struct LegalizationDB {
     return legalityCheckKernelCPU(
         x, y, node_size_x, node_size_y, flat_region_boxes,
         flat_region_boxes_start, node2fence_region_map, xl, yl, xh, yh,
-        site_width, row_height, num_nodes, num_movable_nodes, num_regions);
+        site_width, row_height, T(1), num_nodes, num_movable_nodes, num_regions);
   }
 };
 
