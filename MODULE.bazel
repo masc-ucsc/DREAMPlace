@@ -4,9 +4,10 @@ module(
 )
 
 bazel_dep(name = "rules_cc", version = "0.2.25")
+bazel_dep(name = "rapidjson", version = "1.1.0.bcr.20250205")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "openmp", version = "21.1.5.bcr.3")
-bazel_dep(name = "coin-or-lemon", version = "1.3.1.bcr.1")
+bazel_dep(name = "coin-or-lemon", version = "1.3.1.bcr.1", repo_name = "dreamplace_lemon")
 
 # The registered :lemon target includes GLPK. Placement needs only graph
 # algorithms and network simplex. Keep the registry source/compatibility

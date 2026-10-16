@@ -3,7 +3,8 @@
 #include <iostream>
 #include <limits>
 
-#include "macro_legalize/src/native_lp.h"
+#include "utility/src/legalization_db.h"
+#include "macro_legalize/src/lp_legalize.h"
 
 int main() {
   using LP = DreamPlace::MacroDifferenceLP;
@@ -28,6 +29,24 @@ int main() {
         return 1;
       }
     }
+  // X has a valid displacement solution, but Y has infeasible bounds.
+  // A failed heuristic LP must leave BOTH coordinates intact so the macro
+  // launcher's grid fallback starts from the same placement.
+  double x = -2, y = 1, anchor_x = 3, anchor_y = 1, width = 4, height = 12;
+  DreamPlace::LegalizationDB<double> db{};
+  db.x = &x;
+  db.y = &y;
+  db.init_x = &anchor_x;
+  db.init_y = &anchor_y;
+  db.node_size_x = &width;
+  db.node_size_y = &height;
+  db.xl = db.yl = 0;
+  db.xh = db.yh = 10;
+  DreamPlace::lpLegalizeGraphLauncher(db, {0}, {});
+  if (x != -2 || y != 1) {
+    std::cerr << "infeasible macro LP partially changed coordinates\n";
+    return 1;
+  }
   LP bad;
   bad.lower = {0, 0};
   bad.upper = {1, 1};
@@ -35,7 +54,7 @@ int main() {
   bad.constraints = {{0, 1, -2}};
   try {
     bad.solve();
-  } catch (const std::runtime_error&) {
+  } catch (const DreamPlace::MacroLPInfeasible&) {
     return 0;
   }
   std::cerr << "infeasible macro LP accepted\n";

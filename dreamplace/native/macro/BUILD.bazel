@@ -1,0 +1,239 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "check",
+    srcs = ["check.cpp"],
+    hdrs = ["check.hpp"],
+    deps = ["//dreamplace/native:placer"],
+)
+
+cc_test(
+    name = "check_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["check_test.cpp"],
+    deps = [":check"],
+)
+
+cc_library(
+    name = "topology",
+    srcs = [
+        "parameters.cpp",
+        "topology.cpp",
+    ],
+    hdrs = [
+        "parameters.hpp",
+        "params.def",
+        "topology.hpp",
+    ],
+    deps = ["//dreamplace/native:placer"],
+)
+
+cc_library(
+    name = "diff_lp",
+    srcs = ["diff_lp.cpp"],
+    hdrs = ["diff_lp.hpp"],
+    deps = ["@dreamplace_lemon//:graph"],
+)
+
+cc_test(
+    name = "diff_lp_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["diff_lp_test.cpp"],
+    deps = [
+        ":diff_lp",
+        "//dreamplace/ops:native_kernels",
+    ],
+)
+
+cc_library(
+    name = "abstract",
+    srcs = ["abstract.cpp"],
+    hdrs = ["abstract.hpp"],
+    deps = [":topology"],
+)
+
+cc_test(
+    name = "abstract_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["abstract_test.cpp"],
+    deps = [":abstract"],
+)
+
+cc_library(
+    name = "compact",
+    srcs = ["compact.cpp"],
+    hdrs = ["compact.hpp"],
+    deps = [
+        ":abstract",
+        ":check",
+        ":diff_lp",
+        ":packing",
+    ],
+)
+
+cc_library(
+    name = "dataflow",
+    srcs = ["dataflow.cpp"],
+    hdrs = ["dataflow.hpp"],
+    deps = [":topology"],
+)
+
+cc_library(
+    name = "seed",
+    srcs = ["seed.cpp"],
+    hdrs = ["seed.hpp"],
+    deps = [":dataflow"],
+)
+
+cc_library(
+    name = "hierarchy",
+    srcs = ["hierarchy.cpp"],
+    hdrs = ["hierarchy.hpp"],
+    deps = [
+        ":seed",
+        "@hhds//hhds:graph",
+    ],
+)
+
+cc_library(
+    name = "toposearch",
+    srcs = ["toposearch.cpp"],
+    hdrs = ["toposearch.hpp"],
+    deps = [":compact"],
+)
+
+cc_library(
+    name = "h2d",
+    srcs = ["h2d.cpp"],
+    hdrs = ["h2d.hpp"],
+    deps = [
+        ":fillers",
+        ":seed",
+        ":toposearch",
+    ],
+)
+
+cc_library(
+    name = "report",
+    srcs = ["report.cpp"],
+    hdrs = ["report.hpp"],
+    deps = [
+        ":h2d",
+        "@rapidjson",
+    ],
+)
+
+cc_test(
+    name = "h2d_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["h2d_test.cpp"],
+    deps = [
+        ":check",
+        ":h2d",
+        ":report",
+    ],
+)
+
+cc_test(
+    name = "dataflow_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["dataflow_test.cpp"],
+    deps = [":dataflow"],
+)
+
+cc_test(
+    name = "hierarchy_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["hierarchy_test.cpp"],
+    deps = [":hierarchy"],
+)
+
+cc_library(
+    name = "render",
+    srcs = ["render.cpp"],
+    hdrs = ["render.hpp"],
+    deps = [":topology"],
+)
+
+cc_test(
+    name = "render_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["render_test.cpp"],
+    deps = [":render"],
+)
+
+cc_test(
+    name = "compact_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["compact_test.cpp"],
+    deps = [
+        ":compact",
+        ":seed",
+    ],
+)
+
+cc_test(
+    name = "h2d_scenarios_smoke",
+    size = "small",
+    timeout = "short",
+    srcs = ["h2d_scenarios_smoke.cpp"],
+    deps = [
+        ":check",
+        ":h2d",
+    ],
+)
+
+filegroup(
+    name = "h2d_srcs",
+    srcs = glob(
+        [
+            "*.cpp",
+            "*.hpp",
+            "*.def",
+        ],
+        exclude = [
+            "*_test.cpp",
+            "*_smoke.cpp",
+        ],
+    ),
+)
+
+cc_library(
+    name = "packing",
+    srcs = ["packing.cpp"],
+    hdrs = ["packing.hpp"],
+    deps = [":check"],
+)
+
+cc_test(
+    name = "packing_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["packing_test.cpp"],
+    deps = [":packing"],
+)
+
+cc_library(
+    name = "fillers",
+    srcs = ["fillers.cpp"],
+    hdrs = ["fillers.hpp"],
+    deps = ["//dreamplace/native:placer"],
+)
+
+cc_test(
+    name = "fillers_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["fillers_test.cpp"],
+    deps = [":fillers"],
+)

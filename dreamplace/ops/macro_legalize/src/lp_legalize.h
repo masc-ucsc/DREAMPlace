@@ -10,6 +10,8 @@
 #include <vector>
 #include <array>
 #include <functional>
+#include <deque>
+#include <numeric>
 #ifdef DREAMPLACE_TORCH_FREE
 #include "macro_legalize/src/native_lp.h"
 #else
@@ -549,37 +551,48 @@ void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macro
     std::array<lemon::ListDigraph, 2> cg;
     unsigned int source, terminal;
     longestPathLegalizeLauncher(db, macros, fixed_macros, cg, source, terminal);
-    for (int xy = 0; xy < 2; ++xy) {
-        const T* pos = xy == kX ? db.x : db.y;
-        const T* init = xy == kX ? db.init_x : db.init_y;
-        const T* size = xy == kX ? db.node_size_x : db.node_size_y;
-        T lo = xy == kX ? db.xl : db.yl, hi = xy == kX ? db.xh : db.yh;
-        MacroDifferenceLP lp;
-        for (auto id : macros) {
-            lp.lower.push_back(MacroDifferenceLP::coordinate(std::ceil(lo)));
-            lp.upper.push_back(MacroDifferenceLP::coordinate(std::floor(hi-size[id])));
-            lp.anchor.push_back(MacroDifferenceLP::coordinate(std::round(init[id])));
-        }
-        for (lemon::ListDigraph::ArcIt a(cg[xy]); a != lemon::INVALID; ++a) {
-            unsigned int v = cg[xy].id(cg[xy].source(a));
-            unsigned int u = cg[xy].id(cg[xy].target(a));
-            if (v < macros.size()) {
-                if (u < macros.size()) {
-                    // x_v + width_v <= x_u.
-                    lp.constraints.push_back({static_cast<int>(u), static_cast<int>(v),
-                        MacroDifferenceLP::coordinate(-size[macros[v]])});
-                } else if (u != source && u != terminal) {
-                    lp.upper[v] = std::min(lp.upper[v], MacroDifferenceLP::coordinate(
-                        std::floor(pos[fixed_macros.at(u-macros.size())]-size[macros[v]])));
-                }
-            } else if (v != source && v != terminal && u < macros.size()) {
-                int fixed = fixed_macros.at(v-macros.size());
-                lp.lower[u] = std::max(lp.lower[u], MacroDifferenceLP::coordinate(std::ceil(pos[fixed]+size[fixed])));
+    // Separation directions are heuristic. Infeasibility of this graph does
+    // not imply the floorplan cannot be packed. Leave both axes untouched so
+    // the caller can use its existing full Hannan-grid legalization fallback.
+    std::array<std::vector<MacroDifferenceLP::Int>, 2> result;
+    try {
+        for (int xy = 0; xy < 2; ++xy) {
+            const T* pos = xy == kX ? db.x : db.y;
+            const T* init = xy == kX ? db.init_x : db.init_y;
+            const T* size = xy == kX ? db.node_size_x : db.node_size_y;
+            T lo = xy == kX ? db.xl : db.yl, hi = xy == kX ? db.xh : db.yh;
+            MacroDifferenceLP lp;
+            for (auto id : macros) {
+                lp.lower.push_back(MacroDifferenceLP::coordinate(std::ceil(lo)));
+                lp.upper.push_back(MacroDifferenceLP::coordinate(std::floor(hi-size[id])));
+                lp.anchor.push_back(MacroDifferenceLP::coordinate(std::round(init[id])));
             }
+            for (lemon::ListDigraph::ArcIt a(cg[xy]); a != lemon::INVALID; ++a) {
+                unsigned int v = cg[xy].id(cg[xy].source(a));
+                unsigned int u = cg[xy].id(cg[xy].target(a));
+                if (v < macros.size()) {
+                    if (u < macros.size()) {
+                        // x_v + width_v <= x_u.
+                        lp.constraints.push_back({static_cast<int>(u), static_cast<int>(v),
+                            MacroDifferenceLP::coordinate(-size[macros[v]])});
+                    } else if (u != source && u != terminal) {
+                        lp.upper[v] = std::min(lp.upper[v], MacroDifferenceLP::coordinate(
+                            std::floor(pos[fixed_macros.at(u-macros.size())]-size[macros[v]])));
+                    }
+                } else if (v != source && v != terminal && u < macros.size()) {
+                    int fixed = fixed_macros.at(v-macros.size());
+                    lp.lower[u] = std::max(lp.lower[u], MacroDifferenceLP::coordinate(std::ceil(pos[fixed]+size[fixed])));
+                }
+            }
+            result[xy] = lp.solve();
         }
-        auto result = lp.solve();
+    } catch (const MacroLPInfeasible& error) {
+        dreamplacePrint(kWARN, "Macro LP: %s; retaining coordinates for grid legalization\n", error.what());
+        return;
+    }
+    for (int xy = 0; xy < 2; ++xy) {
         T* output = xy == kX ? db.x : db.y;
-        for (size_t i = 0; i < macros.size(); ++i) output[macros[i]] = result[i];
+        for (size_t i = 0; i < macros.size(); ++i) output[macros[i]] = result[xy][i];
     }
 }
 

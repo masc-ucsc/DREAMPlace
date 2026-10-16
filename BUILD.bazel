@@ -13,3 +13,27 @@ alias(
 )
 
 exports_files(["LICENSE"])
+
+alias(
+    name = "macro_place",
+    actual = "//dreamplace/native/macro:h2d",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "macro_hhds",
+    actual = "//dreamplace/native/macro:hierarchy",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "macro_report",
+    actual = "//dreamplace/native/macro:report",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "macro_render",
+    actual = "//dreamplace/native/macro:render",
+    visibility = ["//visibility:public"],
+)

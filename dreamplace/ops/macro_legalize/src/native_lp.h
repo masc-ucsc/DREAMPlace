@@ -13,6 +13,11 @@
 
 DREAMPLACE_BEGIN_NAMESPACE
 
+class MacroLPInfeasible : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
 // The macro LP is a difference-constrained L1 problem, not a general LP:
 //   minimize sum_i |x_i - anchor_i| subject to x_v - x_u <= bound.
 // Its dual is a min-cost circulation. Each difference constraint is an
@@ -52,7 +57,7 @@ class MacroDifferenceLP {
       caps[a] = cap;
     };
     for (int i = 0; i < n; ++i) {
-      if (lower[i] > upper[i]) throw std::runtime_error("infeasible macro bounds");
+      if (lower[i] > upper[i]) throw MacroLPInfeasible("infeasible macro bounds");
       arc(n, i, upper[i], inf);
       arc(i, n, -lower[i], inf);
       arc(n, i, anchor[i], 1);
@@ -64,7 +69,7 @@ class MacroDifferenceLP {
     }
     Solver solver(graph);
     if (solver.upperMap(caps).costMap(costs).run() != Solver::OPTIMAL)
-      throw std::runtime_error("macro separation constraints are infeasible");
+      throw MacroLPInfeasible("macro separation constraints are infeasible");
     std::vector<Int> x(n);
     for (int i = 0; i < n; ++i) {
       x[i] = solver.potential(nodes[i]) - solver.potential(nodes[n]);

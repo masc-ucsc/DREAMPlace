@@ -86,6 +86,15 @@ void legalize(Design& d, int bx, int by) {
   db.num_nodes = ix.size();
   db.num_movable_nodes = d.num_movable;
   if (!macroLegalizationLauncher(db)) throw std::runtime_error("DREAMPlace macro legalization failed");
+  // Greedy's fixed-obstacle bins and row blanks are built from init_x/y.
+  // Macros have just moved: reserve their legalized footprints, while keeping
+  // the original standard-cell anchors for the displacement objective.
+  for (int i = 0; i < d.num_movable; ++i) {
+    if (db.is_dummy_fixed(i)) {
+      ix[i] = d.node_x[i];
+      iy[i] = d.node_y[i];
+    }
+  }
   greedyLegalizationCPU(db, db.init_x, db.init_y, db.node_size_x, db.node_size_y, db.x, db.y, db.xl, db.yl, db.xh,
                         db.yh, db.site_width, db.row_height, bx, by, db.num_nodes, db.num_movable_nodes);
   // Abacus operates within the rows established by greedy legalization.

@@ -38,6 +38,7 @@ cc_library(
             "global_swap/src/*.h",
             "independent_set_matching/src/*.h",
             "electric_potential/src/*.h",
+            "rudy/src/parameters.h",
         ],
         exclude = [
             "utility/src/torch.h",
@@ -63,7 +64,7 @@ cc_library(
     }),
     defines = ["DREAMPLACE_TORCH_FREE"],
     includes = ["."],
-    deps = ["@coin-or-lemon//:graph"] + select({
+    deps = ["@dreamplace_lemon//:graph"] + select({
         ":openmp": ["@openmp"],
         "//conditions:default": [],
     }),

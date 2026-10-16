@@ -177,6 +177,8 @@ bool overlapCheck(const T* node_size_x, const T* node_size_y, const T* x,
 
   // add a box to row
   auto addBox2Row = [&](int id, T bxl, T byl, T bxh, T byh) {
+    // IO terminals have no area, even when they lie inside a row.
+    if (bxh <= bxl || byh <= byl) return;
     int row_idxl = floorDiv(byl - yl, row_height);
     int row_idxh = ceilDiv(byh - yl, row_height);
     row_idxl = std::max(row_idxl, 0);

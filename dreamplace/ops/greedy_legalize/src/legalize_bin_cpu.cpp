@@ -321,4 +321,15 @@ void instantiateLegalizeBinCPU(
             );
 }
 
+// Explicit instantiations: an optimizing build inlines legalizeBinCPU into
+// the wrappers above and emits no out-of-line copy for greedy_legalize_cpu.cpp.
+#define DREAMPLACE_INSTANTIATE_LEGALIZE_BIN(T)                                  \
+  template void legalizeBinCPU<T>(                                             \
+      const T*, const T*, const T*, const T*,                                  \
+      std::vector<std::vector<Blank<T> > >&, std::vector<std::vector<int> >&,  \
+      T*, T*, int, int, int, T, T, T, T, T, T, T, T, T, T, T, bool, int*);
+DREAMPLACE_INSTANTIATE_LEGALIZE_BIN(float)
+DREAMPLACE_INSTANTIATE_LEGALIZE_BIN(double)
+#undef DREAMPLACE_INSTANTIATE_LEGALIZE_BIN
+
 DREAMPLACE_END_NAMESPACE

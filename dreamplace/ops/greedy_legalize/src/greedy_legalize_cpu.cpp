@@ -253,4 +253,16 @@ int instantiateGreedyLegalizationCPU(
             );
 }
 
+// Explicit instantiations: an optimizing build inlines greedyLegalizationCPU
+// into the wrappers above and emits no out-of-line copy, which the torch-free
+// native placer (native/kernels.cpp) links against.
+#define DREAMPLACE_INSTANTIATE_GREEDY_LEGALIZATION(T)                          \
+  template int greedyLegalizationCPU<T>(                                       \
+      const LegalizationDB<T>&, const T*, const T*, const T*, const T*, T*, T*, \
+      const T, const T, const T, const T, const T, const T, int, int,          \
+      const int, const int);
+DREAMPLACE_INSTANTIATE_GREEDY_LEGALIZATION(float)
+DREAMPLACE_INSTANTIATE_GREEDY_LEGALIZATION(double)
+#undef DREAMPLACE_INSTANTIATE_GREEDY_LEGALIZATION
+
 DREAMPLACE_END_NAMESPACE

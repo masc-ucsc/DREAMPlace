@@ -41,6 +41,7 @@ selects Command Line Tools instead of discovering an unrelated Xcode install.
 | coin-or-lemon 1.3.1.bcr.1 | Bazel Central Registry | Macro difference-constraint LP, network simplex |
 | openmp 21.1.5.bcr.3 | Bazel Central Registry | Optional CPU threading |
 | HHDS, HLOP, iassert, emhash | Pinned masc-ucsc/upstream revisions in `MODULE.bazel` | HHDS adapter only |
+| RapidJSON | Bazel Central Registry | Optional H2D report/cache target only |
 | Abseil | Bazel Central Registry | HHDS/HLOP public API |
 | FLUTE | Already vendored, separate `//thirdparty/flute:flute` target | Future parasitic estimator |
 
@@ -74,9 +75,24 @@ Include `dreamplace/native/placement.hpp` and construct a `Design`:
 All coordinates, dimensions and pin offsets use the same unit. Use integer
 DBU for mixed-size placement: macro LP coefficients and displacement anchors
 are rounded to integer units, as in upstream. Pin offsets must already reflect
-cell orientation; the placer does not rotate cells. Movable cell dimensions
-are integral numbers of sites and rows. Zero-area terminals have no density
+cell orientation; the placer does not rotate cells. Movable dimensions need
+not be integral site/row multiples. Macro legalization uses private conservative
+site/row-rounded occupancy envelopes; physical dimensions and pin offsets remain
+unchanged. Movable origins are still aligned to sites/rows. Zero-area terminals have no density
 or overlap contribution, and their positions are preserved exactly.
+
+Optional `node_halo_x/y` arrays reserve clearance per side in the same layout
+units. An empty array means zero clearance; otherwise it must contain one finite,
+nonnegative value per node. Zero-area terminals cannot have positive halos.
+Clearance rounds up to site/row pitches. Placement uses a private padded design
+for density, legalization and detail, shifting pin offsets to preserve physical
+pin locations. Physical sizes and pin offsets remain unchanged in the caller's
+design and observer snapshots. Fixed coordinates remain exact. `is_legal()` checks
+padded occupancy when halos are present, and HPWL uses physical pins. The host
+chooses which nodes receive halos; LiveHD applies its global option only to
+non-CORE LEF macros. If heuristic macro separation constraints are infeasible,
+the native LP leaves both axes unchanged and allows the existing Hannan-grid
+fallback to run; infeasibility of that graph is not proof the core cannot fit.
 
 ```cpp
 DreamPlace::native::Design design;
@@ -91,6 +107,62 @@ const auto result = placer.place(design);
 // design.node_x/y now hold the placed coordinates.
 ```
 
+The H2D foundations are available without changing the existing placement flow:
+
+- `Design::node_orientation` optionally records N/FN/FS/S. Empty means N, and
+  `pin_offset_x/y` always hold offsets in the current orientation. Explicit
+  `set_orientation()` transforms from the old orientation, preserves dimensions
+  and origins, and leaves invalid inputs untouched. `place()` does not select
+  orientations. Callers supply LEF symmetry restrictions when choosing flips.
+- `Options::seed` controls filler initialization; its default remains the
+  historical 1000. Changing it does not change fixed coordinates.
+- `macro/check.hpp` checks an explicit macro subset, including fixed-fixed
+  overlap, site/row pitch and halo-expanded core bounds. This complements the
+  existing general placement checker; it does not silently move illegal objects.
+- `rudy.hpp` measures directional routing utilization and mean bin overflow
+  without Torch, graph dependencies, placement edits or cell inflation. Track
+  capacities use tracks per layout unit. It uses the existing WDM degree weights,
+  physical pins and net masks. Zero-area net bboxes contribute zero under the
+  upstream projected-box formula and are counted separately, so this estimate
+  does not capture demand from those nets.
+
+The full opt-in H2D engine is available through `//:macro_place`; the separate
+`//:macro_hhds` target supplies hierarchy, array tiling, native register-hop
+dataflow and the seed. `//:macro_report` and `//:macro_render` handle JSON and
+PNG output. The core target remains HHDS- and JSON-free.
+
+```cpp
+#include "dreamplace/native/macro/h2d.hpp"
+namespace macro = DreamPlace::native::macro;
+macro::Parameters parameters;
+parameters.K = 4;
+parameters.search = "lite"; // or "none", "sa"
+std::vector<macro::NodeInfo> names; // one entry per physical node
+// Fill names from stable hierarchical paths, geometry/master classification,
+// sequential/IO classification and technology orientation masks.
+macro::Topology guidance; // optional typed groups/constraints
+const auto result = macro::place_h2d(design, names, parameters, guidance);
+```
+
+H2D runs grouped GP, GroupLegalize, physical HPWL Compact, optional sequence-pair
+search and a fixed-macro cells pass. It keeps the best legal iteration, honors
+fixed geometry and transforms pins on flips. Pseudo-nets use hierarchy dataflow
+and refreshed cluster centroids; they never enter the final physical netlist.
+RUDY-based standard-cell density inflation is separately opt-in. The trimmed
+standard-cell filler width is H2D-only; regular placement defaults are unchanged.
+
+`Design::node_boxes` and `order_edges` are shared GP hooks. The optional third
+`place(design, options, &state)` argument accepts a `GpState` continuation with
+full momentum, BB/density history and filler state. Use `schedule_iterations`
+for a fixed schedule when splitting a GP run into checkpoints. Incompatible
+solver geometry/connectivity is rejected without changing the design or state.
+
+LiveHD enables this with `synth.place.macro=h2d`, exposes every parameter under
+`synth.place.macro.*` and writes `macro_topology.json` plus `h2d.png` under its
+placement workdir. JSON is output/cache only; future hierarchy attributes will
+supply user guidance through the typed seam. See [`h2d_todo.md`](../../h2d_todo.md)
+for stages, controls, units, validation and pending external QoR evaluation.
+
 `Placer` owns its typed `Options`; hosts can configure an instance once, change
 its options between calls, or create multiple independently configured instances.
 An existing `Options` value can also be passed to `Placer(options)` or assigned
@@ -100,7 +172,8 @@ call `apply_positions(exported, writer)` as below.
 
 This is a reusable configuration object: each call starts fresh solver scratch
 state from the supplied coordinates. It does not retain optimization momentum
-or provide incremental-placement caches. The free function
+or provide incremental-placement caches. Explicit `GpState` continuation is a
+separate opt-in API. The free function
 `place(design, options)` remains available. Both APIs expose all current native
 controls in `Options`; upstream Python-only knobs require a native implementation
 before they can be added here. No CLI, JSON, Python or file I/O is required.
@@ -437,3 +510,71 @@ still owns production technology LEF/DEF integration, floorplan generation, IO
 slot assignment, orientations, STA/RC integration and incremental cache policy.
 No stock-DREAMPlace benchmark QoR parity or large-design scalability is claimed
 by these tests.
+
+### Soft color cohesion
+
+`Design::cohesion_groups` describes disjoint groups of physical nodes (for
+example, one synthesis color in one instance scope). A group's `weight`
+defaults to one. `Options::cohesion_weight` defaults to zero, preserving ordinary
+GP exactly. Positive values enable a soft, translation-invariant objective:
+
+```
+E = lambda(t) * sum_g weight_g / area_g * sum_i area_i * |center_i - centroid_g|^2
+```
+
+Centroids are area weighted and recomputed at the current Nesterov evaluation
+positions each iteration. Lambda ramps linearly from zero to `cohesion_weight`
+over the existing GP schedule. The coefficient has inverse-coordinate units
+(use coefficient/DBU-per-micron when specifying it in inverse microns). Node
+centers and physical areas are used; halo padding preserves both the physical
+centers and area weights. Fillers and zero-area terminals are excluded. Fixed
+members can contribute to a centroid but remain fixed. Singleton groups have
+zero energy. A node can belong to at most one group.
+
+There are no group boxes, projections, fixed centroid terminals, or changes to
+macro/cell legalization. Group processing is linear in membership count (a
+centroid accumulation and a gradient pass). Continuation validates membership,
+weights and the coefficient along with the existing GP state identity.
+
+### Repulsion controls (all opt-in)
+
+`Design::node_macro` identifies non-standard-cell macros independently of row
+height. `automatic_bins` resolves a 32–64 power-of-two grid from the smallest
+physical macro dimension before halo padding (four mean cell pitches when no
+macros are identified). `exact_macro_density` removes macro smoothing; standard
+cells retain the sqrt(2)-bin floor. The Poisson solver still uses the existing
+separable direct DCT loops; no FFT dependency is introduced.
+
+`scale_macro_density` charges movable macros at `target_density`, uses that
+same charge in exact overflow, and adjusts filler area consistently. Without
+this correction an isolated resolved macro at density 1 intrinsically violates
+any target below 1, so raw density overflow is not a macro-overlap count.
+`GpSample::raw_overflow` retains the legacy metric for comparison.
+
+`macro_overlap_weight` adds `weight * intersection_area^2 / min_area^1.5`
+for spatially hashed macro pairs on halo-padded occupancy boxes. Normalization
+makes the weight independent of caller coordinate units. Equal edges choose a
+deterministic separating subgradient. `macro_jitter` is a seeded fractional
+macro-size initial offset, projected into bounds, and does not alter filler RNG.
+Fixed objects never move. As with an exact intersection-area objective generally,
+strict containment has locally flat directions; the term is not a legalizer.
+
+`adaptive_density` uses 20-iteration overflow progress to choose 1.4× growth
+when improvement is below 5%, otherwise 1.05×; 20% window HPWL growth acts only
+as a brake. `max_iterations` remains the explicit safety cap. `history` and an
+optional synchronous `progress_observer` expose progress, macro overlaps,
+near-coincident center pairs, density weights and inflation. `poisson_seconds`
+measures direct transform solve time, excluding wirelength and legalization.
+Continuation state retains feedback history and new objective controls are
+included in the continuation signature.
+
+For an opt-in replacement of the original routability update, combine
+`routability` with `improved_routability`. It starts below 0.3 physical overflow,
+retains inflation monotonically, limits each update to 5% of movable area, and
+reduces the effective target density with accumulated inflation. Macro/fixed charges and the filler-charge budget are rebalanced at that density; shifting only the uniform target would not change Poisson forces. Only nodes in
+`node_inflatable` can inflate. Directional capacity is tracks per layout unit.
+`node_blocked_capacity_h/v` supplies the sum of capacities on each macro's OBS
+layers; the model conservatively blocks each such layer across the full macro
+occupancy envelope. A 1% capacity floor keeps fully blocked bins finite.
+`RudyOptions::pin_access` estimates macro signal-pin demand against available
+tracks at bin edges. These estimates are not a detailed router or signoff model.

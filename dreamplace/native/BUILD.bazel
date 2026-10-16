@@ -5,14 +5,21 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "placer",
     srcs = [
+        "cohesion.cpp",
         "density_force.cpp",
         "density_map.cpp",
         "kernels.cpp",
+        "orientation.cpp",
         "placement.cpp",
+        "rudy.cpp",
+        "repulsion.cpp",
         "spectral.cpp",
     ],
     hdrs = [
+        "constraints.hpp",
+        "orientation.hpp",
         "placement.hpp",
+        "rudy.hpp",
         "spectral.hpp",
     ],
     copts = select({
@@ -97,4 +104,64 @@ cc_test(
     timeout = "short",
     srcs = ["macro_lp_test.cpp"],
     deps = ["//dreamplace/ops:native_kernels"],
+)
+
+cc_test(
+    name = "orientation_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["orientation_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "rudy_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["rudy_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "gp_hooks_smoke",
+    size = "small",
+    timeout = "short",
+    srcs = ["gp_hooks_smoke.cpp"],
+    deps = [":placer"],
+)
+
+filegroup(
+    name = "placer_srcs",
+    srcs = [
+        "cohesion.cpp",
+        "constraints.hpp",
+        "density_force.cpp",
+        "density_map.cpp",
+        "kernels.cpp",
+        "orientation.cpp",
+        "orientation.hpp",
+        "placement.cpp",
+        "placement.hpp",
+        "rudy.cpp",
+        "repulsion.cpp",
+        "rudy.hpp",
+        "spectral.cpp",
+        "spectral.hpp",
+    ],
+)
+
+cc_test(
+    name = "cohesion_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["cohesion_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "repulsion_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["repulsion_test.cpp"],
+    deps = [":placer"],
 )
