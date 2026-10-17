@@ -8,6 +8,7 @@
 #include <limits>
 #include <numeric>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -121,6 +122,17 @@ void options_check(const Options &o) {
               finite(o.macro_jitter) && o.macro_jitter >= 0 &&
               o.macro_jitter <= .1,
           "invalid macro repulsion controls");
+  require(
+      finite(o.macro_align_weight) && o.macro_align_weight >= 0 &&
+          finite(o.macro_align_sigma) && o.macro_align_sigma >= 0 &&
+          finite(o.macro_align_overlap_boost) &&
+          o.macro_align_overlap_boost >= 0 &&
+          (!o.macro_align_weight || (o.macro_align_start >= 0 &&
+                                     o.macro_align_start < o.macro_align_full)),
+      "invalid macro alignment controls");
+  require(finite(o.macro_snap_tolerance) && o.macro_snap_tolerance >= 0 &&
+              o.macro_snap_weight > 0 && o.macro_snap_weight <= 1000000,
+          "invalid macro snap controls");
   require(finite(o.cohesion_weight) && o.cohesion_weight >= 0,
           "invalid cohesion weight");
   require(!o.observer || o.observer_interval > 0,
@@ -263,6 +275,11 @@ void Design::validate() const {
                              [](double v) { return finite(v) && v >= 0; })),
             "invalid macro blocked capacity");
   }
+  require(node_align_class.empty() ||
+              (node_align_class.size() == node_x.size() &&
+               std::all_of(node_align_class.begin(), node_align_class.end(),
+                           [](int v) { return v >= -1; })),
+          "invalid macro alignment classes");
   require(node_macro.empty() || node_macro.size() == node_x.size(),
           "macro mask size mismatch");
   require(std::all_of(node_macro.begin(), node_macro.end(),
@@ -318,6 +335,45 @@ void Design::validate() const {
     }
   }
   std::vector<bool> grouped(node_x.size(), false);
+  require(centroid_targets.empty() ||
+              centroid_targets.size() == centroid_groups.size(),
+          "centroid target size mismatch");
+  for (auto [x, y] : centroid_targets)
+    require(finite(x) && finite(y), "nonfinite frozen centroid target");
+  if (!centroid_groups.empty()) {
+    require(centroid_node_area.size() == node_x.size() &&
+                node_centroid_color.size() == node_x.size(),
+            "centroid physical area/color metadata size mismatch");
+    std::vector<bool> populated(centroid_color_names.size(), false);
+    for (size_t n = 0; n < node_x.size(); ++n) {
+      require(finite(centroid_node_area[n]) && centroid_node_area[n] >= 0,
+              "invalid centroid physical area");
+      const int c = node_centroid_color[n];
+      require(c >= -1 && c < static_cast<int>(centroid_color_names.size()) &&
+                  (c < 0 || centroid_node_area[n] > 0),
+              "invalid centroid color identity");
+      if (c >= 0)
+        populated[c] = true;
+    }
+    for (size_t g = 0; g < centroid_groups.size(); ++g) {
+      const auto &group = centroid_groups[g];
+      require(group.parent >= -1 && group.parent < static_cast<int>(g) &&
+                  group.family >= 0,
+              "invalid centroid family/parent");
+      require(!group.nodes.empty() || !group.colors.empty(),
+              "empty centroid group");
+      std::set<int> nodes, colors;
+      for (int n : group.nodes)
+        require(n >= 0 && n < static_cast<int>(node_x.size()) &&
+                    nodes.insert(n).second && node_centroid_color[n] < 0 &&
+                    centroid_node_area[n] > 0,
+                "invalid or duplicate uncolored centroid member");
+      for (int c : group.colors)
+        require(c >= 0 && c < static_cast<int>(centroid_color_names.size()) &&
+                    colors.insert(c).second && populated[c],
+                "invalid or duplicate centroid anchor color");
+    }
+  }
   for (const auto &group : cohesion_groups) {
     require(finite(group.weight) && group.weight >= 0,
             "invalid cohesion group weight");
@@ -435,6 +491,8 @@ bool is_legal(const Design &d) {
 
 const char *stage_name(PlacementStage stage) {
   switch (stage) {
+  case PlacementStage::centroid_start:
+    return "centroid attraction start";
   case PlacementStage::initial:
     return "initial";
   case PlacementStage::global_placement:
@@ -459,6 +517,21 @@ Result place(Design &design, const Options &options, GpState *state) {
     o.automatic_bins = false;
   }
   options_check(o);
+  require(
+      finite(o.centroid_weight) && o.centroid_weight >= 0 &&
+          finite(o.centroid_repulsion_weight) &&
+          o.centroid_repulsion_weight >= 0 && o.centroid_ramp > 0 &&
+          (!o.centroid_repulsion_weight || o.centroid_weight > 0) &&
+          finite(o.centroid_stop_overlap) && o.centroid_stop_overlap >= 0 &&
+          o.centroid_stop_overlap < 1 &&
+          (!o.centroid_adaptive_repulsion || o.centroid_repulsion_weight > 0),
+      "invalid centroid attraction/repulsion controls");
+  const bool centroids =
+      o.centroid_weight > 0 && !design.centroid_groups.empty();
+  const bool separate_circles = centroids && o.centroid_adaptive_repulsion;
+  require(
+      !centroids || !state,
+      "centroid placement requires one GP solve without external continuation");
   if (has_halo(design)) {
     Design padded = padded_design(design);
     Options control = o;
@@ -556,6 +629,20 @@ Result place(Design &design, const Options &options, GpState *state) {
       salt(m);
     }
   }
+  if (o.improved_routability && !o.routability_charge_compensation)
+    salt(0x524f555445434847ULL);
+  if (o.macro_align_weight > 0) {
+    salt(std::bit_cast<std::uint64_t>(o.macro_align_weight));
+    salt(std::bit_cast<std::uint64_t>(o.macro_align_sigma));
+    salt(std::bit_cast<std::uint64_t>(o.macro_align_overlap_boost));
+    salt(o.macro_align_start);
+    salt(o.macro_align_full);
+    salt(o.macro_align_nearest);
+    for (auto c : design.node_align_class)
+      salt(c);
+    for (auto m : design.node_macro)
+      salt(m);
+  }
   if (warm && state->signature != signature) {
     throw std::invalid_argument("GP continuation options changed");
   }
@@ -599,6 +686,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       fixed_area += w * h;
     }
   }
+  const auto gp_start = std::chrono::steady_clock::now();
   if (d.num_movable && o.max_iterations) {
     auto active = [&](int i) { return i < d.num_movable || i >= original; };
     auto project = [&](int i, double &x, double &y) {
@@ -624,6 +712,11 @@ Result place(Design &design, const Options &options, GpState *state) {
         d.node_y[i] += jitter(local) * d.node_size_y[i];
       }
       project(i, d.node_x[i], d.node_y[i]);
+    }
+    if (centroids) {
+      r.centroid.started = true;
+      if (o.observer)
+        o.observer(d, PlacementStage::centroid_start, 0);
     }
     if (o.add_fillers) {
       double target_area = std::max(
@@ -698,6 +791,11 @@ Result place(Design &design, const Options &options, GpState *state) {
     double previous_overflow = warm ? state->previous_overflow : -1;
     double previous_hpwl = warm ? state->previous_hpwl : r.initial_hpwl;
     double route_overflow = 0, inflated_ratio = 1;
+    std::vector<AlignmentPair> align_pairs =
+        warm ? state->align_pairs : std::vector<AlignmentPair>{};
+    double align_residual = 0, align_ramp = 0;
+    double centroid_repulsion_weight = o.centroid_repulsion_weight;
+    double previous_circle_overlap = 1;
     if (warm && o.improved_routability) {
       double inflated = 0;
       for (int i = 0; i < d.num_movable; ++i)
@@ -705,6 +803,16 @@ Result place(Design &design, const Options &options, GpState *state) {
       inflated_ratio = area ? inflated / area : 1;
     }
     if (warm) {
+      for (const auto &p : state->align_pairs) {
+        require(
+            p.a >= 0 && p.b >= 0 && p.a < d.num_movable &&
+                p.b < d.num_movable && p.a != p.b &&
+                (p.axis == Axis::x || p.axis == Axis::y) &&
+                !d.node_align_class.empty() && d.node_align_class[p.a] >= 0 &&
+                d.node_align_class[p.a] == d.node_align_class[p.b] &&
+                !d.node_macro.empty() && d.node_macro[p.a] && d.node_macro[p.b],
+            "invalid GP continuation alignment pairs");
+      }
       x = state->x;
       y = state->y;
       prev_x = state->prev_x;
@@ -817,7 +925,8 @@ Result place(Design &design, const Options &options, GpState *state) {
       const double target =
           o.target_density / (o.improved_routability ? inflated_ratio : 1);
       double filler_scale = 1;
-      if (o.improved_routability && n > original) {
+      if (o.improved_routability && o.routability_charge_compensation &&
+          n > original) {
         double filler_area = 0;
         for (int i = original; i < n; ++i)
           filler_area += d.node_size_x[i] * d.node_size_y[i];
@@ -850,7 +959,8 @@ Result place(Design &design, const Options &options, GpState *state) {
                      (sx[i] * sy[i]);
           if (o.scale_macro_density && !d.node_macro.empty() &&
               d.node_macro[i]) {
-            ratio[i] *= target;
+            ratio[i] *=
+                o.routability_charge_compensation ? target : o.target_density;
           }
         }
       }
@@ -874,6 +984,30 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         density_weight *= std::max(wsum, 1.) / std::max(dsum, 1e-12);
       }
+      if (o.macro_align_weight > 0) {
+        if (global_iter % 20 == 0)
+          align_pairs = detail::macro_align_pairs(d, o.macro_align_nearest);
+        align_ramp = detail::macro_align_ramp(o, global_iter);
+        double mean_x = 0, mean_y = 0;
+        int macros = 0;
+        for (int i = 0; i < d.num_movable; ++i) {
+          if (!d.node_align_class.empty() && d.node_align_class[i] >= 0 &&
+              !d.node_macro.empty() && d.node_macro[i]) {
+            mean_x += std::abs(wg.x[i] + density_weight * dg.x[i]);
+            mean_y += std::abs(wg.y[i] + density_weight * dg.y[i]);
+            ++macros;
+          }
+        }
+        const double scale =
+            macros ? o.macro_align_weight * align_ramp / macros : 0;
+        const auto ag = detail::macro_alignment(
+            d, align_pairs, scale * mean_x, scale * mean_y, o.macro_align_sigma,
+            &align_residual);
+        for (int i = 0; i < original; ++i) {
+          wg.x[i] += ag.x[i];
+          wg.y[i] += ag.y[i];
+        }
+      }
       if (o.cohesion_weight > 0 && progress > 0 && !d.cohesion_groups.empty()) {
         const auto cg = detail::cohesion(d, o.cohesion_weight * progress);
         for (int i = 0; i < original; ++i) {
@@ -882,11 +1016,56 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
       }
       if (o.macro_overlap_weight > 0) {
-        const auto mg = detail::macro_overlap(d, o.macro_overlap_weight);
+        const auto mg = detail::macro_overlap(
+            d, o.macro_overlap_weight *
+                   (1 + o.macro_align_overlap_boost * align_ramp));
         for (int i = 0; i < original; ++i) {
           wg.x[i] += mg.x[i];
           wg.y[i] += mg.y[i];
         }
+      }
+      if (r.centroid.started) {
+        const auto begin = std::chrono::steady_clock::now();
+        const auto cg = detail::centroid_attraction(d, 1);
+        detail::Gradient rg;
+        if (o.centroid_repulsion_weight > 0)
+          rg = detail::centroid_repulsion(d, 1, o.target_density);
+        double base = 0, attraction = 0, repulsion = 0;
+        for (int i = 0; i < d.num_movable; ++i) {
+          const bool repels =
+              o.centroid_repulsion_weight > 0 && (rg.x[i] != 0 || rg.y[i] != 0);
+          if (cg.x[i] != 0 || cg.y[i] != 0 || repels) {
+            if (repels)
+              repulsion += rg.x[i] * rg.x[i] + rg.y[i] * rg.y[i];
+            base += std::pow(wg.x[i] + density_weight * dg.x[i], 2) +
+                    std::pow(wg.y[i] + density_weight * dg.y[i], 2);
+            attraction += cg.x[i] * cg.x[i] + cg.y[i] * cg.y[i];
+          }
+        }
+        const double ramp =
+            std::clamp(double(global_iter + 1 - r.centroid.start_iteration) /
+                           o.centroid_ramp,
+                       0., 1.);
+        // Preserve the existing attraction normalization. A perfectly compact
+        // group still needs repulsion, so use its norm only in that zero case.
+        const double norm = attraction > 0 ? attraction : repulsion;
+        const double scale =
+            norm > 0 ? o.centroid_weight * ramp * ramp * std::sqrt(base / norm)
+                     : 0;
+        for (int i = 0; i < original; ++i) {
+          wg.x[i] += scale * cg.x[i];
+          wg.y[i] += scale * cg.y[i];
+          if (o.centroid_repulsion_weight > 0) {
+            wg.x[i] += scale * centroid_repulsion_weight * rg.x[i];
+            wg.y[i] += scale * centroid_repulsion_weight * rg.y[i];
+          }
+        }
+        r.centroid.force_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          begin)
+                .count();
+        r.centroid.effective_repulsion_weight = centroid_repulsion_weight;
+        ++r.centroid.iterations;
       }
       double max_grad = 0, ss = 0, yy = 0;
       std::vector<double> gx(n), gy(n);
@@ -943,17 +1122,48 @@ Result place(Design &design, const Options &options, GpState *state) {
                               o.scale_macro_density);
         const double current_hpwl = hpwl(physical);
         const auto overlaps = detail::macro_overlap_counts(physical);
+        if (o.macro_align_weight > 0)
+          detail::macro_alignment(physical, align_pairs, 0, 0,
+                                  o.macro_align_sigma, &align_residual);
         r.history.push_back(
             {global_iter + 1, r.overflow, current_hpwl, density_weight,
              route_overflow, inflated_ratio, overlaps.first, overlaps.second,
              overflow(physical, o.bins_x, o.bins_y, o.target_density), target,
-             filler_scale});
+             filler_scale, align_pairs.size(), align_residual, align_ramp});
+        if (separate_circles) {
+          const auto circles =
+              detail::centroid_circle_overlaps(physical, o.target_density);
+          auto &sample = r.history.back();
+          sample.centroid_overlaps = circles.overlaps;
+          sample.centroid_max_overlap = circles.maximum;
+          sample.centroid_repulsion_weight = centroid_repulsion_weight;
+          r.centroid.circle_overlaps = circles.overlaps;
+          r.centroid.max_circle_overlap = circles.maximum;
+          r.centroid.circles_converged =
+              circles.maximum <= o.centroid_stop_overlap;
+          r.centroid.effective_repulsion_weight = centroid_repulsion_weight;
+        }
         if (o.progress_observer) {
           o.progress_observer(r.history.back());
         }
-        if (global_iter >= 39 && r.overflow <= o.stop_overflow) {
+        const bool settled =
+            global_iter >= 39 && r.overflow <= o.stop_overflow &&
+            (!o.macro_align_weight || global_iter >= o.macro_align_full);
+        if (settled && (!centroids || global_iter + 1 >= o.centroid_ramp) &&
+            (!separate_circles || r.centroid.circles_converged)) {
           r.converged = true;
           break;
+        }
+        if (separate_circles && global_iter + 1 >= o.centroid_ramp &&
+            !r.centroid.circles_converged) {
+          const double improvement =
+              (previous_circle_overlap - r.centroid.max_circle_overlap) /
+              std::max(previous_circle_overlap, 1e-12);
+          if (improvement < .1)
+            centroid_repulsion_weight =
+                std::min(centroid_repulsion_weight * 2,
+                         o.centroid_repulsion_weight * 10000);
+          previous_circle_overlap = r.centroid.max_circle_overlap;
         }
         double growth = 1.15;
         if (o.adaptive_density) {
@@ -968,9 +1178,13 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         previous_overflow = r.overflow;
         previous_hpwl = current_hpwl;
-        density_weight = std::min(density_weight * growth, 1e12);
+        // If only circle separation is pending, do not keep escalating an
+        // already-satisfied density constraint. Resume if density rises again.
+        if (!separate_circles || r.overflow > o.stop_overflow)
+          density_weight = std::min(density_weight * growth, 1e12);
       }
     }
+    r.centroid.completed = r.centroid.started;
     if (state) {
       next.signature = signature;
       next.iteration = offset + r.iterations;
@@ -988,6 +1202,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       next.momentum = t;
       next.step = alpha;
       next.inflation = inflation;
+      next.align_pairs = align_pairs;
     }
     d.node_x = std::move(x);
     d.node_y = std::move(y);
@@ -1000,11 +1215,34 @@ Result place(Design &design, const Options &options, GpState *state) {
       o.observer(d, PlacementStage::global_placement, r.iterations);
     }
   }
+  r.global_placement_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - gp_start)
+          .count();
   r.overflow =
       overflow(d, o.bins_x, o.bins_y, o.target_density, o.scale_macro_density);
-  r.converged = r.overflow <= o.stop_overflow;
+  if (separate_circles) {
+    const auto circles = detail::centroid_circle_overlaps(d, o.target_density);
+    r.centroid.circle_overlaps = circles.overlaps;
+    r.centroid.max_circle_overlap = circles.maximum;
+    r.centroid.circles_converged = circles.maximum <= o.centroid_stop_overlap;
+  }
+  r.converged =
+      r.overflow <= o.stop_overflow &&
+      (!separate_circles || r.centroid.circles_converged) &&
+      (!o.macro_align_weight ||
+       (warm ? state->iteration : 0) + r.iterations > o.macro_align_full);
   if (o.legalize && d.num_movable) {
-    detail::legalize(d, o.bins_x, o.bins_y);
+    if (o.macro_snap) {
+      const auto before = d;
+      const auto snap = detail::macro_align_snap(d, o.macro_snap_tolerance,
+                                                 o.macro_snap_weight);
+      AlignmentReport times;
+      detail::legalize(d, o.bins_x, o.bins_y, &snap, &times);
+      r.alignment = detail::macro_alignment_report(before, d, snap);
+      r.alignment.macro_legalization_seconds = times.macro_legalization_seconds;
+      r.alignment.cell_legalization_seconds = times.cell_legalization_seconds;
+    } else
+      detail::legalize(d, o.bins_x, o.bins_y, nullptr, &r.alignment);
     if (!is_legal(d) || !detail::kernel_is_legal(d)) {
       throw std::runtime_error("DREAMPlace legalization failed: insufficient "
                                "row space or unsupported geometry");
@@ -1013,7 +1251,13 @@ Result place(Design &design, const Options &options, GpState *state) {
       o.observer(d, PlacementStage::legalization, r.iterations);
     }
     if (o.detailed_place && !d.net_weights.empty()) {
-      detail::detailed_place(d, o.bins_x, o.bins_y, o.num_threads);
+      const auto detail_start = std::chrono::steady_clock::now();
+      detail::detailed_place(d, o.bins_x, o.bins_y, o.num_threads,
+                             o.macro_snap);
+      r.detailed_placement_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        detail_start)
+              .count();
       if (o.observer) {
         o.observer(d, PlacementStage::detailed_placement, r.iterations);
       }

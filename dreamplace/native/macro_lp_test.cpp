@@ -3,8 +3,8 @@
 #include <iostream>
 #include <limits>
 
-#include "utility/src/legalization_db.h"
 #include "macro_legalize/src/lp_legalize.h"
+#include "utility/src/legalization_db.h"
 
 int main() {
   using LP = DreamPlace::MacroDifferenceLP;
@@ -22,9 +22,12 @@ int main() {
         for (int y = -2; y <= 4; ++y)
           for (int z = -2; z <= 4; ++z)
             if (x + 1 <= y && y + 2 <= z && z - x <= 5)
-              best = std::min(best, static_cast<long long>(std::abs(x - a) + std::abs(y - b) + std::abs(z - 1)));
+              best = std::min(best, static_cast<long long>(std::abs(x - a) +
+                                                           std::abs(y - b) +
+                                                           std::abs(z - 1)));
       auto v = lp.solve();
-      if (std::abs(v[0] - a) + std::abs(v[1] - b) + std::abs(v[2] - 1) != best) {
+      if (std::abs(v[0] - a) + std::abs(v[1] - b) + std::abs(v[2] - 1) !=
+          best) {
         std::cerr << "macro LP disagrees with exhaustive optimum\n";
         return 1;
       }
@@ -47,6 +50,34 @@ int main() {
     std::cerr << "infeasible macro LP partially changed coordinates\n";
     return 1;
   }
+  // Exhaustive oracle with finite-capacity (soft) equality arcs.
+  for (int weight : {0, 1, 100}) {
+    LP soft;
+    soft.lower = {0, 0};
+    soft.upper = {8, 8};
+    soft.anchor = {1, 7};
+    soft.constraints = {{0, 1, 0, weight}, {1, 0, 0, weight}};
+    if (weight == 1)
+      soft.constraints.push_back({1, 0, -3});
+    long long best = std::numeric_limits<long long>::max();
+    for (int a = 0; a <= 8; ++a)
+      for (int b = 0; b <= 8; ++b) {
+        if (weight == 1 && a + 3 > b)
+          continue;
+        best = std::min(best, static_cast<long long>(std::abs(a - 1) +
+                                                     std::abs(b - 7) +
+                                                     weight * std::abs(a - b)));
+      }
+    std::uint64_t violations = 0;
+    auto solution = soft.solve(&violations);
+    auto cost = std::abs(solution[0] - 1) + std::abs(solution[1] - 7) +
+                weight * std::abs(solution[0] - solution[1]);
+    if (cost != best || (weight == 100 && solution[0] != solution[1]) ||
+        (weight == 1 && (solution[0] + 3 > solution[1] || violations != 1))) {
+      std::cerr << "soft macro LP disagrees with exhaustive optimum\n";
+      return 1;
+    }
+  }
   LP bad;
   bad.lower = {0, 0};
   bad.upper = {1, 1};
@@ -54,7 +85,7 @@ int main() {
   bad.constraints = {{0, 1, -2}};
   try {
     bad.solve();
-  } catch (const DreamPlace::MacroLPInfeasible&) {
+  } catch (const DreamPlace::MacroLPInfeasible &) {
     return 0;
   }
   std::cerr << "infeasible macro LP accepted\n";

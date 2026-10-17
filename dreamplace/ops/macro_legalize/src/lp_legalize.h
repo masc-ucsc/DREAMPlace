@@ -7,6 +7,7 @@
 #ifndef DREAMPLACE_MACRO_LEGALIZE_LP_LEGALIZE_H
 #define DREAMPLACE_MACRO_LEGALIZE_LP_LEGALIZE_H
 
+#include "utility/src/legalization_db.h"
 #include <vector>
 #include <array>
 #include <functional>
@@ -14,6 +15,7 @@
 #include <numeric>
 #ifdef DREAMPLACE_TORCH_FREE
 #include "macro_legalize/src/native_lp.h"
+#include "macro_legalize/src/alignment.h"
 #else
 #include <limbo/solvers/DualMinCostFlow.h>
 #endif
@@ -547,7 +549,8 @@ void longestPathLegalizeLauncher(LegalizationDB<T> db, const std::vector<int>& m
 // choices while removing the general-purpose Limbo modeling dependency.
 template <typename T>
 void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macros,
-                            const std::vector<int>& fixed_macros) {
+                            const std::vector<int>& fixed_macros,
+                            const std::vector<MacroAlignConstraint>* align = nullptr) {
     std::array<lemon::ListDigraph, 2> cg;
     unsigned int source, terminal;
     longestPathLegalizeLauncher(db, macros, fixed_macros, cg, source, terminal);
@@ -584,7 +587,23 @@ void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macro
                     lp.lower[u] = std::max(lp.lower[u], MacroDifferenceLP::coordinate(std::ceil(pos[fixed]+size[fixed])));
                 }
             }
-            result[xy] = lp.solve();
+            if (align) {
+                std::vector<int> index(db.num_movable_nodes, -1);
+                for (size_t i = 0; i < macros.size(); ++i) index[macros[i]] = static_cast<int>(i);
+                for (const auto& constraint : *align) {
+                    if (constraint.axis != xy) continue;
+                    if (constraint.a < 0 || constraint.a >= db.num_movable_nodes ||
+                        constraint.b < 0 || constraint.b >= db.num_movable_nodes ||
+                        index[constraint.a] < 0 || index[constraint.b] < 0 || constraint.weight <= 0)
+                        throw std::invalid_argument("alignment endpoints must be movable macros");
+                    lp.constraints.push_back({index[constraint.a], index[constraint.b], 0, constraint.weight});
+                    lp.constraints.push_back({index[constraint.b], index[constraint.a], 0, constraint.weight});
+                }
+            }
+            std::uint64_t soft_violations = 0;
+            result[xy] = lp.solve(&soft_violations);
+            if (align) dreamplacePrint(kINFO, "Macro alignment LP axis %d: %llu violated soft arcs\n", xy,
+                                      static_cast<unsigned long long>(soft_violations));
         }
     } catch (const MacroLPInfeasible& error) {
         dreamplacePrint(kWARN, "Macro LP: %s; retaining coordinates for grid legalization\n", error.what());
@@ -598,8 +617,9 @@ void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macro
 
 template <typename T>
 void lpLegalizeLauncher(LegalizationDB<T> db, const std::vector<int>& macros,
-                       const std::vector<int>& fixed_macros) {
-    lpLegalizeGraphLauncher(db, macros, fixed_macros);
+                       const std::vector<int>& fixed_macros,
+                            const std::vector<MacroAlignConstraint>* align = nullptr) {
+    lpLegalizeGraphLauncher(db, macros, fixed_macros, align);
 }
 #else
 template <typename T>

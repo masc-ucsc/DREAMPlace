@@ -72,6 +72,44 @@ int main() {
     o.add_fillers = false;
     place(order, o);
     check(order.node_x[0] + 2 <= order.node_x[1] + .1);
+    // Unused classes and alignment knobs must not perturb disabled results.
+    auto disabled = fixture(), original = disabled;
+    Options base;
+    base.max_iterations = 40;
+    base.legalize = base.detailed_place = false;
+    base.bins_x = base.bins_y = 8;
+    place(original, base);
+    disabled.node_macro = {1, 1, 1, 0, 0};
+    disabled.node_align_class = {0, 0, 0, -1, -1};
+    base.macro_align_sigma = .25;
+    base.macro_align_overlap_boost = 2;
+    place(disabled, base);
+    check(original.node_x == disabled.node_x &&
+          original.node_y == disabled.node_y);
+    auto aligned = fixture();
+    aligned.node_macro = {1, 1, 1, 0, 0};
+    aligned.node_align_class = {0, 0, 0, -1, -1};
+    base.macro_align_weight = 25;
+    base.macro_align_start = 0;
+    base.macro_align_full = 60;
+    base.stop_overflow = 1;
+    base.max_iterations = 80;
+    auto alignment = place(aligned, base);
+    check(alignment.iterations >= 60 && !alignment.history.empty());
+    GpState aligned_state;
+    base.max_iterations = 20;
+    aligned = fixture();
+    aligned.node_macro = {1, 1, 1, 0, 0};
+    aligned.node_align_class = {0, 0, 0, -1, -1};
+    place(aligned, base, &aligned_state);
+    base.macro_align_sigma = .5;
+    bool mismatch = false;
+    try {
+      place(aligned, base, &aligned_state);
+    } catch (const std::invalid_argument &) {
+      mismatch = true;
+    }
+    check(mismatch);
     auto route = fixture();
     route.node_inflatable = {1, 1, 1, 0, 0};
     auto sizes = route.node_size_x;

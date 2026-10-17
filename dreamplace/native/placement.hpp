@@ -3,11 +3,13 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "dreamplace/native/constraints.hpp"
 #include "dreamplace/native/orientation.hpp"
+#include "macro_legalize/src/alignment.h"
 
 namespace DreamPlace::native {
 
@@ -26,11 +28,35 @@ struct CohesionGroup {
   double weight = 1;
   std::vector<double> areas;
 };
+// Candidate colors may overlap across any number of groups. Nodes stores only
+// uncolored descendants; each color includes its full physical membership.
+struct CentroidGroup {
+  std::string name;
+  int parent = -1, family = 0, scope_macros = 0, scope_cells = 0;
+  double equivalent_cells = 0;
+  std::vector<int> nodes, colors;
+  std::string copy_parent{}; // immediate hierarchy parent used for replication
+  int copies_per_parent = 0;
+};
+struct CentroidSample {
+  double x = 0, y = 0, radius = 0;
+  double area = 0; // physical anchored area; fillers/halo padding excluded
+  int cells = 0, macros = 0;
+};
 struct Design {
   Layout layout;
   std::vector<CohesionGroup> cohesion_groups;
+  std::vector<CentroidGroup> centroid_groups;
+  // Optional frozen world-coordinate targets, one per candidate. Empty keeps
+  // the original moving-centroid attraction exactly. Targets are not fences.
+  std::vector<std::pair<double, double>> centroid_targets;
+  std::vector<int> node_centroid_color; // -1 for uncolored physical nodes
+  std::vector<std::string> centroid_color_names; // scoped host color identities
+  std::vector<double> centroid_node_area; // physical weights, not halo area
   // Explicit non-standard-cell identity, independent of geometry/row height.
   std::vector<std::uint8_t> node_macro;
+  // Same master x synthesis-color identity; -1 opts a node out.
+  std::vector<int> node_align_class;
   // Sum of track densities on LEF layers obstructed by each macro. RUDY
   // conservatively blocks those layers over its complete occupancy envelope.
   std::vector<double> node_blocked_capacity_h, node_blocked_capacity_v;
@@ -62,6 +88,7 @@ struct Design {
 
 enum class PlacementStage {
   initial,
+  centroid_start,
   global_placement,
   legalization,
   detailed_placement,
@@ -81,9 +108,28 @@ struct Options {
   bool automatic_bins = false, exact_macro_density = false;
   bool adaptive_density = false, improved_routability = false;
   bool scale_macro_density = false;
+  bool routability_charge_compensation =
+      true; // false replays the earlier R4 charge model
   std::function<void(const GpSample &)> progress_observer;
   double macro_overlap_weight = 0,
          macro_jitter = 0; // jitter fraction of macro size
+  double macro_align_weight = 0, macro_align_sigma = 0;
+  double macro_align_overlap_boost = 0;
+  int macro_align_start = 100, macro_align_full = 500;
+  bool macro_align_nearest = false, macro_snap = false;
+  double macro_snap_tolerance = .25;
+  std::int64_t macro_snap_weight = 100;
+  // Zero disables R8H2 exactly. Attraction starts in the first GP iteration;
+  // no preliminary macro placement or extra continuation phase is used.
+  double centroid_weight = 0;
+  // Relative to centroid attraction. Same-family circles have area A/density.
+  // Zero preserves the attraction-only path exactly.
+  double centroid_repulsion_weight = 0;
+  // Increase the circle penalty until separation and density both settle.
+  // Off by default; relative penetration tolerance is measured against r_i+r_j.
+  bool centroid_adaptive_repulsion = false;
+  double centroid_stop_overlap = .001;
+  int centroid_ramp = 100;
   int num_threads = 1;
   std::uint32_t seed = 1000; // retains the original filler RNG sequence
   double target_density = 0.8;
@@ -107,6 +153,27 @@ struct Options {
   int observer_interval = 20; // GP steps between snapshots, when enabled
 };
 
+struct AlignmentPair {
+  int a, b;
+  Axis axis;
+};
+struct AlignmentGroup {
+  int align_class;
+  Axis axis;
+  double target;
+  std::vector<int> nodes;
+};
+struct AlignmentSnap {
+  std::vector<AlignmentGroup> groups;
+  std::vector<::DreamPlace::MacroAlignConstraint> constraints;
+};
+struct AlignmentReport {
+  std::vector<AlignmentGroup> groups;
+  std::uint64_t x_groups = 0, y_groups = 0, members = 0, both_axes = 0;
+  std::uint64_t exact_groups = 0, broken_groups = 0, soft_violations = 0;
+  std::vector<double> macro_displacements;
+  double macro_legalization_seconds = 0, cell_legalization_seconds = 0;
+};
 struct GpSample {
   int iteration = 0;
   double overflow = 0, hpwl = 0, density_weight = 0;
@@ -114,10 +181,25 @@ struct GpSample {
   std::uint64_t macro_overlaps = 0, macro_stacks = 0;
   double raw_overflow = 0;
   double model_density = 0, filler_charge_scale = 1;
+  std::uint64_t align_pairs = 0;
+  double align_residual = 0, align_ramp = 0;
+  std::uint64_t centroid_overlaps = 0;
+  double centroid_max_overlap = 0, centroid_repulsion_weight = 0;
+};
+struct CentroidReport {
+  bool started = false, completed = false;
+  int start_iteration = 0, iterations = 0;
+  double force_seconds = 0;
+  bool circles_converged = false;
+  std::uint64_t circle_overlaps = 0;
+  double max_circle_overlap = 0, effective_repulsion_weight = 0;
 };
 struct Result {
+  CentroidReport centroid;
+  AlignmentReport alignment;
   int bins_x = 0, bins_y = 0;
   double poisson_seconds = 0;
+  double global_placement_seconds = 0, detailed_placement_seconds = 0;
   std::vector<GpSample> history;
   int iterations = 0;
   double initial_hpwl = 0, hpwl = 0, overflow = 0;
@@ -135,6 +217,7 @@ struct GpState {
   double previous_overflow = -1, previous_hpwl = 0;
   std::vector<double> x, y, prev_x, prev_y, old_gx, old_gy, old_ex, old_ey;
   std::vector<double> inflation;
+  std::vector<AlignmentPair> align_pairs;
 };
 
 // Throws invalid_argument for bad inputs and runtime_error if legalization
@@ -170,7 +253,34 @@ struct Gradient {
   double value = 0;
   std::vector<double> x, y;
 };
+std::vector<AlignmentPair> macro_align_pairs(const Design &,
+                                             bool nearest = false);
+double macro_align_ramp(const Options &, int iteration);
+Gradient macro_alignment(const Design &, const std::vector<AlignmentPair> &,
+                         double lambda_x, double lambda_y, double sigma,
+                         double *residual = nullptr);
+AlignmentSnap macro_align_snap(const Design &, double tau, std::int64_t weight);
+AlignmentReport macro_alignment_report(const Design &, const Design &,
+                                       const AlignmentSnap &);
 Gradient cohesion(const Design &design, double lambda);
+// Paths/masters are supplied by the caller; identity uses relative macro leaf
+// structure, with minimum_copies qualifying siblings under one immediate
+// hierarchy parent. Count siblings before collapsing unary wrappers; keep the
+// deepest eligible scope for any identical macro set. No connectivity proof
+// or template reuse is required for cohesion.
+std::vector<CentroidGroup>
+centroid_candidates(const Design &, const std::vector<std::string> &paths,
+                    const std::vector<std::string> &masters,
+                    double minimum_equivalent_cells, int minimum_copies = 4);
+Gradient centroid_attraction(const Design &, double lambda);
+struct CircleOverlap {
+  std::uint64_t pairs = 0, overlaps = 0;
+  double maximum = 0;
+};
+CircleOverlap centroid_circle_overlaps(const Design &, double density);
+Gradient centroid_repulsion(const Design &, double lambda, double density);
+double centroid_cell_area(const Design &);
+std::vector<CentroidSample> centroid_summary(const Design &);
 // Squared exact intersection area, normalized by pair size for unit invariance.
 Gradient macro_overlap(const Design &, double weight);
 std::pair<std::uint64_t, std::uint64_t> macro_overlap_counts(const Design &);
@@ -186,8 +296,10 @@ density_force(const Design &d, int bx, int by, int threads,
               const std::vector<double> &ox, const std::vector<double> &oy,
               const std::vector<double> &ratio, const std::vector<double> &fx,
               const std::vector<double> &fy);
-void legalize(Design &d, int bx, int by);
-void detailed_place(Design &d, int bx, int by, int threads);
+void legalize(Design &d, int bx, int by, const AlignmentSnap *snap = nullptr,
+              AlignmentReport *report = nullptr);
+void detailed_place(Design &d, int bx, int by, int threads,
+                    bool preserve_macros = false);
 bool kernel_is_legal(const Design &d);
 } // namespace detail
 } // namespace DreamPlace::native

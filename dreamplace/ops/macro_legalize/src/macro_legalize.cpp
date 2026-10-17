@@ -22,7 +22,11 @@ DREAMPLACE_BEGIN_NAMESPACE
 /// because macros have quite different sizes.
 /// @return true if legal
 template <typename T>
-bool macroLegalizationLauncher(LegalizationDB<T> db);
+bool macroLegalizationLauncher(LegalizationDB<T> db
+#ifdef DREAMPLACE_TORCH_FREE
+    , const std::vector<MacroAlignConstraint>* align = nullptr
+#endif
+);
 
 /// @brief legalize layout with greedy legalization.
 /// Only movable nodes will be moved. Fixed nodes and filler nodes are fixed.
@@ -365,7 +369,20 @@ void roughLegalizeLauncher(const LegalizationDB<T>& db,
 }
 
 template <typename T>
-bool macroLegalizationLauncher(LegalizationDB<T> db) {
+bool macroLegalizationLauncher(LegalizationDB<T> db
+#ifdef DREAMPLACE_TORCH_FREE
+    , const std::vector<MacroAlignConstraint>* align
+#endif
+) {
+#ifdef DREAMPLACE_TORCH_FREE
+  if (align) for (const auto& c : *align) {
+    if (c.a < 0 || c.b < 0 || c.a >= db.num_movable_nodes || c.b >= db.num_movable_nodes ||
+        c.a == c.b || db.node_size_x[c.a] * db.node_size_y[c.a] <= 0 ||
+        db.node_size_x[c.b] * db.node_size_y[c.b] <= 0 || !db.is_dummy_fixed(c.a) || !db.is_dummy_fixed(c.b) ||
+        (c.axis != 0 && c.axis != 1) || c.weight <= 0)
+      throw std::invalid_argument("alignment endpoints must be movable macros");
+  }
+#endif
   // local copy of node sizes, as we need to inflate movable macros 
   // to make them integral numbers of sites and rows 
   std::vector<T> node_size_x_copy (db.node_size_x, db.node_size_x+db.num_nodes); 
@@ -420,9 +437,18 @@ bool macroLegalizationLauncher(LegalizationDB<T> db) {
   best_displace.total_weighted_displace = std::numeric_limits<T>::max();
   best_displace.max_weighted_displace = std::numeric_limits<T>::max();
 
+  double best_objective = std::numeric_limits<double>::infinity();
   // update current best solution
   auto update_best = [&](bool legal, const MacroLegalizeStats<T>& displace) {
-    if (legal && displace.total_displace < best_displace.total_displace) {
+    double objective = displace.total_displace;
+#ifdef DREAMPLACE_TORCH_FREE
+    if (align) for (const auto& c : *align) {
+      const T* pos = c.axis == 0 ? db.x : db.y;
+      objective += c.weight * std::abs(pos[c.a] - pos[c.b]);
+    }
+#endif
+    if (legal && objective < best_objective) {
+      best_objective = objective;
       for (unsigned int i = 0, ie = macros.size(); i < ie; ++i) {
         int macro_id = macros[i];
         best_x[i] = db.x[macro_id];
@@ -439,7 +465,11 @@ bool macroLegalizationLauncher(LegalizationDB<T> db) {
                         blocked_macros_flag);
 
   // second round with LP
+#ifdef DREAMPLACE_TORCH_FREE
+  lpLegalizeGraphLauncher(db, macros, fixed_macros, align);
+#else
   lpLegalizeGraphLauncher(db, macros, fixed_macros);
+#endif
   auto displace = compute_displace(db, macros);
   dreamplacePrint(
       kINFO, "Macro displacement total %g, max %g, weighted total %g, max %g\n",
@@ -461,7 +491,11 @@ bool macroLegalizationLauncher(LegalizationDB<T> db) {
 
     // refine with LP if legal
     if (legal) {
+#ifdef DREAMPLACE_TORCH_FREE
+      lpLegalizeLauncher(db, macros, fixed_macros, align);
+#else
       lpLegalizeLauncher(db, macros, fixed_macros);
+#endif
       displace = compute_displace(db, macros);
       dreamplacePrint(
           kINFO,
@@ -502,7 +536,7 @@ bool macroLegalizationLauncher(LegalizationDB<T> db) {
 }
 
 #ifdef DREAMPLACE_TORCH_FREE
-template bool macroLegalizationLauncher<double>(LegalizationDB<double>);
+template bool macroLegalizationLauncher<double>(LegalizationDB<double>, const std::vector<MacroAlignConstraint>*);
 #endif
 
 DREAMPLACE_END_NAMESPACE

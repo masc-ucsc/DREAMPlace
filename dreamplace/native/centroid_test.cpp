@@ -1,0 +1,422 @@
+// BSD-3-Clause. See LICENSE. Checks remain active under -c opt.
+#include "dreamplace/native/placement.hpp"
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+using namespace DreamPlace::native;
+void check(bool b, const char *s) {
+  if (!b)
+    throw std::runtime_error(s);
+}
+void near(double a, double b, double tol, const char *s) {
+  check(std::abs(a - b) <= tol, s);
+}
+template <class F> void rejects(F f) {
+  bool bad = false;
+  try {
+    f();
+  } catch (const std::invalid_argument &) {
+    bad = true;
+  }
+  check(bad, "invalid centroid metadata accepted");
+}
+Design fixture() {
+  Design d;
+  d.layout = {0, 0, 1000, 1000, 1, 1};
+  d.num_movable = 8;
+  d.node_x = {100, 160, 220, 600, 660, 720, 300, 900, 950};
+  d.node_y = {200, 230, 260, 500, 530, 560, 400, 100, 950};
+  d.node_size_x = d.node_size_y = {30, 30, 30, 30, 30, 30, 1, 1, 1};
+  d.node_macro = {1, 1, 1, 1, 1, 1, 0, 0, 0};
+  d.centroid_node_area = {900, 900, 900, 900, 900, 900, 1, 1, 1};
+  d.node_centroid_color = {0, 1, 2, 0, 3, 4, 0, 0, -1};
+  d.centroid_color_names = {"shared", "a1", "a2", "b1", "b2"};
+  d.pin2node = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+  d.pin_offset_x.assign(9, 1);
+  d.pin_offset_y.assign(9, 1);
+  d.flat_net2pin = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+  d.flat_net2pin_start = {0, 4, 9};
+  d.build_maps();
+  std::vector<std::string> paths = {"top.a.m0",    "top.a.m1",      "top.a.m2",
+                                    "top.b.m0",    "top.b.m1",      "top.b.m2",
+                                    "top.a.logic", "outside.logic", "fixed"};
+  std::vector<std::string> masters = {"ram", "ram", "ram", "ram", "ram",
+                                      "ram", "and", "and", "and"};
+  d.centroid_groups = detail::centroid_candidates(d, paths, masters, 2000, 2);
+  d.validate();
+  check(d.centroid_groups.size() == 2,
+        "single-master repeated candidate missing");
+  near(d.centroid_groups[0].equivalent_cells, 2701, 0,
+       "equivalent area ignores logic/macros");
+  check(detail::centroid_candidates(d, paths, masters, 2700, 2).empty(),
+        "threshold is not strict or replication omitted");
+  auto mismatch = masters;
+  mismatch[5] = "other";
+  check(detail::centroid_candidates(d, paths, mismatch, 2000, 2).empty(),
+        "nonreplicated candidate accepted");
+  auto small = paths;
+  small[2] = "other.m2";
+  small[5] = "else.m2";
+  check(detail::centroid_candidates(d, small, masters, 0, 2).empty(),
+        "two-macro candidate accepted");
+  auto stats = detail::centroid_summary(d);
+  check(stats[0].cells == 6 && stats[0].macros == 4,
+        "outside shared-color cells/macros omitted from centroid");
+  return d;
+}
+void candidate_copy_checks() {
+  auto discover = [](const std::vector<int> &copies, int minimum = 4,
+                     bool wrapper = false) {
+    Design d;
+    d.layout = {0, 0, 1000, 1000, 1, 1};
+    std::vector<std::string> paths, masters;
+    for (size_t parent = 0; parent < copies.size(); ++parent)
+      for (int copy = 0; copy < copies[parent]; ++copy)
+        for (int macro = 0; macro < 3; ++macro) {
+          paths.push_back("top.p" + std::to_string(parent) + ".u" +
+                          std::to_string(copy) + (wrapper ? ".wrapper" : "") +
+                          ".m" + std::to_string(macro));
+          masters.push_back("ram");
+          d.node_x.push_back(0);
+          d.node_y.push_back(0);
+          d.node_size_x.push_back(10);
+          d.node_size_y.push_back(10);
+          d.node_macro.push_back(1);
+        }
+    d.num_movable = paths.size();
+    // A unit cell defines the equivalent-area unit, outside all scopes.
+    d.node_x.push_back(0);
+    d.node_y.push_back(0);
+    d.node_size_x.push_back(1);
+    d.node_size_y.push_back(1);
+    d.node_macro.push_back(0);
+    paths.push_back("unit");
+    masters.push_back("and");
+    if (minimum == 4)
+      return detail::centroid_candidates(d, paths, masters, 299);
+    return detail::centroid_candidates(d, paths, masters, 299, minimum);
+  };
+  check(discover({3}).empty(), "default admits fewer than four siblings");
+  auto four = discover({4});
+  check(four.size() == 4, "four siblings under one parent rejected");
+  for (const auto &g : four)
+    check(g.copy_parent == "top.p0" && g.copies_per_parent == 4 &&
+              g.scope_macros == 3 && g.equivalent_cells == 300,
+          "wrong immediate parent/copy census");
+  check(discover({4}, 5).empty(), "copy threshold parameter ignored");
+  auto three = discover({3}, 3);
+  check(three.size() == 3, "three-copy override rejected");
+  check(discover({2, 2}).empty(), "copies pooled across two parents");
+  check(discover({3, 3}).empty(), "six global copies replace four per parent");
+  auto local = discover({4, 3});
+  check(local.size() == 4, "underfilled parent affected qualifying parent");
+  for (const auto &g : local)
+    check(g.copy_parent == "top.p0" && g.copies_per_parent == 4,
+          "three-copy parent admitted using copies elsewhere");
+  auto wrapped = discover({4}, 4, true);
+  check(wrapped.size() == 4, "unary alias hides eligible outer siblings");
+  for (const auto &g : wrapped)
+    check(g.name.find(".wrapper") == std::string::npos &&
+              g.copy_parent == "top.p0",
+          "singleton wrapper chosen instead of repeated outer scope");
+  auto nested = discover({4, 4, 4, 4});
+  check(nested.size() == 20, "nested four-copy scopes omitted");
+  int roots = 0, children = 0;
+  for (const auto &g : nested) {
+    check(g.copies_per_parent == 4, "nested copy census changed");
+    if (g.parent < 0)
+      ++roots;
+    else {
+      ++children;
+      check(g.name.starts_with(nested[g.parent].name + "."),
+            "nested selected parent index invalid");
+    }
+  }
+  check(roots == 4 && children == 16, "nested hierarchy relations lost");
+  for (int bad : {-1, 0, 1})
+    rejects([&] { discover({4}, bad); });
+}
+void repulsion_checks(const Design &d) {
+  auto g = detail::centroid_repulsion(d, .3, .01);
+  check(g.value > 0, "overlapping same-family circles have no energy");
+  double sx = 0, sy = 0;
+  for (int n = 0; n < 9; ++n) {
+    sx += g.x[n];
+    sy += g.y[n];
+    for (int axis = 0; axis < 2; ++axis) {
+      auto lo = d, hi = d;
+      (axis ? lo.node_y : lo.node_x)[n] -= 1e-3;
+      (axis ? hi.node_y : hi.node_x)[n] += 1e-3;
+      const double fd = (detail::centroid_repulsion(hi, .3, .01).value -
+                         detail::centroid_repulsion(lo, .3, .01).value) /
+                        .002;
+      near(fd, axis ? g.y[n] : g.x[n], 1e-5,
+           "shared-color repulsion gradient mismatch");
+    }
+  }
+  near(sx, 0, 1e-9, "centroid pair repulsion loses x force balance");
+  near(sy, 0, 1e-9, "centroid pair repulsion loses y force balance");
+  auto other = d;
+  other.centroid_groups[1].family = 1;
+  const auto off = detail::centroid_repulsion(other, .3, .01);
+  check(off.value == 0 && off.x == std::vector<double>(9) &&
+            off.y == std::vector<double>(9),
+        "different types repel");
+  auto shifted = d;
+  for (int n = 0; n < 9; ++n) {
+    shifted.node_x[n] += 71;
+    shifted.node_y[n] -= 22;
+  }
+  near(detail::centroid_repulsion(shifted, .3, .01).value, g.value, 1e-8,
+       "repulsion uses an absolute anchor");
+  auto padded = d;
+  for (int n = 0; n < 6; ++n) {
+    padded.node_x[n] -= 10;
+    padded.node_y[n] -= 10;
+    padded.node_size_x[n] += 20;
+    padded.node_size_y[n] += 20;
+  }
+  near(detail::centroid_repulsion(padded, .3, .01).value, g.value, 1e-8,
+       "repulsion counts halo as anchored physical area");
+  near(detail::centroid_cell_area(padded), detail::centroid_cell_area(d), 0,
+       "equivalent-cell area changes with halos");
+  auto summary = detail::centroid_summary(d);
+  near(summary[0].area, 3602, 0, "shared color outside area omitted/doubled");
+  // Nested candidates: the parent contributes attraction to the entire child,
+  // while only the two same-type children repel each other.
+  auto nested = d;
+  CentroidGroup parent;
+  parent.name = "top";
+  parent.family = 99;
+  parent.colors = {0, 1, 2, 3, 4};
+  auto child_a = d.centroid_groups[0], child_b = d.centroid_groups[1];
+  child_a.parent = child_b.parent = 0;
+  nested.centroid_groups = {parent, child_a, child_b};
+  nested.validate();
+  const auto nr = detail::centroid_repulsion(nested, .3, .01);
+  near(nr.value, g.value, 1e-8, "parent repels its nested child");
+  for (int n = 0; n < 9; ++n) {
+    near(nr.x[n], g.x[n], 1e-9, "nested parent adds x repulsion");
+    near(nr.y[n], g.y[n], 1e-9, "nested parent adds y repulsion");
+  }
+  const auto ns = detail::centroid_summary(nested);
+  auto parent_only = nested;
+  parent_only.centroid_groups.resize(1);
+  const auto pg = detail::centroid_attraction(parent_only, .3);
+  double pull_x = 0, pull_y = 0;
+  for (int n : {0, 1, 2, 3, 6, 7}) {
+    pull_x += pg.x[n];
+    pull_y += pg.y[n];
+  }
+  near(pull_x, .6 * ns[1].area / ns[0].area * (ns[1].x - ns[0].x), 1e-9,
+       "child centroid does not inherit parent x attraction");
+  near(pull_y, .6 * ns[1].area / ns[0].area * (ns[1].y - ns[0].y), 1e-9,
+       "child centroid does not inherit parent y attraction");
+
+  Design two;
+  two.layout = {0, 0, 1000, 1000, 1, 1};
+  two.num_movable = 2;
+  two.node_x = {10, 20};
+  two.node_y = {10, 5};
+  two.node_size_x = two.node_size_y = {10, 20};
+  two.node_macro = {0, 1};
+  two.centroid_node_area = {100, 400};
+  two.node_centroid_color = {-1, -1};
+  CentroidGroup a, b;
+  a.nodes = {0};
+  b.nodes = {1};
+  two.centroid_groups = {a, b};
+  two.build_maps();
+  two.validate();
+  // One standard cell + a four-equivalent-cell macro, using the same area
+  // unit as candidate eligibility. Circle area is A / requested density.
+  near(detail::centroid_cell_area(two), 100, 0, "incorrect cell-area unit");
+  const double reach = 30 / std::sqrt(std::acos(-1.));
+  const auto pair = detail::centroid_repulsion(two, 2, 1);
+  near(pair.value, 2 * std::pow(reach - 15, 2), 1e-10,
+       "circle radius is not sqrt(area / pi / density)");
+  check(pair.x[0] > 0 && pair.x[1] == -pair.x[0],
+        "gradient does not push centroids apart");
+  near(detail::centroid_repulsion(two, 2, .25).value,
+       2 * std::pow(2 * reach - 15, 2), 1e-9,
+       "requested density does not scale circle area");
+  two.node_x[1] = reach + 6; // distance reach+1
+  const auto outside = detail::centroid_repulsion(two, 2, 1);
+  check(outside.value == 0 && outside.x[0] == 0 && outside.x[1] == 0,
+        "repulsion persists outside the sum of radii");
+  two.node_x[1] = 5; // exactly coincident centers
+  const auto tie = detail::centroid_repulsion(two, 2, 1);
+  const auto repeat = detail::centroid_repulsion(two, 2, 1);
+  check((tie.x[0] != 0 || tie.y[0] != 0) && tie.x[0] == -tie.x[1] &&
+            tie.y[0] == -tie.y[1] && tie.x == repeat.x && tie.y == repeat.y,
+        "coincident centroid tie is not deterministically separated");
+  // Equal radii: force must persist when neither center is inside the
+  // other's circle. It stops at TWO radii, not one.
+  two.node_size_x = two.node_size_y = {10, 10};
+  two.centroid_node_area = {100, 100};
+  const double radius = std::sqrt(100 / std::acos(-1.));
+  two.node_y = {10, 10};
+  two.node_x = {10, 10 + 1.5 * radius};
+  const auto between = detail::centroid_repulsion(two, 1, 1);
+  check(between.value > 0 && between.x[0] > 0,
+        "repulsion incorrectly stops at one radius");
+  near(detail::centroid_circle_overlaps(two, 1).maximum, .25, 1e-12,
+       "circle penetration uses one radius instead of radius sum");
+  two.node_x[1] = 10 + 2.01 * radius;
+  check(detail::centroid_repulsion(two, 1, 1).value == 0 &&
+            detail::centroid_circle_overlaps(two, 1).overlaps == 0,
+        "equal circles repel beyond two radii");
+
+  // A density-legal pair cannot terminate while its centroid circles overlap.
+  two.node_x = {10, 12};
+  Options constrained;
+  constrained.centroid_weight = .25;
+  constrained.centroid_repulsion_weight = 5;
+  constrained.centroid_adaptive_repulsion = true;
+  constrained.centroid_ramp = 20;
+  constrained.max_iterations = 400;
+  constrained.bins_x = constrained.bins_y = 8;
+  constrained.target_density = 1;
+  constrained.add_fillers = constrained.legalize = constrained.detailed_place =
+      false;
+  // A net supplies a real reference force for the native force normalization.
+  two.pin2node = {0, 1};
+  two.pin_offset_x = two.pin_offset_y = {0, 0};
+  two.flat_net2pin = {0, 1};
+  two.flat_net2pin_start = {0, 2};
+  two.build_maps();
+  auto capped = two;
+  constrained.max_iterations = 40;
+  const auto cap = place(capped, constrained);
+  check(!cap.converged || cap.centroid.circles_converged,
+        "density-only convergence hides overlapping centroid circles");
+  constrained.max_iterations = 400;
+  auto spread = two;
+  const auto separated = place(spread, constrained);
+  check(separated.centroid.circles_converged && separated.converged,
+        "adaptive penalty does not separate a feasible equal-circle pair");
+  check(separated.centroid.effective_repulsion_weight >= 5 &&
+            !separated.history.empty(),
+        "missing circle penalty diagnostics");
+  rejects([&] { detail::centroid_repulsion(two, 1, 0); });
+  rejects([&] { detail::centroid_repulsion(two, -1, .5); });
+}
+int main() {
+  try {
+    candidate_copy_checks();
+    auto d = fixture();
+    repulsion_checks(d);
+    auto grad = detail::centroid_attraction(d, .3);
+    auto a = d, b = d;
+    a.centroid_groups.resize(1);
+    b.centroid_groups.erase(b.centroid_groups.begin());
+    auto ga = detail::centroid_attraction(a, .3),
+         gb = detail::centroid_attraction(b, .3);
+    for (int n = 0; n < 9; ++n) {
+      near(grad.x[n], ga.x[n] + gb.x[n], 1e-10,
+           "shared color loses one of its anchors");
+      near(grad.y[n], ga.y[n] + gb.y[n], 1e-10,
+           "shared color loses one of its anchors");
+    }
+    check(ga.x[7] != 0 && gb.x[7] != 0,
+          "outside standard cell does not get both candidate anchors");
+    // A third overlapping candidate contributes a third anchor, with no
+    // ownership.
+    auto triple = d;
+    triple.centroid_groups.push_back(d.centroid_groups[0]);
+    auto gt = detail::centroid_attraction(triple, .3);
+    near(gt.x[7], grad.x[7] + ga.x[7], 1e-10,
+         "n anchors reduced to at most two");
+    double sx = 0, sy = 0;
+    for (int n = 0; n < 9; ++n) {
+      sx += grad.x[n];
+      sy += grad.y[n];
+    }
+    near(sx, 0, 1e-9, "absolute x anchor introduced");
+    near(sy, 0, 1e-9, "absolute y anchor introduced");
+    auto shifted = d;
+    for (int n = 0; n < 9; ++n) {
+      shifted.node_x[n] += 70;
+      shifted.node_y[n] -= 20;
+    }
+    near(detail::centroid_attraction(shifted, .3).value, grad.value, 1e-8,
+         "centroid is tied to an absolute coordinate");
+    for (int axis = 0; axis < 2; ++axis)
+      for (int n = 0; n < 8; ++n) {
+        auto hi = d, lo = d;
+        double eps = 1e-3;
+        (axis ? hi.node_y : hi.node_x)[n] += eps;
+        (axis ? lo.node_y : lo.node_x)[n] -= eps;
+        double fd = (detail::centroid_attraction(hi, .3).value -
+                     detail::centroid_attraction(lo, .3).value) /
+                    (2 * eps);
+        near(fd, axis ? grad.y[n] : grad.x[n], 1e-5,
+             "finite-difference gradient mismatch");
+      }
+    auto padded = d;
+    for (int n = 0; n < 6; ++n) {
+      padded.node_x[n] -= 10;
+      padded.node_y[n] -= 10;
+      padded.node_size_x[n] += 20;
+      padded.node_size_y[n] += 20;
+    }
+    near(detail::centroid_attraction(padded, .3).value, grad.value, 1e-8,
+         "halo changes physical-area weights");
+    auto bad = d;
+    bad.centroid_groups[0].colors.push_back(0);
+    rejects([&] { bad.validate(); });
+    bad = d;
+    bad.centroid_groups[0].nodes.push_back(0);
+    rejects([&] { bad.validate(); });
+    Options o;
+    o.max_iterations = 40;
+    o.bins_x = o.bins_y = 8;
+    o.add_fillers = false;
+    o.legalize = o.detailed_place = false;
+    o.centroid_ramp = 20;
+    auto plain = d;
+    plain.centroid_groups.clear();
+    place(plain, o);
+    auto off = d;
+    place(off, o);
+    check(off.node_x == plain.node_x && off.node_y == plain.node_y,
+          "disabled centroid changes GP");
+    auto on = d;
+    o.centroid_weight = .25;
+    bool started = false;
+    o.observer = [&](const Design &snapshot, PlacementStage stage, int iter) {
+      if (stage == PlacementStage::centroid_start) {
+        started = true;
+        check(iter == 0, "R8H2 uses a preliminary GP");
+        check(snapshot.node_x == d.node_x && snapshot.node_y == d.node_y,
+              "R8H2 does not start from initial positions");
+      }
+    };
+    auto result = place(on, o);
+    check(started && result.centroid.completed &&
+              result.centroid.iterations == result.iterations,
+          "centroid force not active throughout first GP");
+    check(on.node_x[8] == d.node_x[8] && on.node_y[8] == d.node_y[8],
+          "fixed node moved");
+    auto separated = d;
+    o.centroid_repulsion_weight = 5;
+    place(separated, o);
+    check(separated.node_x[8] == d.node_x[8] &&
+              separated.node_y[8] == d.node_y[8],
+          "repulsion moved fixed cell");
+    o.centroid_repulsion_weight = -1;
+    rejects([&] { place(separated, o); });
+    o.centroid_repulsion_weight = 0;
+    GpState state;
+    rejects([&] { place(on, o, &state); });
+    o.centroid_weight = -1;
+    rejects([&] { place(on, o); });
+    std::cout
+        << "candidate thresholds, all-color centroids, additive n anchors, "
+           "outside cells, gradient, halo, same-type density circles and "
+           "from-scratch GP pass\n";
+  } catch (const std::exception &e) {
+    std::cerr << e.what() << '\n';
+    return 1;
+  }
+}

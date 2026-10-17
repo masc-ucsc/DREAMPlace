@@ -127,6 +127,11 @@ int main() {
     check(compensated.history[1].model_density < route.target_density);
     check(compensated.history[1].filler_charge_scale <
           compensated.history[0].filler_charge_scale);
+    auto legacy_fillers = congested;
+    route.routability_charge_compensation = false;
+    const auto legacy_charge = place(legacy_fillers, route);
+    check(legacy_charge.history.size() == 2 &&
+          legacy_charge.history.back().filler_charge_scale == 1);
     // Disabled controls preserve the old solver exactly, including RNG
     // sequence.
     auto plain = d, masked = d;

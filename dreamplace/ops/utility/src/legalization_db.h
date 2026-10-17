@@ -49,6 +49,10 @@ struct LegalizationDB {
   int num_regions;  ///< number of regions for flat_region_boxes and
                     ///< flat_region_boxes_start
 
+  // Optional native identity for macros smaller than the legacy height cutoff.
+  // A null mask preserves the original classifier exactly.
+  const unsigned char* node_macro_mask = nullptr;
+
   /// @brief check whether a cell is regarded as movable macros in legalization.
   /// This is mainly because it is painful to handle these cells for
   /// legalization.
@@ -58,7 +62,8 @@ struct LegalizationDB {
 #endif
     T height = node_size_y[node_id];
     return (node_id < num_movable_nodes &&
-            height > (row_height * DUMMY_FIXED_NUM_ROWS));
+            (height > (row_height * DUMMY_FIXED_NUM_ROWS) ||
+             (node_macro_mask && node_macro_mask[node_id])));
   }
   /// @brief align cell to a row
   inline T align2row(T y, T height) const {

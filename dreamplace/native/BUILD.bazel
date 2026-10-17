@@ -5,7 +5,11 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "placer",
     srcs = [
+        "alignment.cpp",
+        "align_snap.cpp",
         "cohesion.cpp",
+        "centroid.cpp",
+        "floorplan.cpp",
         "density_force.cpp",
         "density_map.cpp",
         "kernels.cpp",
@@ -17,6 +21,7 @@ cc_library(
     ],
     hdrs = [
         "constraints.hpp",
+        "floorplan.hpp",
         "orientation.hpp",
         "placement.hpp",
         "rudy.hpp",
@@ -133,7 +138,12 @@ cc_test(
 filegroup(
     name = "placer_srcs",
     srcs = [
+        "alignment.cpp",
+        "align_snap.cpp",
         "cohesion.cpp",
+        "centroid.cpp",
+        "floorplan.cpp",
+        "floorplan.hpp",
         "constraints.hpp",
         "density_force.cpp",
         "density_map.cpp",
@@ -163,5 +173,43 @@ cc_test(
     size = "small",
     timeout = "short",
     srcs = ["repulsion_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "alignment_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["alignment_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "align_snap_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["align_snap_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "centroid_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["centroid_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "floorplan_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["floorplan_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_binary(
+    name = "floorplan_demo",
+    srcs = ["floorplan_demo.cpp"],
     deps = [":placer"],
 )
