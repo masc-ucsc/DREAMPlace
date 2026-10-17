@@ -10,6 +10,11 @@
 #include <stdexcept>
 namespace DreamPlace::native::detail {
 namespace {
+bool repel(const CentroidGroup &a, const CentroidGroup &b) {
+  if (a.repulsion_scope >= 0 || b.repulsion_scope >= 0)
+    return a.repulsion_scope >= 0 && a.repulsion_scope == b.repulsion_scope;
+  return a.family == b.family;
+}
 struct Moment {
   double area = 0, x = 0, y = 0, m2 = 0;
   int cells = 0, macros = 0;
@@ -114,7 +119,7 @@ CircleOverlap centroid_circle_overlaps(const Design &d, double density) {
   CircleOverlap out;
   for (size_t i = 0; i < groups.size(); ++i)
     for (size_t j = i + 1; j < groups.size(); ++j) {
-      if (d.centroid_groups[i].family != d.centroid_groups[j].family)
+      if (!repel(d.centroid_groups[i], d.centroid_groups[j]))
         continue;
       ++out.pairs;
       const double reach =
@@ -150,7 +155,7 @@ Gradient centroid_repulsion(const Design &d, double lambda, double density) {
   }
   for (size_t i = 0; i < moments.size(); ++i) {
     for (size_t j = i + 1; j < moments.size(); ++j) {
-      if (d.centroid_groups[i].family != d.centroid_groups[j].family)
+      if (!repel(d.centroid_groups[i], d.centroid_groups[j]))
         continue;
       double dx = moments[i].x - moments[j].x;
       double dy = moments[i].y - moments[j].y;

@@ -37,6 +37,9 @@ struct CentroidGroup {
   std::vector<int> nodes, colors;
   std::string copy_parent{}; // immediate hierarchy parent used for replication
   int copies_per_parent = 0;
+  // -1 keeps same-family repulsion. Nonnegative keys restrict repulsion to
+  // one candidate hierarchy scope, independently of snap/type families.
+  int repulsion_scope = -1;
 };
 struct CentroidSample {
   double x = 0, y = 0, radius = 0;

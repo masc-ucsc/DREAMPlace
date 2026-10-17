@@ -578,3 +578,183 @@ layers; the model conservatively blocks each such layer across the full macro
 occupancy envelope. A 1% capacity floor keeps fully blocked bins finite.
 `RudyOptions::pin_access` estimates macro signal-pin demand against available
 tracks at bin edges. These estimates are not a detailed router or signoff model.
+
+### Optional same-class macro alignment and soft snapping
+
+`Design::node_align_class` uses one integer per node, with `-1` opting out.
+The host assigns a distinct class to each LEF master × fully scoped synthesis
+color. Only movable macros in `node_macro` participate. Fixed nodes, fillers
+and standard cells are excluded.
+
+`macro_align_weight=0` disables GP alignment exactly. Positive weights scale
+an equal/opposite axis force by the current mean macro wirelength+density force.
+`macro_align_sigma=0` is quadratic; positive sigma gives a bounded well, with
+0.25 used in the Eyeriss experiment. Degree normalization reduces pair-count
+bias. Pair projections must overlap on exactly one axis. The pair list refreshes
+every20 global iterations and is preserved across GP continuation. Changed
+active alignment options/classes reject continuation. `macro_align_start=100`
+and `macro_align_full=500` define the squared ramp; enabled runs cannot stop
+before full strength. `macro_align_overlap_boost=0` and
+`macro_align_nearest=false` keep the ordinary overlap weight and all-pairs rule.
+
+`macro_snap=false` preserves stock legalization. When enabled,
+`macro_snap_tolerance=0.25` groups nearby same-class macros per axis and rounds
+the median origin onto the site/row lattice. Macro anchors change before the
+LP; standard-cell anchors do not. Chain equalities use finite-capacity arcs
+with `macro_snap_weight=100` against unit displacement. Core/halo constraints
+remain uncapacitated hard arcs. A group can break rather than violate geometry;
+`Result::alignment` records exact/broken groups, violated equalities and macro
+movement from GP. The opt-in macro mask includes small SRAMs below the legacy
+five-row classifier and protects their positions through cell LG/detail.
+No flips or second cell-global-placement pass are added.
+
+The new tests cover pair selection and color isolation, finite-difference
+quadratic/bounded gradients, ramps, continuation mismatches, disabled controls,
+small SRAMs, halo spacing and soft-vs-hard conflicts. The difference LP is also
+checked against an exhaustive bounded-integer oracle with soft capacities.
+
+`routability_charge_compensation=true` retains the existing charge budget.
+False is an explicit compatibility setting for the earlier R4 inflation-only
+experiment, not a changed default. Direct DCT loops and the32-bin default are
+retained; automatic refinement remains capped at64 per axis.
+
+### Opt-in candidate/color centroids (R8H2)
+
+The rejected R8H template engine is removed. R8H2 starts its first GP from scratch
+with moving-centroid attraction, then exports legal macro locations for the usual
+fixed-macro second placement pass. No preliminary macro GP or continuation phase
+is used. The default centroid weight remains zero.
+
+`detail::centroid_candidates(design, paths, masters, minimum_area,
+minimum_copies = 4)` finds relative macro path/master/size structures with more
+than two movable macros and physical logic-plus-macro area strictly above the
+caller's equivalent-cell threshold. The unit is mean mapped standard-cell area,
+or site × row area if none exist. At least `minimum_copies` qualifying copies must
+share one immediate hierarchy parent; copies across parents never pool. The
+copy threshold must be at least two. Count siblings before collapsing unary
+wrappers, so an ineligible singleton inner wrapper does not hide repeated outer
+instances. Reports expose `copy_parent` and `copies_per_parent`; numeric `parent`
+still identifies the nearest retained candidate. The family identity remains
+structural across qualifying parent scopes for same-type repulsion. Host color
+keys are scoped synthesis identities, not numeric colors reused across unrelated
+instances. LiveHD exposes the copy threshold as `synth.place.fp.min_copies` (4).
+
+Each candidate includes every full color seen inside its hierarchy, including
+colored cells outside that hierarchy, plus its uncolored descendants. The current
+physical-area-weighted centroid uses all those macros and standard cells. A color
+in n candidates has n anchors toward the n candidate centroids. Membership overlap
+is intentional. Parent ids describe hierarchy; no ownership or hard bounds remove
+any anchor. Identical memberships can have identical centroids.
+
+The variance energy per group is lambda/A times sum of a*|p-centroid|^2. Color
+moments are computed once per iteration, candidate coefficients are accumulated
+per color, and a final node pass applies their sum. This is exactly the sum of all
+anchors without scanning a large shared color once per candidate. Physical-area
+metadata survives halo padding. The centroid derivative cancels, forces sum to
+zero, and translation does not introduce an absolute anchor.
+
+With nonzero `Options::centroid_weight`, the attraction ramps over
+`centroid_ramp` iterations (default100) in ordinary GP, sharing its normal stop/cap,
+repulsion, density and routability controls. `centroid_start` observes iteration0;
+`Result::centroid` reports iterations and force time. External GP continuations with
+active groups are rejected. `centroid_test` checks shared n-anchor additivity,
+outside standard cells, finite-difference gradients, physical halo weights,
+default-off identity, fixed positions and from-scratch initialization.
+
+
+### Same-type centroid-circle repulsion (R8H3)
+
+`Options::centroid_repulsion_weight` is opt-in and defaults to zero, preserving
+attraction-only and ordinary GP. It requires active centroid attraction. The
+LiveHD R8H3 experiment supplies weight 5 and a >1000-equivalent-cell eligibility
+threshold; the native candidate factory accepts the caller's threshold.
+
+`detail::centroid_cell_area` supplies the common mean physical standard-cell
+area unit. Both candidate eligibility and circle sizing count physical cells and
+macro-equivalent area. For each candidate, its full anchored physical area A
+(including shared colors outside the hierarchy) reserves circle area A/rho at
+the requested target density: radius = sqrt(A/(pi*rho)). Each node is counted
+once within a candidate; its area contributes to every candidate attracting it.
+Halo padding and temporary fillers do not change this area.
+
+Only equal-family pairs interact, with energy
+`lambda * max(0, r_i+r_j-||c_i-c_j||)^2`. Finite-range gradients are propagated
+through the moving centroids using a_i/A_g and summed for shared colors. Equal
+centers get a deterministic separating subgradient. Repulsion shares the
+attraction ramp and normalization; the requested density, rather than the
+routability-adjusted density or macro-charge scaling, sizes the circles. This
+adds no hard bounds, fixed centroid terminals, or individual-cell pair forces.
+The attraction-only and fixed-penalty paths retain density-based stopping. Tests cover the analytic
+gradient, type filtering, cutoff, area/density scaling, halo invariance, shared
+memberships, force balance, deterministic ties and fixed nodes.
+
+
+R8H3 now enables `centroid_adaptive_repulsion` in LiveHD. The geometry is unchanged:
+repulsion persists until r_i+r_j (two radii for equal circles). Every 20 iterations
+after the attraction ramp, the penalty doubles when maximum relative circle
+penetration improves by less than 10%, up to 10000 times its initial weight.
+The density weight is held when its own target is satisfied and only circle
+separation remains pending. GP can terminate successfully only when both density
+and `centroid_stop_overlap` (default 0.001 of r_i+r_j) are satisfied, or stops
+unconverged at the existing iteration cap. The option defaults off in the native
+API; ordinary placement and attraction-only modes preserve their prior behavior.
+`GpSample` and `CentroidReport` expose actual overlap, effective penalty and circle
+convergence. The equal-radius regression checks nonzero force at 1.5r, zero
+outside 2r, and optimization of a feasible overlapping pair.
+
+
+For a nested candidate, parent attraction acts through every child member as well
+as the child's own attraction. Summing the parent gradient over the child gives
+2*lambda*A_child/A_parent*(c_child-c_parent), so the child as a whole is pulled
+toward the parent. The child remains deformable. Different-type parent/child
+pairs have no repulsion; same-type copies do. The nested regression checks this
+net force and verifies that adding the parent creates no repulsion on its child.
+
+
+### Circle centroid snapping and frozen targets
+
+`floorplan.hpp` provides the pure native `snap_floorplan(circles, bounds, options)`
+API. It performs no file I/O and does not run GP. Lines, neighbor spacings and
+symmetry axes are fitted from the supplied positions; no global lattice is given.
+The default alignment threshold is strictly one smaller-circle radius, permitting
+half-pitch staggered rows. Scalar penalized dynamic programming groups similar
+neighbor gaps. Alignment, spacing and symmetry relations require the same type
+and immediate parent candidate; roots share the implicit design scope. Different
+parent candidates retain independent snap lines, gap classes and symmetry axes.
+Hard same-type circle separation still applies across parents.
+Accepted exact equalities are fitted by area-weighted Dykstra
+projection with same-type circle-separation halfspaces along initial pair normals,
+core center bounds, and local movement budgets. Parent translations carry child
+initial targets before child types are fitted. Complete circles may extend outside
+the core; these are interaction ranges, not cell fences.
+
+The relationship selector is greedy and the projection solver is bounded; rejection
+does not prove mathematical infeasibility. Failed families are retained and counted
+in `infeasible_families`, and `feasible` is false if separation is unresolved.
+`FloorplanSnap` reports target geometry, accepted relations, rejected attempts,
+maximum penetration/displacement and time. This is an experimental local heuristic,
+not a globally optimal symmetry or packing algorithm.
+
+`Design::centroid_targets` optionally supplies frozen world-coordinate targets,
+one per `centroid_groups` entry. With `Options::centroid_weight>0`, attraction uses
+those targets. Empty targets retain the original moving-centroid energy and gradient.
+Frozen-target gradients include translation; moving-centroid gradients still sum to
+zero per group. The caller disables centroid repulsion for refinement. Targets do
+not enforce exact member means or constrain hard region bounds. Shared full-color
+memberships can couple several targets; independent point feasibility does not
+establish that every target can be realized by those members.
+
+LiveHD exposes this as opt-in `synth.place.fp=true`: floorplan GP without LG/DP,
+snap, then warm-start frozen-target GP and native LG/DP. The Eyeriss runner separately
+fixes SRAMs for the normal final cell GP without anchors. All evaluation GP grids
+are 64×64; native/default options remain unchanged. `floorplan_test` covers a mesh,
+staggered triangle, centered tree, projection threshold, bounded-span chains,
+independent families, inherited parent translations, unequal radii, hard-conflict
+reporting, unit scaling, and frozen-target finite differences. `floorplan_demo`
+emits the three pattern experiments as JSON for external plots.
+
+Eyeriss: all 204 targets separate in 1.15 s, accepting 123 line, 36 spacing and
+32 midpoint relationships. Weak-target refinement then reintroduces measured-mean
+circle overlaps. Final legal HPWL is 6.578 m versus 4.595 m for the reused R8H3
+reference (+43.15%). Extra refinement GP and snapping change together in this
+comparison. Keep off by default; no new routing/timing result is claimed.

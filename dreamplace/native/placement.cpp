@@ -358,8 +358,8 @@ void Design::validate() const {
     for (size_t g = 0; g < centroid_groups.size(); ++g) {
       const auto &group = centroid_groups[g];
       require(group.parent >= -1 && group.parent < static_cast<int>(g) &&
-                  group.family >= 0,
-              "invalid centroid family/parent");
+                  group.family >= 0 && group.repulsion_scope >= -1,
+              "invalid centroid family/parent/repulsion scope");
       require(!group.nodes.empty() || !group.colors.empty(),
               "empty centroid group");
       std::set<int> nodes, colors;
