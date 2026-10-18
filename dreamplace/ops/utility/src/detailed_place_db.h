@@ -55,6 +55,10 @@ struct DetailedPlaceDB {
   const T* pin_offset_x;
   const T* pin_offset_y;
   const unsigned char* net_mask;
+#ifdef DREAMPLACE_TORCH_FREE
+  // Optional native timing weights. The legacy/Torch interface is unchanged.
+  const T* net_weights = nullptr;
+#endif
   T xl;
   T yl;
   T xh;
@@ -198,7 +202,11 @@ struct DetailedPlaceDB {
         box.yl == std::numeric_limits<T>::max()) {
       return (T)0;
     }
-    return (box.xh - box.xl) + (box.yh - box.yl);
+    T wirelength = (box.xh - box.xl) + (box.yh - box.yl);
+#ifdef DREAMPLACE_TORCH_FREE
+    if (net_weights) wirelength *= net_weights[net_id];
+#endif
+    return wirelength;
   }
   /// @brief compute HPWL for all nets
   T compute_total_hpwl() const {

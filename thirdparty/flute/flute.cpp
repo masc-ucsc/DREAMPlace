@@ -78,17 +78,15 @@ void readLUT(const char* powv, const char* post) {
     }
     dsq = d * d;
 
-    // Return value of fscanf/fread functions.
-    int ret = 0;
-    ret = fscanf(fpwv, "d=%d\n", &d);
+    (void)fscanf(fpwv, "d=%d\n", &d);
 #if FLUTEROUTING == 1
-    ret = fscanf(fprt, "d=%d\n", &d);
+    (void)fscanf(fprt, "d=%d\n", &d);
 #endif
     for (k = 0; k < numgrp[d]; k++) {
       ns = (int)charnum[fgetc(fpwv)];
 
       if (ns == 0) {  // same as some previous group
-        ret = fscanf(fpwv, "%d\n", &kk);
+        (void)fscanf(fpwv, "%d\n", &kk);
         numsoln[d][k] = numsoln[d][kk];
         LUT[d][k] = LUT[d][kk];
       } else {
@@ -108,7 +106,7 @@ void readLUT(const char* powv, const char* post) {
 #if FLUTEROUTING == 1
           nn = 2 * d - 2;
           ne = 2 * d - 3;
-          ret = fread(line, 1, d - 2, fprt);
+          (void)fread(line, 1, d - 2, fprt);
           linep = line;
           for (j = d; j < nn; j++) {
             c = *(linep++);
@@ -121,7 +119,7 @@ void readLUT(const char* powv, const char* post) {
             p->col[j - d] = modd[c];
             p->neighbor[j] = j;  // initialized
           }
-          ret = fread(line, 1, ne + 1, fprt);
+          (void)fread(line, 1, ne + 1, fprt);
           linep = line;  // last char = \n
           for (j = 0; j < ne; j++) {
             c = *(linep++);
@@ -143,9 +141,8 @@ DType flute_wl(int d, DType* x, DType* y, int acc) {
   Point* pt = (Point*)malloc(sizeof(Point) * allocateSize);
   /* replaced the selection sort with stl stable_sort. mckim
 Point* *ptp = (Point**) malloc(sizeof(Point*)*allocateSize); */
-  Point* tmpp;
-  DType minval, l, xu, xl, yu, yl;
-  int i, j, minidx;
+  DType l, xu, xl, yu, yl;
+  int i;
 
   if (d == 2)
     l = std::abs(x[0] - x[1]) + std::abs(y[0] - y[1]);

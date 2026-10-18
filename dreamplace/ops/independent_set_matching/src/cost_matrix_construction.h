@@ -91,7 +91,11 @@ void cost_matrix_construction(const DetailedPlaceDBType& db, IndependentSetMatch
                             T bxh = std::max(box.xh, xxl+db.pin_offset_x[node_pin_id]);
                             T byl = std::min(box.yl, yyl+db.pin_offset_y[node_pin_id]);
                             T byh = std::max(box.yh, yyl+db.pin_offset_y[node_pin_id]);
-                            target_hpwl += (bxh-bxl) + (byh-byl); 
+                            T contribution = (bxh-bxl) + (byh-byl);
+#ifdef DREAMPLACE_TORCH_FREE
+                            if (db.net_weights) contribution *= db.net_weights[net_id] * state.weight_scale;
+#endif
+                            target_hpwl += contribution;
                         }
                     }
                 }
@@ -102,6 +106,10 @@ void cost_matrix_construction(const DetailedPlaceDBType& db, IndependentSetMatch
                 target_hpwl = state.large_number; 
             }
 
+#ifdef DREAMPLACE_TORCH_FREE
+            // Backstop: weighted costs are int, never exceed an infeasible slot.
+            target_hpwl = std::min(target_hpwl, state.large_number);
+#endif
             if (!major) // row major 
             {
                 cost_matrix[independent_set.size()*k + j] = target_hpwl; 

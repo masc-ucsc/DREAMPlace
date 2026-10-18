@@ -147,7 +147,11 @@ T compute_reorder_hpwl(const DetailedPlaceDB<T>& db, KReorderState<T>& state,
           bxl = std::min(bxl, other_node_xl);
           bxh = std::max(bxh, other_node_xl);
         }
+#ifdef DREAMPLACE_TORCH_FREE
+        cost += (bxh - bxl) * (db.net_weights ? db.net_weights[net_id] : T(1));
+#else
         cost += bxh - bxl;
+#endif
         state.net_markers[net_id] = 1;
       }
     }

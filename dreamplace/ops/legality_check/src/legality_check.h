@@ -171,9 +171,7 @@ bool overlapCheck(const T* node_size_x, const T* node_size_y, const T* x,
 
   // potential numerical issue (fix from cpp branch)
   auto getSiteXL = [&](T xx) { return int(floorDiv(xx - xl, site_width)); };
-  auto getSiteYL = [&](T yy) { return int(floorDiv(yy - yl, row_height)); };
   auto getSiteXH = [&](T xx) { return int(ceilDiv(xx - xl, site_width)); };
-  auto getSiteYH = [&](T yy) { return int(ceilDiv(yy - yl, row_height)); };
 
   // add a box to row
   auto addBox2Row = [&](int id, T bxl, T byl, T bxh, T byh) {
@@ -263,7 +261,6 @@ bool overlapCheck(const T* node_size_x, const T* node_size_y, const T* x,
           T cur_yl = getYL(node_id);
           T cur_xh = getXH(node_id);
           T cur_yh = getYH(node_id);
-          int prev_site_xl = getSiteXL(prev_xl); 
           int prev_site_xh = getSiteXH(prev_xh); 
           int cur_site_xl = getSiteXL(cur_xl); 
           int cur_site_xh = getSiteXH(cur_xh); 

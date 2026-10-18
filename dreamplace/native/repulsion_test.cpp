@@ -10,8 +10,86 @@ void check(bool v) {
     throw std::runtime_error("repulsion assertion");
   }
 }
+void fixed_macro_edges() {
+  Design d;
+  d.layout = {0, 0, 40, 40, 1, 1};
+  d.num_movable = 2;
+  d.node_x = {11.5, 0, 10};
+  d.node_y = {14, 14, 10};
+  d.node_size_x = {1, 1, 10};
+  d.node_size_y = {1, 1, 10};
+  d.node_macro = {0, 0, 1};
+  d.build_maps();
+  for (double x : {11.5, 9.2}) {
+    d.node_x[0] = x;
+    const auto g = detail::fixed_macro_overlap(d, 4, 4, 3);
+    check(g.value > 0 && g.x[0] > 0 && g.y[0] == 0);
+    check(g.x[1] == 0 && g.y[1] == 0 && g.x[2] == 0 && g.y[2] == 0);
+    for (bool axis : {false, true}) {
+      auto hi = d, lo = d;
+      (axis ? hi.node_y : hi.node_x)[0] += 1e-5;
+      (axis ? lo.node_y : lo.node_x)[0] -= 1e-5;
+      const double fd = (detail::fixed_macro_overlap(hi, 4, 4, 3).value -
+                         detail::fixed_macro_overlap(lo, 4, 4, 3).value) /
+                        2e-5;
+      check(std::abs(fd - (axis ? g.y[0] : g.x[0])) < 1e-6);
+    }
+  }
+  d.node_x[0] = 0.1;
+  d.node_x[2] = 0;
+  const auto edge = detail::fixed_macro_overlap(d, 4, 4, 3);
+  check(edge.x[0] == 0 &&
+        edge.y[0] > 0); // Cannot escape through the core's left wall.
+  d.node_x[0] = 11.5;
+  d.node_x[2] = 10;
+  auto active = d, baseline = d, disabled = d;
+  Options o;
+  o.max_iterations = 200;
+  o.min_iterations = 40;
+  o.bins_x = o.bins_y = 4;
+  o.add_fillers = o.legalize = o.detailed_place = false;
+  o.density_upper_bound = true;
+  o.fixed_macro_overlap_weight = 20;
+  const double before = detail::fixed_macro_overlap(active, 4, 4, 20).value;
+  place(active, o);
+  check(detail::fixed_macro_overlap(active, 4, 4, 20).value < before * .1);
+  check(active.node_x[2] == 10 && active.node_y[2] == 10);
+  o.fixed_macro_overlap_weight = 0;
+  place(baseline, o);
+  place(disabled, o);
+  check(baseline.node_x == disabled.node_x &&
+        baseline.node_y == disabled.node_y);
+  auto unmarked = d;
+  unmarked.node_macro.clear();
+  check(detail::fixed_macro_overlap(unmarked, 4, 4, 3).value == 0);
+  auto no_obstacles = unmarked;
+  o.fixed_macro_overlap_weight = 0;
+  place(no_obstacles, o);
+  o.fixed_macro_overlap_weight = 20;
+  place(unmarked, o);
+  check(no_obstacles.node_x == unmarked.node_x &&
+        no_obstacles.node_y == unmarked.node_y);
+  // Fillers are appended past node_macro and must never be read as obstacles.
+  auto filled = d;
+  filled.node_x.push_back(12);
+  filled.node_y.push_back(12);
+  filled.node_size_x.push_back(1);
+  filled.node_size_y.push_back(1);
+  const auto with_filler = detail::fixed_macro_overlap(filled, 4, 4, 3);
+  const auto without = detail::fixed_macro_overlap(d, 4, 4, 3);
+  check(with_filler.value == without.value && with_filler.x.size() == 4 &&
+        with_filler.x[3] == 0 && with_filler.y[3] == 0 &&
+        with_filler.x[0] == without.x[0]);
+  auto with_fillers = d;
+  o.add_fillers = true;
+  o.density_upper_bound = false;
+  o.fixed_macro_overlap_weight = 20;
+  o.max_iterations = 40;
+  place(with_fillers, o);
+}
 int main() {
   try {
+    fixed_macro_edges();
     Design d;
     d.layout = {0, 0, 1413, 1413, 1, 1};
     d.num_movable = 2;

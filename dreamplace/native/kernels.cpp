@@ -146,12 +146,8 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
 }
 
 void detailed_place(Design &d, int bx, int by, int threads,
-                    bool preserve_macros) {
-  // Legacy detailed kernels optimize unweighted HPWL. Avoid undoing the
-  // timing-weighted objective until weighted detailed placement is supported.
-  if (std::any_of(d.net_weights.begin(), d.net_weights.end(),
-                  [](double w) { return w != 1; }))
-    return;
+                    bool preserve_macros, int iterations,
+                    std::vector<DetailedSample> *history) {
   auto ix = d.node_x, iy = d.node_y;
   std::vector<int> regions(ix.size(), 0);
   const auto &l = d.layout;
@@ -172,6 +168,7 @@ void detailed_place(Design &d, int bx, int by, int threads,
   db.pin_offset_x = d.pin_offset_x.data();
   db.pin_offset_y = d.pin_offset_y.data();
   db.net_mask = d.net_mask.data();
+  db.net_weights = d.net_weights.data();
   db.xl = l.xl;
   db.yl = l.yl;
   db.xh = l.xh;
@@ -189,7 +186,7 @@ void detailed_place(Design &d, int bx, int by, int threads,
   db.num_pins = d.pin2node.size();
   db.num_nets = d.net_weights.size();
   // Each pass must preserve legality and not increase HPWL.
-  auto run = [&](auto pass) {
+  auto run = [&](const char *kernel, auto pass) {
     auto x = d.node_x, y = d.node_y;
     double before = hpwl(d);
     pass();
@@ -198,14 +195,23 @@ void detailed_place(Design &d, int bx, int by, int threads,
       for (int i = 0; i < d.num_movable; ++i)
         moved_macro |=
             d.node_macro[i] && (d.node_x[i] != x[i] || d.node_y[i] != y[i]);
-    if (!is_legal(d) || hpwl(d) > before + 1e-8 || moved_macro) {
+    std::string legality_issue;
+    const bool legal = is_legal(d, history ? &legality_issue : nullptr);
+    const double after = hpwl(d);
+    const bool rejected = !legal || after > before + 1e-8 || moved_macro;
+    if (history)
+      history->push_back({kernel, before, after, legal, !moved_macro, !rejected,
+                          legality_issue});
+    if (rejected) {
       // Copy into existing arrays: db contains non-owning pointers.
       std::copy(x.begin(), x.end(), d.node_x.begin());
       std::copy(y.begin(), y.end(), d.node_y.begin());
     }
   };
-  run([&] { kreorderCPULauncher(db, 4, 2, threads); });
-  run([&] { independentSetMatchingCPULauncher(db, 16, 16, 2, threads); });
-  run([&] { globalSwapCPULauncher(db, 2); });
+  run("k_reorder", [&] { kreorderCPULauncher(db, 4, iterations, threads); });
+  run("independent_set_matching", [&] {
+    independentSetMatchingCPULauncher(db, 16, 16, iterations, threads);
+  });
+  run("global_swap", [&] { globalSwapCPULauncher(db, iterations); });
 }
 } // namespace DreamPlace::native::detail

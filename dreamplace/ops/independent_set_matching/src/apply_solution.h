@@ -91,7 +91,6 @@ void apply_solution(DetailedPlaceDBType& db,
       //}
 #endif
     // move cells
-    int count = 0;
     for (unsigned int j = 0; j < independent_set.size(); ++j) {
 #ifdef DEBUG
       dreamplaceAssert(j < solution.size());
@@ -107,7 +106,6 @@ void apply_solution(DetailedPlaceDBType& db,
         dreamplaceAssert(target_pos_id < db.num_movable_nodes);
         //#endif
         if (j != (unsigned int)sol_j) {
-          count += 1;
 
 #ifdef DEBUG
           // dreamplacePrint(kDEBUG, "move node %d(%d) pos %d(%d): (%g, %g) =>

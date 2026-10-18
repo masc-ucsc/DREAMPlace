@@ -4,6 +4,7 @@
  * @date   Oct 2018
  */
 #include "function_cpu.h"
+#include <vector>
 
 DREAMPLACE_BEGIN_NAMESPACE
 
@@ -62,16 +63,15 @@ void legalizeBinCPU(
 
 
             int num_node_rows = ceilDiv(height, row_height); // may take multiple rows 
-            int blank_index_offset[num_node_rows]; 
-            std::fill(blank_index_offset, blank_index_offset+num_node_rows, 0);
+            std::vector<int> blank_index_offset(num_node_rows, 0);
 
             int blank_initial_bin_id_y = floorDiv((init_yl-yl), blank_bin_size_y);
             blank_initial_bin_id_y = std::min(blank_bin_id_yh-1, std::max(blank_bin_id_yl, blank_initial_bin_id_y));
             int blank_bin_id_dist_y = std::max(blank_initial_bin_id_y+1, blank_bin_id_yh-blank_initial_bin_id_y); 
 
             int best_blank_bin_id_y = -1;
-            int best_blank_bi[num_node_rows]; 
-            std::fill(best_blank_bi, best_blank_bi+num_node_rows, -1); 
+            std::vector<int> best_blank_bi(num_node_rows, -1);
+            std::vector<int> row_best_blank_bi(num_node_rows);
             T best_cost = xh-xl+yh-yl; 
             T best_xl = -1; 
             T best_yl = -1; 
@@ -90,8 +90,7 @@ void legalizeBinCPU(
                 // blanks in this bin 
                 const std::vector<Blank<T> >& blanks = bin_blanks.at(blank_bin_id);
 
-                int row_best_blank_bi[num_node_rows]; 
-                std::fill(row_best_blank_bi, row_best_blank_bi+num_node_rows, -1); 
+                std::fill(row_best_blank_bi.begin(), row_best_blank_bi.end(), -1);
                 T row_best_cost = xh-xl+yh-yl;
                 T row_best_xl = -1; 
                 T row_best_yl = -1; 
@@ -103,7 +102,7 @@ void legalizeBinCPU(
                     // for multi-row height cells, check blanks in upper rows  
                     // find blanks with maximum intersection 
                     blank_index_offset[0] = bi; 
-                    std::fill(blank_index_offset+1, blank_index_offset+num_node_rows, -1); 
+                    std::fill(blank_index_offset.begin()+1, blank_index_offset.end(), -1);
 
                     while (true)
                     {
@@ -152,7 +151,7 @@ void legalizeBinCPU(
                             // update best cost 
                             if (cost < row_best_cost)
                             {
-                                std::copy(blank_index_offset, blank_index_offset+num_node_rows, row_best_blank_bi); 
+                                std::copy(blank_index_offset.begin(), blank_index_offset.end(), row_best_blank_bi.begin());
                                 row_best_cost = cost; 
                                 row_best_xl = target_xl; 
                                 row_best_yl = target_yl; 
@@ -175,7 +174,7 @@ void legalizeBinCPU(
                 if (row_best_cost < best_cost)
                 {
                     best_blank_bin_id_y = blank_bin_id_y; 
-                    std::copy(row_best_blank_bi, row_best_blank_bi+num_node_rows, best_blank_bi);
+                    std::copy(row_best_blank_bi.begin(), row_best_blank_bi.end(), best_blank_bi.begin());
                     best_cost = row_best_cost; 
                     best_xl = row_best_xl; 
                     best_yl = row_best_yl; 

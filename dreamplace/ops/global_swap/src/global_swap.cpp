@@ -69,6 +69,9 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
           }
         }
         T hpwl = box.xh - box.xl + box.yh - box.yl;
+#ifdef DREAMPLACE_TORCH_FREE
+        if (db.net_weights) hpwl *= db.net_weights[net_id];
+#endif
         cost += hpwl;
       }
     }
@@ -118,6 +121,9 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
           continue;
         }
         T hpwl = box.xh - box.xl + box.yh - box.yl;
+#ifdef DREAMPLACE_TORCH_FREE
+        if (db.net_weights) hpwl *= db.net_weights[net_id];
+#endif
         cost += hpwl;
       }
     }
@@ -203,6 +209,13 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
               ? std::min(db.xh,
                          db.x[row2node_map[row_id][node2row2node_index + 1]])
               : db.xh;
+#ifdef DREAMPLACE_TORCH_FREE
+      // Fixed macro edges need not lie on sites. Clamp to the inner site
+      // interval, otherwise the clamp below undoes the snapped cell position.
+      const auto space = db.align2site(Space<T>{space_xl, space_xh});
+      space_xl = space.xl;
+      space_xh = space.xh;
+#endif
       if (space_xh - space_xl < db.node_size_x[target_node_id]) {
         return (db.xh - db.xl) + (db.yh - db.yl);  // some large number
       }
@@ -224,6 +237,12 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
                          db.x[row2node_map[target_row_id]
                                           [target_node2row2node_index + 1]])
               : db.xh;
+#ifdef DREAMPLACE_TORCH_FREE
+      const auto target_space =
+          db.align2site(Space<T>{target_space_xl, target_space_xh});
+      target_space_xl = target_space.xl;
+      target_space_xh = target_space.xh;
+#endif
       if (target_space_xh - target_space_xl < db.node_size_x[node_id]) {
         return (db.xh - db.xl) + (db.yh - db.yl);  // some large number
       }
@@ -280,15 +299,12 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
   int apply_solution_runs = 0;
   CPUTimer::hr_clock_rep iter_time_start, iter_time_stop;
 
-  // count number of movement
-  int num_moved = 0;
   std::vector<T> hpwls(max_iters + 1);
   hpwls[0] = db.compute_total_hpwl();
   dreamplacePrint(kINFO, "initial hpwl = %.3f\n", hpwls[0]);
 
   for (int iter = 0; iter < max_iters; ++iter) {
     iter_time_start = CPUTimer::getGlobaltime();
-    num_moved = 0;
     // for (unsigned int i = 0; i < ordered_nodes.size(); ++i)
     //{
     //    optimal_regions[i] = db.compute_optimal_region(i);
@@ -335,6 +351,11 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
                      std::abs(node_bin_y - opt_center_bin_y);
       unsigned int max_diamond_search_sequence =
           std::min((std::size_t)(distance * distance * 2), search_grids.size());
+#ifdef DREAMPLACE_TORCH_FREE
+      // Small cells commonly fit inside one bin. A zero edge/center distance
+      // still needs to search the seed bin, rather than skipping all swaps.
+      max_diamond_search_sequence = std::max(1u, max_diamond_search_sequence);
+#endif
 
       SwapCandidate<T> best_cand;
       best_cand.node_id = node_id;
@@ -445,7 +466,6 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
         //        best_cand.target_node_yl, best_cand.cost);
         if (db.x[best_cand.node_id] != best_cand.node_xl ||
             db.y[best_cand.node_id] != best_cand.node_yl) {
-          ++num_moved;
         }
         int row_id = db.pos2site_y(db.y[best_cand.node_id]);
         int target_node_row_id = db.pos2site_y(db.y[best_cand.target_node_id]);

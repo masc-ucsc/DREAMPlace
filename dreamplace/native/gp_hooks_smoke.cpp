@@ -1,5 +1,6 @@
 // BSD-3-Clause. See LICENSE.
 #include "dreamplace/native/placement.hpp"
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 using namespace DreamPlace::native;
@@ -51,6 +52,169 @@ int main() {
     }
     check(bad && state.x == history.x && state.iteration == history.iteration);
     split = old;
+    auto soft = fixture();
+    Options soft_options;
+    soft_options.max_iterations = 20;
+    soft_options.bins_x = soft_options.bins_y = 8;
+    soft_options.add_fillers = soft_options.legalize =
+        soft_options.detailed_place = false;
+    GpState soft_state;
+    place(soft, soft_options, &soft_state);
+    soft_options.density_upper_bound = true;
+    bool soft_changed = false;
+    try {
+      place(soft, soft_options, &soft_state);
+    } catch (const std::invalid_argument &) {
+      soft_changed = true;
+    }
+    check(soft_changed);
+    soft = fixture();
+    check(std::isfinite(place(soft, soft_options).hpwl));
+    // A satisfied soft upper bound must not repel an isolated cell with no data
+    // nets merely because a different part of the die contains a fixed macro.
+    Design vacant;
+    vacant.layout = {0, 0, 100, 100, 1, 1};
+    vacant.num_movable = 1;
+    vacant.node_x = {80, 20, 80.5};
+    vacant.node_y = {50, 20, 50.5};
+    vacant.node_size_x = {1, 40, 0};
+    vacant.node_size_y = {1, 60, 0};
+    vacant.node_macro = {0, 1, 0};
+    vacant.flat_net2pin_start = {0};
+    vacant.build_maps();
+    auto vacancy_options = soft_options;
+    vacancy_options.exact_macro_density = true;
+    vacancy_options.target_density = .5;
+    vacancy_options.bins_x = vacancy_options.bins_y = 10;
+    const auto optimum = vacant;
+    place(vacant, vacancy_options);
+    check(vacant.node_x == optimum.node_x && vacant.node_y == optimum.node_y);
+    auto near_macro = optimum;
+    near_macro.node_x[0] = 42;
+    near_macro.node_size_x[1] = 20;
+    const auto near_optimum = near_macro;
+    auto exact_cells = vacancy_options;
+    exact_cells.exact_cell_density = true;
+    place(near_macro, exact_cells);
+    check(near_macro.node_x == near_optimum.node_x &&
+          near_macro.node_y == near_optimum.node_y);
+    auto exact_continuation = fixture();
+    GpState exact_state;
+    place(exact_continuation, soft_options, &exact_state);
+    auto changed_footprint = soft_options;
+    changed_footprint.exact_cell_density = true;
+    bool footprint_changed = false;
+    try {
+      place(exact_continuation, changed_footprint, &exact_state);
+    } catch (const std::invalid_argument &) {
+      footprint_changed = true;
+    }
+    check(footprint_changed);
+    auto changed_obstacles = soft_options;
+    changed_obstacles.fixed_macro_overlap_weight = 5;
+    bool obstacle_changed = false;
+    try {
+      place(exact_continuation, changed_obstacles, &exact_state);
+    } catch (const std::invalid_argument &) {
+      obstacle_changed = true;
+    }
+    check(obstacle_changed);
+    auto changed_gamma = soft_options;
+    changed_gamma.wirelength_gamma_end = .01;
+    bool gamma_changed = false;
+    try {
+      place(exact_continuation, changed_gamma, &exact_state);
+    } catch (const std::invalid_argument &) {
+      gamma_changed = true;
+    }
+    check(gamma_changed);
+    auto patient = fixture();
+    auto patient_options = soft_options;
+    patient_options.min_iterations = 80;
+    patient_options.max_iterations = 80;
+    patient_options.stop_overflow = 1;
+    const auto patient_result = place(patient, patient_options);
+    check(patient_result.iterations == 80);
+    check(patient_result.selected_iteration >= 40);
+    for (const auto &sample : patient_result.history) {
+      if (sample.iteration >= 40 &&
+          sample.overflow <= patient_options.stop_overflow)
+        check(patient_result.hpwl <= sample.hpwl + 1e-8);
+    }
+    // A density-feasible but still moving objective must not stop at 40.
+    auto settling = fixture();
+    auto settle_options = soft_options;
+    settle_options.stop_overflow = 1;
+    settle_options.max_iterations = 240;
+    settle_options.post_density_factor = 4;
+    settle_options.convergence_tolerance = 0;
+    settling.node_boxes.resize(5);
+    for (int i = 0; i < 5; ++i)
+      settling.node_boxes[i] = {settling.node_x[i], settling.node_y[i],
+                                settling.node_x[i], settling.node_y[i]};
+    const auto stable_result = place(settling, settle_options);
+    check(stable_result.density_iteration == 40);
+    check(stable_result.continuation_deadline == 200);
+    check(stable_result.iterations == 80 && stable_result.converged);
+    check(stable_result.objective_converged &&
+          !stable_result.continuation_limit);
+    // Unmet measured timing prevents early convergence, but cannot livelock.
+    settle_options.checkpoint_interval = 20;
+    settle_options.checkpoint = [](const Design &, int) {
+      GpUpdate update;
+      update.timing_violation = 1;
+      return update;
+    };
+    auto failing_timing = settling;
+    const auto bounded = place(failing_timing, settle_options);
+    check(bounded.iterations == 200 && bounded.continuation_limit);
+    check(!bounded.converged && bounded.timing_observed &&
+          !bounded.timing_satisfied);
+    // Objective updates reset stability, never the continuation deadline.
+    settle_options.checkpoint = [](const Design &d, int iteration) {
+      GpUpdate update;
+      update.net_weights.assign(d.net_weights.size(), iteration % 40 ? 1. : 2.);
+      return update;
+    };
+    auto changing = settling;
+    const auto changing_result = place(changing, settle_options);
+    check(changing_result.iterations == 200 &&
+          changing_result.continuation_limit);
+    // External continuation and topology checkpoints are separate APIs.
+    // Use persistent routing overflow to verify the split-solve deadline.
+    settle_options.checkpoint = {};
+    settle_options.routability = true;
+    settle_options.route_capacity_h = settle_options.route_capacity_v = 1e-6;
+    auto continued = settling;
+    GpState bounded_state;
+    settle_options.max_iterations = 60;
+    place(continued, settle_options, &bounded_state);
+    check(bounded_state.convergence.deadline == 200);
+    settle_options.max_iterations = 180;
+    const auto resumed = place(continued, settle_options, &bounded_state);
+    check(bounded_state.iteration == 200 && resumed.continuation_limit);
+    auto incompatible = settle_options;
+    incompatible.post_density_factor = 3;
+    bool changed_stop = false;
+    try {
+      place(continued, incompatible, &bounded_state);
+    } catch (const std::invalid_argument &) {
+      changed_stop = true;
+    }
+    check(changed_stop);
+    settle_options.checkpoint = {};
+    settle_options.max_iterations = 60;
+    auto capped_design = settling;
+    const auto capped = place(capped_design, settle_options);
+    check(capped.iterations == 60 && !capped.converged &&
+          !capped.continuation_limit);
+    auto route_design = settling;
+    settle_options.max_iterations = 240;
+    settle_options.routability = true;
+    settle_options.route_capacity_h = settle_options.route_capacity_v = 1e-6;
+    const auto congested = place(route_design, settle_options);
+    check(congested.iterations == 200 && congested.continuation_limit &&
+          !congested.converged);
     auto boxed = fixture();
     boxed.node_boxes.assign(5, {0, 0, 78, 39});
     boxed.node_boxes[0] = {4, 6, 4, 6};
@@ -118,6 +282,333 @@ int main() {
     o.route_capacity_h = o.route_capacity_v = .01;
     place(route, o);
     check(route.node_size_x == sizes);
+    // Timing checkpoints do not split/reseed GP, and a no-op is bit-identical.
+    auto untouched = fixture(), observed = untouched;
+    untouched.node_macro = observed.node_macro = {0, 0, 0, 0, 0};
+    Options cp;
+    cp.max_iterations = 120;
+    cp.bins_x = cp.bins_y = 8;
+    cp.add_fillers = cp.legalize = cp.detailed_place = false;
+    cp.target_density = .001;
+    cp.stop_overflow = 0;
+    place(untouched, cp);
+    std::vector<int> calls;
+    cp.checkpoint_interval = 50;
+    cp.checkpoint = [&](const Design &, int iteration) {
+      calls.push_back(iteration);
+      return GpUpdate{};
+    };
+    place(observed, cp);
+    check(calls == std::vector<int>({50, 100}));
+    check(observed.node_x == untouched.node_x &&
+          observed.node_y == untouched.node_y);
+    // Above-target density defers feedback, but the non-interval cap is timed.
+    // The skipped no-op checkpoints must not disturb the optimization path.
+    auto gated = fixture();
+    gated.node_macro = {0, 0, 0, 0, 0};
+    auto gate_options = cp;
+    gate_options.checkpoint_after_density = true;
+    calls.clear();
+    const auto gated_result = place(gated, gate_options);
+    check(calls == std::vector<int>({120}));
+    check(gated.node_x == untouched.node_x && gated.node_y == untouched.node_y);
+    check(gated_result.checkpoint_history.size() == 3);
+    check(!gated_result.checkpoint_history[0].invoked &&
+          !gated_result.checkpoint_history[1].invoked);
+    check(gated_result.checkpoint_history.back().forced &&
+          gated_result.checkpoint_history.back().overflow > 0);
+    // An interval later than density convergence must not let GP finish
+    // untimed.
+    auto early = fixture();
+    gate_options.target_density = .5;
+    gate_options.stop_overflow = 1;
+    gate_options.checkpoint_interval = 200;
+    gate_options.max_iterations = 240;
+    calls.clear();
+    check(place(early, gate_options).iterations == 200);
+    check(calls == std::vector<int>({200}));
+    // The bounded post-density deadline also forces feedback off cadence.
+    gate_options.post_density_factor = 4;
+    gate_options.checkpoint_interval = 75;
+    gate_options.checkpoint = [&](const Design &, int iteration) {
+      calls.push_back(iteration);
+      GpUpdate update;
+      update.timing_violation = 1;
+      return update;
+    };
+    calls.clear();
+    auto deadline = settling;
+    const auto gate_deadline = place(deadline, gate_options);
+    check(calls == std::vector<int>({75, 150, 200}));
+    check(gate_deadline.continuation_limit && !gate_deadline.converged &&
+          gate_deadline.checkpoint_history.back().forced);
+    auto off_sample_cap = settling;
+    gate_options.max_iterations = 113;
+    gate_options.checkpoint_interval = 200;
+    calls.clear();
+    const auto sampled_cap = place(off_sample_cap, gate_options);
+    check(calls == std::vector<int>({113}));
+    check(sampled_cap.timing_observed && !sampled_cap.timing_satisfied &&
+          !sampled_cap.converged);
+    gate_options.checkpoint_interval = 0;
+    calls.clear();
+    place(deadline, gate_options);
+    check(calls.empty());
+    // The gate sees halo-padded density, while the host sees physical macros.
+    auto gated_halo = fixture();
+    gated_halo.node_macro = {1, 0, 0, 0, 0};
+    gated_halo.node_halo_x = {20, 0, 0, 0, 0};
+    gated_halo.node_halo_y = {10, 0, 0, 0, 0};
+    gate_options = cp;
+    gate_options.target_density = .01;
+    gate_options.checkpoint_after_density = true;
+    gate_options.checkpoint = [&](const Design &snapshot, int iteration) {
+      check(snapshot.node_size_x[0] == 2 && snapshot.node_size_y[0] == 1);
+      calls.push_back(iteration);
+      return GpUpdate{};
+    };
+    calls.clear();
+    const auto halo_gate = place(gated_halo, gate_options);
+    check(calls == std::vector<int>({120}));
+    check(halo_gate.checkpoint_history[0].overflow > 0);
+    auto resized = fixture();
+    resized.node_macro = {0, 0, 0, 0, 0};
+    cp.checkpoint = [](const Design &d, int) {
+      GpUpdate u;
+      u.net_weights = d.net_weights;
+      u.net_weights[0] = 5;
+      u.node_size_x = d.node_size_x;
+      u.node_size_x[1] = 3;
+      u.pin_offset_x = d.pin_offset_x;
+      u.pin_offset_x[3] = .25;
+      return u;
+    };
+    place(resized, cp);
+    check(resized.net_weights[0] == 5 && resized.node_size_x[1] == 3 &&
+          resized.pin_offset_x[3] == .25);
+    auto haloed = fixture();
+    haloed.node_macro = {1, 0, 0, 0, 0};
+    haloed.node_halo_x = {2, 0, 0, 0, 0};
+    haloed.node_halo_y = {2, 0, 0, 0, 0};
+    const auto resize_callback = cp.checkpoint;
+    cp.checkpoint = [&](const Design &d, int iteration) {
+      check(d.node_size_x[0] == 2 && d.node_size_y[0] == 1);
+      return resize_callback(d, iteration);
+    };
+    place(haloed, cp);
+    check(haloed.node_size_x[0] == 2 && haloed.node_size_x[1] == 3);
+    check(haloed.node_halo_x[0] == 2);
+    auto invalid = fixture();
+    invalid.node_macro = {1, 0, 0, 0, 0};
+    const auto saved = invalid;
+    cp.checkpoint = [](const Design &d, int) {
+      GpUpdate u;
+      u.node_size_x = d.node_size_x;
+      u.node_size_x[0] += 1;
+      return u;
+    };
+    bad = false;
+    try {
+      place(invalid, cp);
+    } catch (const std::invalid_argument &) {
+      bad = true;
+    }
+    check(bad && invalid.node_x == saved.node_x &&
+          invalid.node_size_x == saved.node_size_x);
+    // A topology checkpoint may insert, reorder and remove only standard cells.
+    // Keep a haloed macro, terminal and color candidate through both changes.
+    auto topology = fixture();
+    topology.node_macro = {1, 0, 0, 0, 0};
+    topology.node_halo_x = {2, 0, 0, 0, 0};
+    topology.node_halo_y = {2, 0, 0, 0, 0};
+    topology.node_centroid_color = {0, 0, 0, -1, -1};
+    topology.centroid_color_names = {"bank"};
+    for (size_t i = 0; i < topology.node_x.size(); ++i)
+      topology.centroid_node_area.push_back(topology.node_size_x[i] *
+                                            topology.node_size_y[i]);
+    CentroidGroup bank;
+    bank.name = "bank";
+    bank.colors = {0};
+    topology.centroid_groups = {bank};
+    cp.centroid_weight = .25;
+    cp.centroid_repulsion_weight = 1;
+    cp.centroid_adaptive_repulsion = true;
+    cp.checkpoint_interval = 50;
+    calls.clear();
+    cp.checkpoint = [&](const Design &snapshot, int iteration) {
+      calls.push_back(iteration);
+      check(snapshot.node_size_x[0] == 2 && snapshot.node_halo_x[0] == 2);
+      Design next = snapshot;
+      GpUpdate u;
+      if (iteration == 50) {
+        // Insert a standard cell before the fixed suffix and split one net.
+        const int at = next.num_movable;
+        next.node_x.insert(next.node_x.begin() + at, 8);
+        next.node_y.insert(next.node_y.begin() + at, 2);
+        next.node_size_x.insert(next.node_size_x.begin() + at, 2);
+        next.node_size_y.insert(next.node_size_y.begin() + at, 1);
+        next.node_macro.insert(next.node_macro.begin() + at, 0);
+        next.node_halo_x.insert(next.node_halo_x.begin() + at, 0);
+        next.node_halo_y.insert(next.node_halo_y.begin() + at, 0);
+        next.node_centroid_color.insert(next.node_centroid_color.begin() + at,
+                                        0);
+        next.centroid_node_area.insert(next.centroid_node_area.begin() + at, 2);
+        for (auto &p : next.pin2node)
+          if (p >= at)
+            ++p;
+        next.pin2node.push_back(at);
+        next.pin_offset_x.push_back(1);
+        next.pin_offset_y.push_back(.5);
+        next.flat_net2pin.push_back(next.pin2node.size() - 1);
+        next.flat_net2pin_start.back()++;
+        ++next.num_movable;
+        for (int i = 0; i < int(next.node_x.size()); ++i)
+          u.previous_node.push_back(i == at ? -1 : i - (i > at));
+      } else {
+        // Remove the same inserted buffer, leaving the original pins/net
+        // intact.
+        const int at = next.num_movable - 1;
+        next.node_x.erase(next.node_x.begin() + at);
+        next.node_y.erase(next.node_y.begin() + at);
+        next.node_size_x.erase(next.node_size_x.begin() + at);
+        next.node_size_y.erase(next.node_size_y.begin() + at);
+        next.node_macro.erase(next.node_macro.begin() + at);
+        next.node_halo_x.erase(next.node_halo_x.begin() + at);
+        next.node_halo_y.erase(next.node_halo_y.begin() + at);
+        next.node_centroid_color.erase(next.node_centroid_color.begin() + at);
+        next.centroid_node_area.erase(next.centroid_node_area.begin() + at);
+        next.pin2node.pop_back();
+        next.pin_offset_x.pop_back();
+        next.pin_offset_y.pop_back();
+        next.flat_net2pin.pop_back();
+        next.flat_net2pin_start.back()--;
+        for (auto &p : next.pin2node)
+          if (p > at)
+            --p;
+        --next.num_movable;
+        for (int i = 0; i < int(next.node_x.size()); ++i)
+          u.previous_node.push_back(i + (i >= at));
+      }
+      next.build_maps();
+      u.replacement = std::move(next);
+      return u;
+    };
+    place(topology, cp);
+    check(calls == std::vector<int>({50, 100}));
+    check(topology.node_x.size() == 5 && topology.num_movable == 3);
+    check(topology.node_x[3] == fixture().node_x[3] &&
+          topology.node_x[4] == fixture().node_x[4]);
+    check(topology.node_size_x[0] == 2 && topology.node_halo_x[0] == 2);
+    check(topology.centroid_groups[0].name == "bank");
+    // Invalid mappings fail atomically, including through the halo wrapper.
+    const auto prior = topology;
+    cp.checkpoint = [](const Design &snapshot, int) {
+      GpUpdate u;
+      u.replacement = snapshot;
+      u.previous_node = {1, 1, 2, 3,
+                         4}; // loses the macro, repeats a standard cell
+      return u;
+    };
+    bad = false;
+    try {
+      place(topology, cp);
+    } catch (const std::invalid_argument &) {
+      bad = true;
+    }
+    check(bad && topology.node_x == prior.node_x &&
+          topology.node_size_x == prior.node_size_x);
+    // A malformed replacement throws before padded_design indexes it.
+    auto malformed = fixture();
+    malformed.node_macro = {0, 0, 0, 0, 0};
+    malformed.node_halo_x = {2, 0, 0, 0, 0};
+    malformed.node_halo_y = {2, 0, 0, 0, 0};
+    const auto malformed_before = malformed;
+    cp.checkpoint = [](const Design &snapshot, int) {
+      GpUpdate u;
+      u.replacement = snapshot;
+      u.replacement->node_halo_x.resize(2);
+      u.previous_node = {0, 1, 2, 3, 4};
+      return u;
+    };
+    bad = false;
+    try {
+      place(malformed, cp);
+    } catch (const std::invalid_argument &) {
+      bad = true;
+    }
+    check(bad && malformed.node_x == malformed_before.node_x &&
+          malformed.node_halo_x == malformed_before.node_halo_x);
+    // Halo padding of boxes and order edges must not leak into the caller's
+    // Design or the checkpoint snapshot.
+    auto shifted = fixture();
+    shifted.node_macro = {0, 0, 0, 0, 0};
+    shifted.node_halo_x = {2, 0, 0, 0, 0};
+    shifted.node_halo_y = {2, 0, 0, 0, 0};
+    shifted.node_boxes.assign(5, {0, 0, 78, 39});
+    shifted.node_boxes[0] = {6, 6, 60, 30};
+    shifted.order_edges.push_back({0, 1, Axis::x, 0, {false, 1}, "left"});
+    const auto shifted_before = shifted;
+    cp.checkpoint = [&](const Design &snapshot, int) {
+      check(snapshot.node_boxes[0].xl == 6 && snapshot.node_boxes[0].yh == 30 &&
+            snapshot.order_edges[0].separation == 0);
+      return GpUpdate{};
+    };
+    place(shifted, cp);
+    check(shifted.node_boxes[0].xl == 6 && shifted.node_boxes[0].xh == 60 &&
+          shifted.node_boxes[0].yl == 6 && shifted.node_boxes[0].yh == 30 &&
+          shifted.order_edges[0].separation == 0 &&
+          shifted.node_size_x == shifted_before.node_size_x &&
+          shifted.node_halo_x == shifted_before.node_halo_x);
+    // A resize under halos keeps centroid areas physical, not halo-padded.
+    auto resized_halo = fixture();
+    resized_halo.node_macro = {0, 0, 0, 0, 0};
+    resized_halo.node_halo_x = {2, 0, 0, 0, 0};
+    resized_halo.node_halo_y = {2, 0, 0, 0, 0};
+    for (size_t i = 0; i < resized_halo.node_x.size(); ++i)
+      resized_halo.centroid_node_area.push_back(resized_halo.node_size_x[i] *
+                                                resized_halo.node_size_y[i]);
+    resized_halo.node_centroid_color = {0, 0, 0, -1, -1};
+    resized_halo.centroid_color_names = {"bank"};
+    CentroidGroup group;
+    group.name = "bank";
+    group.colors = {0};
+    resized_halo.centroid_groups = {group};
+    auto centroid_cp = cp;
+    centroid_cp.centroid_weight = .25;
+    centroid_cp.checkpoint = [](const Design &snapshot, int) {
+      GpUpdate u;
+      u.node_size_x = snapshot.node_size_x;
+      u.node_size_x[0] = 3;
+      return u;
+    };
+    int centroid_areas = 0;
+    centroid_cp.observer_interval = 1;
+    centroid_cp.observer = [&](const Design &snapshot, PlacementStage, int) {
+      if (snapshot.node_size_x[0] == 3) {
+        check(snapshot.centroid_node_area[0] == 3);
+        ++centroid_areas;
+      }
+    };
+    place(resized_halo, centroid_cp);
+    check(centroid_areas > 0 && resized_halo.node_size_x[0] == 3);
+    // Without a GP loop only the overflow test decides convergence.
+    auto legal_only = fixture();
+    Options legal_options;
+    legal_options.max_iterations = 0;
+    legal_options.post_density_factor = 4;
+    legal_options.bins_x = legal_options.bins_y = 8;
+    legal_options.add_fillers = legal_options.detailed_place = false;
+    legal_options.stop_overflow = 1;
+    check(place(legal_only, legal_options).converged);
+    calls.clear();
+    cp.checkpoint_interval = 0;
+    cp.checkpoint = [&](const Design &, int i) {
+      calls.push_back(i);
+      return GpUpdate{};
+    };
+    auto off = fixture();
+    place(off, cp);
+    check(calls.empty());
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';
     return 1;

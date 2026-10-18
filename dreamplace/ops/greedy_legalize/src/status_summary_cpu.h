@@ -24,13 +24,13 @@ void minNodeSizeCPU(
     for (int i = 0; i < num_bins_x*num_bins_y; i += 1) 
     {
         const std::vector<int>& cells = bin_cells.at(i); 
-        T min_size_x = std::numeric_limits<int>::max(); 
+        T min_size_x = std::numeric_limits<T>::max();
         for (unsigned int k = 0; k < cells.size(); ++k)
         {
             int node_id = cells.at(k);
             min_size_x = std::min(min_size_x, node_size_x[node_id]);
         }
-        if (min_size_x != std::numeric_limits<int>::max())
+        if (min_size_x != std::numeric_limits<T>::max())
         {
             *min_node_size_x = std::min(*min_node_size_x, (int)ceilDiv(min_size_x, site_width));
         }

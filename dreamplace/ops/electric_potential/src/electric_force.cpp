@@ -120,7 +120,7 @@ int computeElectricForceLauncher(
 
   T inv_bin_size_x = 1.0 / bin_size_x;
   T inv_bin_size_y = 1.0 / bin_size_y;
-  int chunk_size =
+  [[maybe_unused]] int chunk_size =
       DREAMPLACE_STD_NAMESPACE::max(int(num_nodes / num_threads / 16), 1);
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, chunk_size)
   for (int i = 0; i < num_nodes; ++i) {

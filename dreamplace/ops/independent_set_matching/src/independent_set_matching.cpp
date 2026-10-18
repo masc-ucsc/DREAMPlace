@@ -74,6 +74,9 @@ struct IndependentSetMatchingState {
   int max_diamond_search_sequence;
   int num_moved;
   T large_number;
+#ifdef DREAMPLACE_TORCH_FREE
+  T weight_scale = 1;  ///< 1/(largest unmasked net weight), keeps int costs bounded
+#endif
   T skip_threshold;  ///< ignore connections if cells are far apart
   int num_threads;
 };
@@ -89,6 +92,17 @@ void independentSetMatchingCPULauncher(DetailedPlaceDB<T> db, int batch_size,
   state.set_size = set_size;
   state.num_moved = 0;
   state.large_number = (db.xh - db.xl + db.yh - db.yl) * set_size;
+#ifdef DREAMPLACE_TORCH_FREE
+  // The cost matrices are int, so normalise timing weights to at most 1 instead
+  // of scaling large_number up; infeasible slots stay above any feasible cost.
+  if (db.net_weights) {
+    T largest_weight = 1;
+    for (int i = 0; i < db.num_nets; ++i)
+      if (db.net_mask[i])
+        largest_weight = std::max(largest_weight, db.net_weights[i]);
+    state.weight_scale = 1 / largest_weight;
+  }
+#endif
   state.skip_threshold = (db.xh - db.xl + db.yh - db.yl) * 0.01;
   state.num_threads = std::max(num_threads, 1);
 

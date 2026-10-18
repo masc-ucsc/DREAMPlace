@@ -15,7 +15,7 @@ void integrateNetWeightsLauncher(
     int num_nets,
     int num_threads)
 {
-    int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_nets / num_threads / 16), 1);
+    [[maybe_unused]] int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_nets / num_threads / 16), 1);
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, chunk_size)
     for (int net_id = 0; net_id < num_nets; ++net_id)
     {
@@ -44,7 +44,7 @@ void computeMaxMinNetByNet(
     V *x_min_ptr,
     int num_threads)
 {
-    int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_nets / num_threads / 16), 1);
+    [[maybe_unused]] int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_nets / num_threads / 16), 1);
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, chunk_size)
     for (int i = 0; i < num_nets; ++i)
     {
@@ -91,7 +91,7 @@ void computeABCKernelsPinByPin(
     T *xexp_x_sum, T *xexp_nx_sum,
     int num_threads)
 {
-    int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_pins / num_threads / 16), 1);
+    [[maybe_unused]] int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_pins / num_threads / 16), 1);
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, chunk_size)
     for (int i = 0; i < num_pins; ++i)
     {
@@ -137,7 +137,7 @@ void computeXExpSumByExpSumXY(
     T *partial_wl,
     int num_threads)
 {
-    int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_nets / num_threads / 16), 1);
+    [[maybe_unused]] int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_nets / num_threads / 16), 1);
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, chunk_size)
     for (int i = 0; i < num_nets; ++i)
     {
@@ -167,7 +167,7 @@ void computeWeightedAverageWirelengthGradPinByPin(
     T *grad_x_tensor, T *grad_y_tensor,
     int num_threads)
 {
-    int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_pins / num_threads / 16), 1);
+    [[maybe_unused]] int chunk_size = DREAMPLACE_STD_NAMESPACE::max(int(num_pins / num_threads / 16), 1);
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, chunk_size)
     for (int i = 0; i < num_pins; ++i)
     {

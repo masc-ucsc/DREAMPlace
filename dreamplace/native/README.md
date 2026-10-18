@@ -224,10 +224,26 @@ portable starting point, not a large-design performance claim.
 Full mode applies Hannan/LP macro legalization, greedy and Abacus cell
 legalization, then k-reorder, auction-based independent-set matching, and global
 swap. Both a separate site/row/overlap checker and the upstream checker validate
-legalization. Detailed passes are accepted only if they preserve legality and
-HPWL. The legacy detailed kernels optimize unweighted HPWL, so they are skipped
-when net weights differ from one. The native direct LP reuses DREAMPlace's
+legalization. The detailed kernels (k-reorder, independent-set matching and
+global swap) use the net weights, and a pass is kept only if it stays legal and
+does not increase the weighted, masked HPWL. `Options::detailed_iterations`
+(default 2, range 1 to 100) caps the iterations of each kernel, and
+`Result::detailed_history` records every pass with its HPWL before and after, a
+legal flag and an accepted flag. The native direct LP reuses DREAMPlace's
 constraint graph for both initial macro legalization and LP refinement.
+
+Further opt-in GP controls: `min_iterations` (default 40) is the floor before
+density convergence is considered; `wirelength_gamma_end` (default 0.05, in
+(0, 1]) is the final/initial wirelength smoothing ratio;
+`fixed_macro_overlap_weight` (default 0) adds a bounded exact-footprint penalty
+between movable cells and fixed macros; `exact_cell_density` charges movable
+cells by their physical footprint; and `density_upper_bound` is an experimental
+filler-free penalty where underfull bins contribute no charge. A
+`GpUpdate::replacement` swaps the standard-cell netlist at a checkpoint:
+`previous_node` maps each replacement node to its old index (-1 for inserted
+cells), and the other `GpUpdate` vectors must then be empty. Without halos the
+GP checkpoint contract is unchanged; with halos the replacement is validated in
+physical units before it is padded.
 
 For GP only, set both `legalize=false` and `detailed_place=false`. Coordinates
 may overlap, and `Result::legal` is an observation, not a promise. To legalize
@@ -758,3 +774,35 @@ Eyeriss: all 204 targets separate in 1.15 s, accepting 123 line, 36 spacing and
 circle overlaps. Final legal HPWL is 6.578 m versus 4.595 m for the reused R8H3
 reference (+43.15%). Extra refinement GP and snapping change together in this
 comparison. Keep off by default; no new routing/timing result is claimed.
+
+### Bounded continuation after density convergence
+
+`Options::post_density_factor` is opt-in (zero preserves the legacy path). After
+geometry/density first meet their stopping conditions at iteration N, the
+solver allows factor × N additional iterations, still bounded by
+`max_iterations`. Weighted HPWL and inflation must settle over two consecutive
+20-iteration samples within `convergence_tolerance` (default 1%), and current
+RUDY overflow must be zero when enabled. Host checkpoints can supply a
+nonnegative `GpUpdate::timing_violation`; a positive setup violation prevents
+early convergence. Without host timing, weighted HPWL is only a timing proxy.
+
+Weight/topology updates reset stability but never the deadline. External
+`GpState` continuation retains the deadline and sample history. The result
+distinguishes objective convergence, host timing availability and continuation
+budget exhaustion. LiveHD enables this policy with factor four by default.
+
+### Density-gated host timing checkpoints
+
+`Options::checkpoint_after_density` is opt-in (false by default). With an active
+checkpoint interval, it defers the host callback while physical overflow exceeds
+`stop_overflow`. The measurement uses the same halo-padded geometry and macro
+charge scaling as GP convergence, before a halo wrapper unpads the host snapshot.
+GP cannot declare early convergence before its first eligible callback. The
+iteration cap and bounded-continuation deadline force a callback even above the
+threshold, including when the cap is off cadence. Interval zero disables all
+callbacks. Initial caller-supplied timing weights remain active.
+
+`Result::checkpoint_history` records iterations, measured overflow, invocation
+and forced-cap flags. An optional `checkpoint_observer` receives these decisions
+before the host callback, allowing a host movement filter to honor forced final
+samples. The gate itself neither calls a timing engine nor resizes cells.

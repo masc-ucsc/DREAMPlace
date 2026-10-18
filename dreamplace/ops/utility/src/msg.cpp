@@ -63,28 +63,40 @@ int dreamplaceVSPrint(MessageType m, char* buf, const char* format,
   // print prefix
   char prefix[16];
   dreamplaceSPrintPrefix(m, prefix);
-  sprintf(buf, "%s", prefix);
+  const size_t prefix_length = strlen(prefix);
+  memcpy(buf, prefix, prefix_length + 1);
 
-  // print message
-  int ret = vsprintf(buf + strlen(prefix), format, args);
-
-  return ret;
+  // This legacy API requires a caller-provided buffer large enough for the
+  // prefix and message. Measure using a copy so args remains available.
+  va_list measure_args;
+  va_copy(measure_args, args);
+  const int length = vsnprintf(nullptr, 0, format, measure_args);
+  va_end(measure_args);
+  if (length < 0) return length;
+  return vsnprintf(buf + prefix_length, static_cast<size_t>(length) + 1,
+                   format, args);
 }
 
 int dreamplaceSPrintPrefix(MessageType m, char* prefix) {
   switch (m) {
     case kNONE:
-      return sprintf(prefix, "%c", '\0');
+      prefix[0] = prefix[1] = '\0';
+      return 1;
     case kINFO:
-      return sprintf(prefix, "[INFO   ] ");
+      memcpy(prefix, "[INFO   ] ", 11);
+      return 10;
     case kWARN:
-      return sprintf(prefix, "[WARNING] ");
+      memcpy(prefix, "[WARNING] ", 11);
+      return 10;
     case kERROR:
-      return sprintf(prefix, "[ERROR  ] ");
+      memcpy(prefix, "[ERROR  ] ", 11);
+      return 10;
     case kDEBUG:
-      return sprintf(prefix, "[DEBUG  ] ");
+      memcpy(prefix, "[DEBUG  ] ", 11);
+      return 10;
     case kASSERT:
-      return sprintf(prefix, "[ASSERT ] ");
+      memcpy(prefix, "[ASSERT ] ", 11);
+      return 10;
     default:
       dreamplaceAssertMsg(0, "unknown message type");
   }
@@ -98,7 +110,7 @@ void dreamplacePrintAssertMsg(const char* expr, const char* fileName,
   char buf[1024];
   va_list args;
   va_start(args, format);
-  vsprintf(buf, format, args);
+  vsnprintf(buf, sizeof(buf), format, args);
   va_end(args);
 
   // print message

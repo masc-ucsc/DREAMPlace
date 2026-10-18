@@ -52,10 +52,9 @@ int partitioning_diamond(const DetailedPlaceDBType& db, IndependentSetMatchingSt
 
                 for (auto node_id : bin2nodes)
                 {
-#ifdef DEBUG
-                    dreamplaceAssert(db.node_size_x[node_id] == db.node_size_x[seed_node]);
-#endif 
-                    if (db.node_size_y[node_id] == seed_height && state.selected_markers.at(node_id))
+                    // mixed-width cells (macros, weighted flows) share bins; only equal-size cells can swap
+                    if (db.node_size_x[node_id] == db.node_size_x[seed_node] && db.node_size_y[node_id] == seed_height
+                        && state.selected_markers.at(node_id))
                     {
                         independent_set.push_back(node_id);
                         state.selected_markers.at(node_id) = 0; 
@@ -327,7 +326,6 @@ int partitioning_parallel(const DetailedPlaceDBType& db, IndependentSetMatchingS
 
     int num_partitions = 0; 
 
-    int iter = 0; 
     bool empty = false; 
     while (!empty)
     {
@@ -378,10 +376,8 @@ int partitioning_parallel(const DetailedPlaceDBType& db, IndependentSetMatchingS
 
                     for (auto node_id : bin2nodes)
                     {
-#ifdef DEBUG
-                        dreamplaceAssert(db.node_size_x[node_id] == db.node_size_x[seed_node]);
-#endif 
-                        if (db.node_size_y[node_id] == seed_height)
+                        // mixed-width cells share bins; only equal-size cells can swap
+                        if (db.node_size_x[node_id] == db.node_size_x[seed_node] && db.node_size_y[node_id] == seed_height)
                         {
                             if (selected_markers.at(node_id)) // no partition yet 
                             {
@@ -475,7 +471,6 @@ int partitioning_parallel(const DetailedPlaceDBType& db, IndependentSetMatchingS
         {
             selected_markers.at(i) = selected_markers_new.at(i);
         }
-        ++iter; 
     }
 
     // add to independent sets 

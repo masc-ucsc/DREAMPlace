@@ -35,7 +35,7 @@ int computeWeightedAverageWirelengthMergedLauncher(
     const unsigned char *net_mask, int num_nets, const T *inv_gamma,
     T *partial_wl, T *grad_intermediate_x, T *grad_intermediate_y,
     int num_threads) {
-  int chunk_size =
+  [[maybe_unused]] int chunk_size =
       DREAMPLACE_STD_NAMESPACE::max(int(num_nets / num_threads / 16), 1);
 #pragma omp parallel for num_threads(num_threads) schedule(dynamic, chunk_size)
   for (int i = 0; i < num_nets; ++i) {

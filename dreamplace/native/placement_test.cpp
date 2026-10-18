@@ -12,6 +12,11 @@
 #include <string>
 
 #include "dreamplace/native/spectral.hpp"
+#include "utility/src/detailed_place_db.h"
+
+namespace DreamPlace {
+template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int);
+}
 
 using namespace DreamPlace::native;
 namespace {
@@ -192,6 +197,178 @@ void native_flow() {
   o.max_iterations = 0;
   check(place(lg, o).legal, "legalization-only path");
 }
+void run_global_swap(Design &d, int bx, int by) {
+  auto ix = d.node_x, iy = d.node_y;
+  std::vector<int> regions(d.node_x.size(), 0);
+  DreamPlace::DetailedPlaceDB<double> db{};
+  db.init_x = ix.data();
+  db.init_y = iy.data();
+  db.x = d.node_x.data();
+  db.y = d.node_y.data();
+  db.node_size_x = d.node_size_x.data();
+  db.node_size_y = d.node_size_y.data();
+  db.node2fence_region_map = regions.data();
+  db.flat_net2pin_map = d.flat_net2pin.data();
+  db.flat_net2pin_start_map = d.flat_net2pin_start.data();
+  db.flat_node2pin_map = d.flat_node2pin.data();
+  db.flat_node2pin_start_map = d.flat_node2pin_start.data();
+  db.pin2node_map = d.pin2node.data();
+  db.pin2net_map = d.pin2net.data();
+  db.pin_offset_x = d.pin_offset_x.data();
+  db.pin_offset_y = d.pin_offset_y.data();
+  db.net_mask = d.net_mask.data();
+  db.net_weights = d.net_weights.data();
+  db.xl = d.layout.xl;
+  db.yl = d.layout.yl;
+  db.xh = d.layout.xh;
+  db.yh = d.layout.yh;
+  db.site_width = d.layout.site_width;
+  db.row_height = d.layout.row_height;
+  db.num_bins_x = bx;
+  db.num_bins_y = by;
+  db.bin_size_x = (db.xh - db.xl) / bx;
+  db.bin_size_y = (db.yh - db.yl) / by;
+  db.num_sites_x = std::round((db.xh - db.xl) / db.site_width);
+  db.num_sites_y = std::round((db.yh - db.yl) / db.row_height);
+  db.num_nodes = d.node_x.size();
+  db.num_movable_nodes = d.num_movable;
+  db.num_pins = d.pin2node.size();
+  db.num_nets = d.net_weights.size();
+  DreamPlace::globalSwapCPULauncher(db, 2);
+}
+
+void offgrid_macro_swap() {
+  Design d;
+  d.layout = {0, 0, 16, 2, 1, 1};
+  d.num_movable = 2;
+  d.node_x = {10, 10, 7.2, 10, 15};
+  d.node_y = {0, 1, 1, 1, 0};
+  d.node_size_x = {3, 1, 2.3, 0, 0};
+  d.node_size_y = {1, 1, 1, 0, 0};
+  d.pin2node = {0, 3, 1, 4};
+  d.pin_offset_x.assign(4, 0);
+  d.pin_offset_y.assign(4, 0);
+  d.flat_net2pin = {0, 1, 2, 3};
+  d.flat_net2pin_start = {0, 2, 4};
+  d.net_weights = {1, 1};
+  d.build_maps();
+  check(is_legal(d), "off-grid obstacle fixture starts legal");
+  const double before = hpwl(d);
+  run_global_swap(d, 4, 2);
+  check(is_legal(d), "global swap clamped a cell to an off-grid macro edge");
+  check(hpwl(d) < before, "legal cross-row swap must improve wirelength");
+  near(d.node_x[2], 7.2, 0, "fixed macro must not move");
+}
+
+void same_bin_swap() {
+  Design d;
+  d.layout = {0, 0, 12, 1, 1, 1};
+  d.num_movable = 2;
+  d.node_x = {2, 4, 5, 1};
+  d.node_y.assign(4, 0);
+  d.node_size_x = {1, 1, 0, 0};
+  d.node_size_y = {1, 1, 0, 0};
+  d.pin2node = {0, 2, 1, 3};
+  d.pin_offset_x.assign(4, 0);
+  d.pin_offset_y.assign(4, 0);
+  d.flat_net2pin = {0, 1, 2, 3};
+  d.flat_net2pin_start = {0, 2, 4};
+  d.net_weights = {1, 1};
+  d.build_maps();
+  const auto before = hpwl(d);
+  run_global_swap(d, 2, 1);
+  check(is_legal(d), "same-bin swap must preserve legality");
+  check(hpwl(d) < before, "global swap skipped cells contained in one bin");
+}
+
+void weighted_detailed_placement() {
+  Design d;
+  d.layout = {0, 0, 12, 1, 1, 1};
+  d.num_movable = 2;
+  d.node_x = {1, 9, 0, 12};
+  d.node_y = {0, 0, 0, 0};
+  d.node_size_x = {1, 1, 0, 0};
+  d.node_size_y = {1, 1, 0, 0};
+  d.pin2node = {0, 3, 0, 2, 1, 2, 1, 3};
+  d.pin_offset_x.assign(8, 0);
+  d.pin_offset_y.assign(8, 0);
+  d.flat_net2pin = {0, 1, 2, 3, 4, 5, 6, 7};
+  d.flat_net2pin_start = {0, 2, 4, 6, 8};
+  d.net_weights = {10, 1, 10, 1};
+  d.build_maps();
+  const auto x = d.node_x, y = d.node_y;
+  const double before = hpwl(d);
+  auto explicit_default = d;
+  std::vector<DetailedSample> samples;
+  detail::detailed_place(explicit_default, 4, 1, 1, false, 2, &samples);
+  check(samples.size() == 3, "one diagnostic per detailed-placement kernel");
+  for (const auto &sample : samples)
+    check(!sample.accepted || (sample.legal && sample.macros_preserved &&
+                               sample.after <= sample.before + 1e-8),
+          "accepted detailed moves must preserve legality and objective");
+  auto extended = d;
+  detail::detailed_place(extended, 4, 1, 1, false, 10);
+  check(is_legal(extended) && hpwl(extended) <= before,
+        "extended weighted detail must preserve legality and objective");
+  detail::detailed_place(d, 4, 1, 1);
+  check(d.node_x == explicit_default.node_x &&
+            d.node_y == explicit_default.node_y,
+        "default detailed iteration limit changed");
+  check(is_legal(d), "weighted detailed placement must remain legal");
+  check(hpwl(d) < before,
+        "weighted detailed placement must optimize active timing weights");
+  check(d.node_x[0] > d.node_x[1],
+        "critical connections must beat the unweighted tie");
+  check(d.node_x[2] == x[2] && d.node_x[3] == x[3] && d.node_y == y,
+        "weighted detail must preserve fixed terminal locations");
+  auto overlapping = d;
+  overlapping.node_x[1] = overlapping.node_x[0];
+  std::string reason;
+  check(!is_legal(overlapping, &reason) &&
+            reason.find("overlap") != std::string::npos,
+        "legality diagnostic must identify the colliding nodes");
+}
+// A DBU-scale die with large timing weights must not overflow the int cost
+// matrices of independent-set matching (large_number ~ perimeter*set_size).
+void weighted_detailed_placement_wide_die() {
+  const double w = 8e6;
+  Design d;
+  // Matching only solves sets of >= 3 equal-size cells sharing a bin, and (upstream
+  // quirk) needs two such sets to run at all. Cells 0-3 are the 1-wide set that must
+  // swap; cells 4-6 are a 2-wide filler set. One cell per row keeps k_reorder from
+  // doing the swap first.
+  d.layout = {0, 0, w, 7, 1, 1};
+  d.num_movable = 7;
+  d.node_x = {1, 3, 5, 7, 1, 4, 7, 0, w};
+  d.node_y = {0, 1, 2, 3, 4, 5, 6, 0, 0};
+  d.node_size_x = {1, 1, 1, 1, 2, 2, 2, 0, 0};
+  d.node_size_y = {1, 1, 1, 1, 1, 1, 1, 0, 0};
+  // net0: cell0-right (heavy), net1: cell3-left (heavy), net2: cell1-left, net3: cell2-right
+  d.pin2node = {0, 8, 3, 7, 1, 7, 2, 8};
+  d.pin_offset_x.assign(8, 0);
+  d.pin_offset_y.assign(8, 0);
+  d.flat_net2pin = {0, 1, 2, 3, 4, 5, 6, 7};
+  d.flat_net2pin_start = {0, 2, 4, 6, 8};
+  d.net_weights = {1000, 1000, 1, 1};  // weight * die span exceeds INT_MAX unscaled
+  d.build_maps();
+  const double before = hpwl(d);
+  std::vector<DetailedSample> samples;
+  detail::detailed_place(d, 16, 1, 1, false, 2, &samples);
+  for (const auto &sample : samples)
+    check(!sample.accepted || (sample.legal && sample.after <= sample.before),
+          "wide-die weighted detail must stay legal and not worsen HPWL");
+  check(is_legal(d) && hpwl(d) <= before,
+        "wide-die weighted detail must preserve legality and objective");
+  // The int-overflow guard is only observable if matching actually ran and won.
+  const DetailedSample *matching = nullptr;
+  for (const auto &sample : samples)
+    if (sample.kernel == "independent_set_matching")
+      matching = &sample;
+  check(matching && matching->accepted && matching->after < matching->before,
+        "wide-die independent-set matching must be accepted and improve HPWL");
+  check(hpwl(d) < before && d.node_x[0] > d.node_x[3],
+        "wide-die critical connections must beat the unweighted tie");
+}
 void placer_instances() {
   Options initial;
   initial.bins_x = initial.bins_y = 8;
@@ -335,6 +512,12 @@ void hpwl_case() {
   o.target_density = 0;
   rejects([&] { place(d, o); });
   check(d.node_x == original.node_x, "invalid options mutated design");
+  o = Options{};
+  o.detailed_iterations = 0;
+  rejects([&] { place(d, o); });
+  o = Options{};
+  o.wirelength_gamma_end = 0;
+  rejects([&] { place(d, o); });
 }
 void macros() {
   Design d;
@@ -585,6 +768,10 @@ int main() {
     gradients();
     hpwl_case();
     native_flow();
+    offgrid_macro_swap();
+    same_bin_swap();
+    weighted_detailed_placement();
+    weighted_detailed_placement_wide_die();
     placer_instances();
     concurrent_instances();
     macros();
