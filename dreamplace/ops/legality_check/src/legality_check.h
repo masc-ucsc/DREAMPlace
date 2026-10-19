@@ -170,17 +170,15 @@ bool overlapCheck(const T* node_size_x, const T* node_size_y, const T* x,
   auto getYH = [&](int id) { return y[id] + node_size_y[id]; };
 
   // potential numerical issue (fix from cpp branch)
-  auto getSiteXL = [&](T xx) { return int(floorDiv(xx - xl, site_width)); };
-  auto getSiteXH = [&](T xx) { return int(ceilDiv(xx - xl, site_width)); };
+  auto getSiteXL = [&](T xx) { return floorDiv(xx - xl, site_width); };
+  auto getSiteXH = [&](T xx) { return ceilDiv(xx - xl, site_width); };
 
   // add a box to row
   auto addBox2Row = [&](int id, T bxl, T byl, T bxh, T byh) {
     // IO terminals have no area, even when they lie inside a row.
     if (bxh <= bxl || byh <= byl) return;
-    int row_idxl = floorDiv(byl - yl, row_height);
-    int row_idxh = ceilDiv(byh - yl, row_height);
-    row_idxl = std::max(row_idxl, 0);
-    row_idxh = std::min(row_idxh, num_rows);
+    int row_idxl = int(std::min(std::max(floorDiv(byl - yl, row_height), T(0)), T(num_rows)));
+    int row_idxh = int(std::min(std::max(ceilDiv(byh - yl, row_height), T(0)), T(num_rows)));
 
     for (int row_id = row_idxl; row_id < row_idxh; ++row_id) {
       T row_yl = yl + row_id * row_height;
@@ -261,9 +259,9 @@ bool overlapCheck(const T* node_size_x, const T* node_size_y, const T* x,
           T cur_yl = getYL(node_id);
           T cur_xh = getXH(node_id);
           T cur_yh = getYH(node_id);
-          int prev_site_xh = getSiteXH(prev_xh); 
-          int cur_site_xl = getSiteXL(cur_xl); 
-          int cur_site_xh = getSiteXH(cur_xh); 
+          T prev_site_xh = getSiteXH(prev_xh);
+          T cur_site_xl = getSiteXL(cur_xl);
+          T cur_site_xh = getSiteXH(cur_xh);
           // detect overlap
           // original criteria: scaleBack2Integer(prev_xh) > scaleBack2Integer(cur_xl)
           // the floating point comparison may introduce incorrect result

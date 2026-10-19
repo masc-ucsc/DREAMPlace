@@ -283,17 +283,21 @@ int computeTriangleDensityMapLauncher(
     T node_y = y_tensor[i] + offset_y_tensor[i];
     T ratio = ratio_tensor[i];
 
-    int bin_index_xl = int((node_x - xl) * inv_bin_size_x);
+    // Fixed nodes may be arbitrarily far outside the core. Bound bin indices
+    // in floating point before conversion to avoid undefined integer overflow.
+    const auto bounded_bin = [](T value, int count) {
+      return int(DREAMPLACE_STD_NAMESPACE::max(
+          T(0), DREAMPLACE_STD_NAMESPACE::min(value, T(count))));
+    };
+    int bin_index_xl = bounded_bin((node_x - xl) * inv_bin_size_x, num_bins_x);
     int bin_index_xh =
-        int(((node_x + node_size_x - xl) * inv_bin_size_x)) + 1;  // exclusive
-    bin_index_xl = DREAMPLACE_STD_NAMESPACE::max(bin_index_xl, 0);
-    bin_index_xh = DREAMPLACE_STD_NAMESPACE::min(bin_index_xh, num_bins_x);
+        bounded_bin(std::trunc((node_x + node_size_x - xl) * inv_bin_size_x) + 1,
+                    num_bins_x);  // exclusive
 
-    int bin_index_yl = int((node_y - yl) * inv_bin_size_y);
+    int bin_index_yl = bounded_bin((node_y - yl) * inv_bin_size_y, num_bins_y);
     int bin_index_yh =
-        int(((node_y + node_size_y - yl) * inv_bin_size_y)) + 1;  // exclusive
-    bin_index_yl = DREAMPLACE_STD_NAMESPACE::max(bin_index_yl, 0);
-    bin_index_yh = DREAMPLACE_STD_NAMESPACE::min(bin_index_yh, num_bins_y);
+        bounded_bin(std::trunc((node_y + node_size_y - yl) * inv_bin_size_y) + 1,
+                    num_bins_y);  // exclusive
 
     // update density potential map
     for (int k = bin_index_xl; k < bin_index_xh; ++k) {

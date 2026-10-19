@@ -51,14 +51,15 @@ void distributeFixedCells2BinsCPU(const LegalizationDB<T>& db, const T* x,
   for (int i = 0; i < num_nodes; i += 1) {
     if (db.is_dummy_fixed(i) || i >= num_movable_nodes) {
       int node_id = i;
-      int bin_id_xl = std::max((int)floorDiv(x[node_id] - xl, bin_size_x, (T)0), 0);
-      int bin_id_xh = std::min(
-          (int)ceilDiv((x[node_id] + node_size_x[node_id] - xl), bin_size_x, (T)0),
-          num_bins_x);
-      int bin_id_yl = std::max((int)floorDiv(y[node_id] - yl, bin_size_y, (T)0), 0);
-      int bin_id_yh = std::min(
-          (int)ceilDiv((y[node_id] + node_size_y[node_id] - yl), bin_size_y, (T)0),
-          num_bins_y);
+      // Fixed obstacles can lie far outside the core; clamp before converting
+      // their bin coordinates to integers.
+      const auto bounded_bin = [](T value, int count) {
+        return int(std::max(T(0), std::min(value, T(count))));
+      };
+      int bin_id_xl = bounded_bin(floorDiv(x[node_id] - xl, bin_size_x, T(0)), num_bins_x);
+      int bin_id_xh = bounded_bin(ceilDiv(x[node_id] + node_size_x[node_id] - xl, bin_size_x, T(0)), num_bins_x);
+      int bin_id_yl = bounded_bin(floorDiv(y[node_id] - yl, bin_size_y, T(0)), num_bins_y);
+      int bin_id_yh = bounded_bin(ceilDiv(y[node_id] + node_size_y[node_id] - yl, bin_size_y, T(0)), num_bins_y);
 
       for (int bin_id_x = bin_id_xl; bin_id_x < bin_id_xh; ++bin_id_x) {
         for (int bin_id_y = bin_id_yl; bin_id_y < bin_id_yh; ++bin_id_y) {

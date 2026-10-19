@@ -140,17 +140,17 @@ void distributeMovableAndFixedCells2BinsCPU(
     } else {
       // fixed nodes may distribute to multiple bins
       int node_id = i;
-      int bin_id_xl = std::max((x[node_id] - xl) / bin_size_x, (T)0);
-      // tricky to control the tolerance in x direction, because bin_size_x is rather large 
-      // not setting it properly will cause missing fixed nodes in the bin_cells 
-      int bin_id_xh = std::min(
-          (int)ceilDiv(x[node_id] + node_size_x[node_id] - xl, bin_size_x, NumericTolerance<T>::rtol * site_width / bin_size_x),
-          num_bins_x);
-      int bin_id_yl = std::max((y[node_id] - yl) / bin_size_y, (T)0);
-      // the problem above usually does not appear in y direction, because bin_size_y is row height 
-      int bin_id_yh = std::min(
-          (int)ceilDiv(y[node_id] + node_size_y[node_id] - yl, bin_size_y),
-          num_bins_y);
+      const auto bounded_bin = [](T value, int count) {
+        return int(std::max(T(0), std::min(value, T(count))));
+      };
+      int bin_id_xl = bounded_bin((x[node_id] - xl) / bin_size_x, num_bins_x);
+      // Preserve the existing site-scaled tolerance before clamping.
+      int bin_id_xh = bounded_bin(
+          ceilDiv(x[node_id] + node_size_x[node_id] - xl, bin_size_x,
+                  NumericTolerance<T>::rtol * site_width / bin_size_x), num_bins_x);
+      int bin_id_yl = bounded_bin((y[node_id] - yl) / bin_size_y, num_bins_y);
+      int bin_id_yh = bounded_bin(
+          ceilDiv(y[node_id] + node_size_y[node_id] - yl, bin_size_y), num_bins_y);
 
       for (int bin_id_x = bin_id_xl; bin_id_x < bin_id_xh; ++bin_id_x) {
         for (int bin_id_y = bin_id_yl; bin_id_y < bin_id_yh; ++bin_id_y) {

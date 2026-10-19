@@ -79,42 +79,24 @@ struct DetailedPlaceDB {
                     ///< flat_region_boxes_start
 
   inline int pos2site_x(T xx) const {
-    int sx = floorDiv(xx - xl, site_width);
-    sx = std::max(sx, 0);
-    sx = std::min(sx, num_sites_x - 1);
-    return sx;
+    return int(std::min(std::max(floorDiv(xx - xl, site_width), T(0)), T(num_sites_x - 1)));
   }
   inline int pos2site_y(T yy) const {
-    int sy = floorDiv(yy - yl, row_height);
-    sy = std::max(sy, 0);
-    sy = std::min(sy, num_sites_y - 1);
-    return sy;
+    return int(std::min(std::max(floorDiv(yy - yl, row_height), T(0)), T(num_sites_y - 1)));
   }
   /// @brief site index as an upper bound
   inline int pos2site_ub_x(T xx) const {
-    int sx = ceilDiv(xx - xl, site_width);
-    sx = std::max(sx, 1);
-    sx = std::min(sx, num_sites_x);
-    return sx;
+    return int(std::min(std::max(ceilDiv(xx - xl, site_width), T(1)), T(num_sites_x)));
   }
   /// @brief site index as an upper bound
   inline int pos2site_ub_y(T yy) const {
-    int sy = ceilDiv(yy - yl, row_height);
-    sy = std::max(sy, 1);
-    sy = std::min(sy, num_sites_y);
-    return sy;
+    return int(std::min(std::max(ceilDiv(yy - yl, row_height), T(1)), T(num_sites_y)));
   }
   inline int pos2bin_x(T xx) const {
-    int bx = floorDiv(xx - xl, bin_size_x);
-    bx = std::max(bx, 0);
-    bx = std::min(bx, num_bins_x - 1);
-    return bx;
+    return int(std::min(std::max(floorDiv(xx - xl, bin_size_x), T(0)), T(num_bins_x - 1)));
   }
   inline int pos2bin_y(T yy) const {
-    int by = floorDiv(yy - yl, bin_size_y);
-    by = std::max(by, 0);
-    by = std::min(by, num_bins_y - 1);
-    return by;
+    return int(std::min(std::max(floorDiv(yy - yl, bin_size_y), T(0)), T(num_bins_y - 1)));
   }
   inline void shift_box_to_layout( DreamPlace::Utility::Box<T>& box) const {
     box.xl = std::max(box.xl, xl);
@@ -230,10 +212,8 @@ struct DetailedPlaceDB {
       // T node_xh = node_xl+node_size_x[i];
       T node_yh = node_yl + node_size_y[i];
 
-      int row_idxl = floorDiv(node_yl - yl, row_height);
-      int row_idxh = ceilDiv(node_yh - yl, row_height);
-      row_idxl = std::max(row_idxl, 0);
-      row_idxh = std::min(row_idxh, num_sites_y);
+      int row_idxl = int(std::min(std::max(floorDiv(node_yl - yl, row_height), T(0)), T(num_sites_y)));
+      int row_idxh = int(std::min(std::max(ceilDiv(node_yh - yl, row_height), T(0)), T(num_sites_y)));
 
       for (int row_id = row_idxl; row_id < row_idxh; ++row_id) {
         T row_yl = yl + row_id * row_height;
