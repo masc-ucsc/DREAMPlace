@@ -179,7 +179,7 @@ Topology seed_topology(const Design &d, std::span<const NodeInfo> info,
           g.y = d.node_y[first];
           g.allowed_orientations = 1;
         } else
-          g.allowed_orientations = group_orientations(g, info);
+          g.allowed_orientations = group_orientations(g, info, names);
         if (!(g.allowed_orientations & 1))
           throw std::invalid_argument(
               "seed input orientation violates LEF symmetry");

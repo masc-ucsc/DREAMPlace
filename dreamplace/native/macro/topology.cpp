@@ -221,19 +221,24 @@ std::pair<double, double> member_position(const Group &g, const Member &m,
   return {g.x + ((bits & 1) ? g.width - m.dx - w : m.dx),
           g.y + ((bits & 2) ? g.height - m.dy - h : m.dy)};
 }
-unsigned group_orientations(const Group &g, std::span<const NodeInfo> info) {
-  std::map<std::string, unsigned> masks;
-  for (const auto &n : info)
-    masks[n.name] = n.allowed_orientations;
+unsigned group_orientations(const Group &g, std::span<const NodeInfo> info,
+                            const std::map<std::string, int> &names) {
   unsigned result = 0;
   for (unsigned o = 0; o < 4; ++o) {
     bool ok = true;
     for (const auto &m : g.members)
-      ok &= bool(masks.at(m.name) & (1U << (o ^ unsigned(m.orientation))));
+      ok &= bool(info[names.at(m.name)].allowed_orientations &
+                 (1U << (o ^ unsigned(m.orientation))));
     if (ok)
       result |= 1U << o;
   }
   return result;
+}
+unsigned group_orientations(const Group &g, std::span<const NodeInfo> info) {
+  std::map<std::string, int> names;
+  for (int i = 0; i < int(info.size()); ++i)
+    names[info[i].name] = i;
+  return group_orientations(g, info, names);
 }
 void validate(const Topology &t, const Design &d,
               std::span<const NodeInfo> info) {

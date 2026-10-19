@@ -90,4 +90,8 @@ Topology merge(const Topology &base, const Topology &overlay, const Design &,
 std::pair<double, double> member_position(const Group &, const Member &,
                                           double width, double height);
 unsigned group_orientations(const Group &, std::span<const NodeInfo>);
+// Same, for callers that already hold a name -> info index map. The overload
+// above rebuilds that map over every node, which is O(nodes) per group.
+unsigned group_orientations(const Group &, std::span<const NodeInfo>,
+                            const std::map<std::string, int> &names);
 } // namespace DreamPlace::native::macro

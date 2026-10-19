@@ -115,6 +115,26 @@ int main() {
     require(remapped.groups[0].members[0].name == info[0].name &&
                 !remapped.diagnostics.empty(),
             "unstable fallback failed");
+    // Group orientation masks agree between the self-contained overload and
+    // the one reusing a caller-built name index.
+    {
+      std::vector<m::NodeInfo> oi2 = {{"a.m", "a", "ram", true},
+                                      {"b.m", "b", "ram", true}};
+      oi2[0].allowed_orientations = 0b0011;
+      oi2[1].allowed_orientations = 0b0101;
+      std::map<std::string, int> names{{"a.m", 0}, {"b.m", 1}};
+      m::Group g;
+      g.members.resize(2);
+      g.members[0].name = "a.m";
+      g.members[1].name = "b.m";
+      require(m::group_orientations(g, oi2) == 0b0001 &&
+                  m::group_orientations(g, oi2, names) == 0b0001,
+              "common orientation mask");
+      g.members[1].orientation = Orientation::FN;
+      require(m::group_orientations(g, oi2) == 0b0010 &&
+                  m::group_orientations(g, oi2, names) == 0b0010,
+              "member orientation shifts the mask");
+    }
     // Many edge-crowded rigid groups exercise the recovery path used when
     // a prototype has collapsed its soft anchors onto one side.
     Design crowded;
