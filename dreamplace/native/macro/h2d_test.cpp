@@ -98,6 +98,24 @@ int main() {
       check(expanded.node_x[i] == multiple.node_x[i] &&
                 expanded.node_y[i] == multiple.node_y[i],
             "macro cache moved coordinates");
+    // The coarse-pitch recompaction runs its own cells pass. Like the main
+    // rounds it must keep solver frames private (one snapshot per round) and
+    // apply the same resolved controls.
+    {
+      auto coarse = m::Parameters(p);
+      coarse.K = 1;
+      coarse.pitch_x = coarse.pitch_y = 2;
+      Options observed = cells;
+      std::vector<PlacementStage> stages;
+      observed.observer = [&](const Design &, PlacementStage stage, int) {
+        stages.push_back(stage);
+      };
+      auto pitched = f.d;
+      auto pr = m::place_h2d(pitched, f.info, coarse, input, observed);
+      check(pr.legal && is_legal(pitched), "coarse-pitch pipeline illegal");
+      check(stages.size() == 1 && stages[0] == PlacementStage::global_placement,
+            "coarse-pitch pass leaked internal solver frames");
+    }
     // Whole hierarchical bus ports resolve to actual fixed physical bit IOs.
     auto bus_info = f.info;
     bus_info[6].name = "@io:din[0]";

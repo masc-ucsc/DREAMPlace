@@ -85,6 +85,23 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     return std::pair{hpwl(d) + p.alpha * route_scale * route.overflow,
                      route.overflow};
   };
+  // Every legal cells-only pass (each round and the coarse-pitch recompaction)
+  // uses the same resolved controls and keeps solver frames private.
+  const auto final_cells_options = [&](const Design &frozen_design) {
+    Options cells = cell_options;
+    cells.seed = p.seed;
+    cells.num_threads = p.threads;
+    cells.target_density = p.target_density;
+    cells.filler_width = bounded_filler_width(frozen_design, cells, filler);
+    cells.routability = p.routability;
+    cells.route_capacity_h = p.route_cap_h;
+    cells.route_capacity_v = p.route_cap_v;
+    cells.order_weight = 0;
+    cells.legalize = true;
+    cells.detailed_place = true;
+    cells.observer = {};
+    return cells;
+  };
   Parameters realization_parameters = p;
   realization_parameters.pitch_x = realization_parameters.pitch_y = 0;
   Design best;
@@ -176,18 +193,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     Topology candidate = realized.topology;
     candidate.realized_graph = realized.graph;
     auto frozen = abstract_design(working, info, candidate, p, true);
-    Options cells = cell_options;
-    cells.seed = p.seed;
-    cells.num_threads = p.threads;
-    cells.target_density = p.target_density;
-    cells.filler_width = bounded_filler_width(frozen.design, cells, filler);
-    cells.routability = p.routability;
-    cells.route_capacity_h = p.route_cap_h;
-    cells.route_capacity_v = p.route_cap_v;
-    cells.order_weight = 0;
-    cells.legalize = true;
-    cells.detailed_place = true;
-    cells.observer = {};
+    const Options cells = final_cells_options(frozen.design);
     DreamPlace::native::Result cell_placement;
     try {
       cell_placement = place(frozen.design, cells);
@@ -252,10 +258,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
           compact(a, best_topology, p, position_graph(a, best_topology));
       if (snapped.legal) {
         auto frozen = abstract_design(best, info, snapped.topology, p, true);
-        Options cells = cell_options;
-        cells.legalize = cells.detailed_place = true;
-        cells.seed = p.seed;
-        cells.filler_width = bounded_filler_width(frozen.design, cells, filler);
+        const Options cells = final_cells_options(frozen.design);
         const auto snapped_placement = place(frozen.design, cells);
         auto candidate = best;
         expand(frozen, snapped.topology, candidate);
