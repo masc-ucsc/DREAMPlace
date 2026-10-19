@@ -8,6 +8,7 @@
 #include <numeric>
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 namespace DreamPlace::native::macro {
 namespace {
 struct Object {
@@ -172,42 +173,63 @@ Realization compact(const Abstracted &a, const Topology &t, const Parameters &p,
     index[obj[i].id] = i;
     physical[obj[i].node] = i;
   }
+  // Edges are matched by id or by unordered endpoint pair. Hash those keys once
+  // instead of rescanning the whole (quadratic-size) graph per candidate edge.
+  using PairKey = std::pair<std::string, std::string>;
+  const auto pair_key = [](const std::string &a, const std::string &b) {
+    return a < b ? PairKey{a, b} : PairKey{b, a};
+  };
   // Retain obstacle separation independently of a movable sequence-pair
   // proposal.
   auto obstacle = position_graph(a, t);
+  std::unordered_set<std::string> present;
+  for (const auto &g : graph)
+    present.insert(g.id);
   for (const auto &e : obstacle) {
     int u = index.at(e.from), v = index.at(e.to);
     if (obj[u].fixed || obj[v].fixed)
-      if (std::none_of(graph.begin(), graph.end(),
-                       [&](const auto &g) { return g.id == e.id; }))
+      if (present.insert(e.id).second)
         graph.push_back(e);
   }
   std::set<std::string> frozen;
   for (const auto &g : t.groups)
     if (g.freeze_topology)
       frozen.insert(g.id);
-  if (!frozen.empty())
+  if (!frozen.empty()) {
+    // Each pinned realized edge replaces every graph edge on its pair, and a
+    // later pinned edge on the same pair replaces an earlier one.
+    std::vector<const Separation *> pinned;
+    std::map<PairKey, size_t> last;
     for (const auto &e : t.realized_graph)
       if ((frozen.contains(e.from) || frozen.contains(e.to)) &&
           index.contains(e.from) && index.contains(e.to)) {
-        std::erase_if(graph, [&](const auto &v) {
-          return (v.from == e.from && v.to == e.to) ||
-                 (v.from == e.to && v.to == e.from);
-        });
-        graph.push_back(e);
+        last[pair_key(e.from, e.to)] = pinned.size();
+        pinned.push_back(&e);
       }
+    if (!pinned.empty()) {
+      std::erase_if(graph, [&](const Separation &v) {
+        return last.contains(pair_key(v.from, v.to));
+      });
+      for (size_t k = 0; k < pinned.size(); ++k)
+        if (last.at(pair_key(pinned[k]->from, pinned[k]->to)) == k)
+          graph.push_back(*pinned[k]);
+    }
+  }
   std::vector<OrderEdge> forced;
   for (const auto &e : t.order)
     if (p.order_in_lp || e.strength.hard)
       forced.push_back(e);
   // A requested order owns its pair's separating direction. The geometric
   // prototype must not inject the opposite relation for that same pair.
-  std::erase_if(graph, [&](const Separation &s) {
-    return std::any_of(forced.begin(), forced.end(), [&](const OrderEdge &e) {
-      return (s.from == e.from && s.to == e.to) ||
-             (s.from == e.to && s.to == e.from);
-    });
-  });
+  {
+    std::set<PairKey> owned;
+    for (const auto &e : forced)
+      owned.insert(pair_key(e.from, e.to));
+    if (!owned.empty())
+      std::erase_if(graph, [&](const Separation &s) {
+        return owned.contains(pair_key(s.from, s.to));
+      });
+  }
   std::vector<PositionBox> positions(obj.size());
   std::set<std::string> relaxed;
   for (int axis = 0; axis < 2; ++axis) {
