@@ -54,8 +54,11 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
       if (x < l.xl || x >= l.xh || y < l.yl || y >= l.yh) {
         continue;
       }
-      const int k =
-          bin(x, l.xl, dx, o.bins_x) * o.bins_y + bin(y, l.yl, dy, o.bins_y);
+      // bin() may return `count` for a coordinate a ulp inside the edge, where
+      // the division rounds up to the grid size; keep the pin in the last bin.
+      const int k = std::min(bin(x, l.xl, dx, o.bins_x), o.bins_x - 1) *
+                        o.bins_y +
+                    std::min(bin(y, l.yl, dy, o.bins_y), o.bins_y - 1);
       // Access sites scale with tracks crossing bin edges, not bin area.
       r.pin_utilization[k] +=
           1 / ((dx + dy) * std::sqrt(available_h[k] * available_v[k]));

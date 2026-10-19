@@ -25,19 +25,28 @@ std::vector<Flow> dataflow(const FlowGraph &g, int max_hops, int cap) {
       sources[endpoint(n)].push_back(i);
   }
   std::map<std::pair<std::string, std::string>, double> weights;
+  // One distance table for every source: allocating and filling a table per
+  // endpoint made the pass O(sources * nodes) on large flat netlists. Each
+  // search only touches the nodes within its hop budget, so reset just those.
+  std::vector<int> best(g.nodes.size(), max_hops + 1);
+  std::vector<int> touched;
   for (const auto &[name, starts] : sources) {
-    std::vector<int> best(g.nodes.size(), max_hops + 1);
+    for (int i : touched)
+      best[i] = max_hops + 1;
+    touched.clear();
     std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>,
                         std::greater<>>
         queue;
     auto push = [&](int i, int h) {
       if (h <= max_hops && h < best[i]) {
         best[i] = h;
+        touched.push_back(i);
         queue.push({h, i});
       }
     };
     for (int start : starts) {
       best[start] = 0;
+      touched.push_back(start);
       const auto &out = g.nodes[start].sinks;
       if (out.size() <= size_t(cap))
         for (int sink : out)

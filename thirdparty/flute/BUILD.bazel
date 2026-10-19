@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "flute",
@@ -6,6 +6,14 @@ cc_library(
     hdrs = ["flute.hpp"],
     data = glob(["lut.ICCAD2015/*"]),
     visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "flute_test",
+    size = "small",
+    srcs = ["flute_test.cpp"],
+    data = glob(["lut.ICCAD2015/*"]),
+    deps = [":flute"],
 )
 
 exports_files(["LICENSE"])

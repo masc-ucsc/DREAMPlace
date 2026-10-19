@@ -272,8 +272,9 @@ int computeTriangleDensityMapLauncher(
   // do not use dynamic scheduling for determinism
   // int chunk_size =
   // DREAMPLACE_STD_NAMESPACE::max(int(num_nodes/num_threads/16), 1);
-#pragma omp parallel for num_threads( \
-    num_threads)  // schedule(dynamic, chunk_size)
+  // The native bridge relies on a fixed node range per worker to merge private
+  // maps deterministically, so the schedule is explicit.
+#pragma omp parallel for num_threads(num_threads) schedule(static)
   for (int i = 0; i < num_nodes; ++i) {
     // use stretched node size
     T node_size_x = node_size_x_clamped_tensor[i];

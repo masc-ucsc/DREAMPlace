@@ -1,5 +1,8 @@
 #include "flute.hpp"
 
+#include <stdexcept>
+#include <string>
+
 namespace flute {
 
 #if DEGREE <= 7
@@ -36,7 +39,8 @@ Tree vmergetree(Tree t1, Tree t2);
 void readLUT(const char* powv, const char* post) {
   static bool LUTread = false;
   if (LUTread) return;
-  LUTread = true;
+  // LUTread is set only after a complete load: a failed attempt must not make a
+  // later flute() call run against empty tables.
 
   FILE *fpwv, *fprt;
   struct csoln* p;
@@ -59,17 +63,22 @@ void readLUT(const char* powv, const char* post) {
 
   fpwv = fopen(powv, "r");
   if (fpwv == nullptr) {
-    printf("Error in opening %s\n", powv);
-    exit(1);
+    throw std::runtime_error(std::string("FLUTE: cannot open ") + powv);
   }
 
 #if FLUTEROUTING == 1
   fprt = fopen(post, "r");
   if (fprt == nullptr) {
-    printf("Error in opening %s\n", post);
-    exit(1);
+    fclose(fpwv);
+    throw std::runtime_error(std::string("FLUTE: cannot open ") + post);
   }
+#else
+  fprt = nullptr;
 #endif
+  const auto close_tables = [&] {
+    fclose(fpwv);
+    if (fprt != nullptr) fclose(fprt);
+  };
 
   for (d = 4; d <= DEGREE; d++) {
     for (i = 0; i <= 255; i++) {
@@ -96,6 +105,10 @@ void readLUT(const char* powv, const char* post) {
         LUT[d][k] = p;
         for (i = 1; i <= ns; i++) {
           linep = (unsigned char*)fgets((char*)line, 99, fpwv);
+          if (linep == nullptr) {
+            close_tables();
+            throw std::runtime_error("FLUTE: truncated lookup table");
+          }
           p->parent = charnum[*(linep++)];
           j = 0;
           while ((p->seg[j++] = charnum[*(linep++)]) != 0)
@@ -131,6 +144,8 @@ void readLUT(const char* powv, const char* post) {
       }
     }
   }
+  close_tables();
+  LUTread = true;
 }
 
 DType flute_wl(int d, DType* x, DType* y, int acc) {

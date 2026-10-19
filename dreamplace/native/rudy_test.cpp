@@ -208,6 +208,37 @@ int main() {
       blocked_area += f * 100;
     near(blocked_area, 20 * 75);
     check(overlap.unroutable_nets == 0);
+    {
+      // A pin one ulp inside the right/top edge can round to bin index `bins`
+      // when divided by the bin pitch; it must still land in the last bin.
+      Design edge;
+      edge.layout = {0, 0, 1000, 1000, 1, 1};
+      edge.num_movable = 0;
+      const double inside = std::nextafter(1000., 0.);
+      edge.node_x = {inside, 10};
+      edge.node_y = {inside, 10};
+      edge.node_size_x = {0, 0};
+      edge.node_size_y = {0, 0};
+      edge.node_macro = {1, 0};
+      edge.pin2node = {0, 1};
+      edge.pin_offset_x = {0, 0};
+      edge.pin_offset_y = {0, 0};
+      edge.flat_net2pin = {0, 1};
+      edge.flat_net2pin_start = {0, 2};
+      edge.net_weights = {1};
+      edge.net_mask = {1};
+      edge.build_maps();
+      RudyOptions o3{3, 3, 1, 1};
+      o3.pin_access = true;
+      const auto r = rudy(edge, o3);
+      check(r.pin_utilization.size() == 9);
+      check(r.pin_utilization[2 * 3 + 2] > 0);
+      double elsewhere = 0;
+      for (size_t i = 0; i < r.pin_utilization.size(); ++i)
+        if (i != 8)
+          elsewhere += r.pin_utilization[i];
+      near(elsewhere, 0);
+    }
     Design empty;
     empty.layout = {0, 0, 10, 10, 1, 1};
     empty.build_maps();

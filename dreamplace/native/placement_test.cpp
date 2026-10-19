@@ -13,6 +13,9 @@
 
 #include "dreamplace/native/spectral.hpp"
 #include "utility/src/detailed_place_db.h"
+#include "utility/src/utils.h"
+
+#include "independent_set_matching/src/bin2node_3d_map.h"
 
 namespace DreamPlace {
 template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int);
@@ -472,6 +475,63 @@ void concurrent_instances() {
     }
   }
 }
+// Floating-point atomic accumulation into the density map makes the result
+// depend on thread arrival order. Repeated identical runs must agree exactly for
+// a fixed worker count, including when OpenMP is enabled (--config=openmp).
+void threaded_determinism() {
+  Design d;
+  d.layout = {0, 0, 64, 32, 1, 1};
+  const int cells = 300, nets = 380;
+  d.num_movable = cells;
+  unsigned state = 12345;
+  const auto next = [&](unsigned bound) {
+    state = state * 1664525u + 1013904223u;
+    return (state >> 8) % bound;
+  };
+  for (int i = 0; i < cells; ++i) {
+    d.node_x.push_back(28 + next(8));
+    d.node_y.push_back(14 + next(4));
+    d.node_size_x.push_back(2);
+    d.node_size_y.push_back(1);
+  }
+  d.flat_net2pin_start = {0};
+  for (int n = 0; n < nets; ++n) {
+    const int degree = 2 + next(3);
+    for (int k = 0; k < degree; ++k) {
+      d.flat_net2pin.push_back(d.pin2node.size());
+      d.pin2node.push_back(next(cells));
+      d.pin_offset_x.push_back(next(3) * .5);
+      d.pin_offset_y.push_back(.5);
+    }
+    d.flat_net2pin_start.push_back(d.flat_net2pin.size());
+  }
+  // A cell may repeat inside a net; build_maps accepts repeated nodes.
+  d.build_maps();
+  Options o;
+  o.bins_x = o.bins_y = 16;
+  o.max_iterations = 120;
+  o.num_threads = 4;
+  o.legalize = false;
+  o.detailed_place = false;
+  auto first = d;
+  place(first, o);
+  for (int run = 0; run < 6; ++run) {
+    auto again = d;
+    place(again, o);
+    check(again.node_x == first.node_x && again.node_y == first.node_y,
+          "multithreaded global placement is nondeterministic");
+  }
+  // The legalizer and detailed-placement kernels also take the worker count.
+  o.legalize = o.detailed_place = true;
+  auto full = d;
+  place(full, o);
+  for (int run = 0; run < 6; ++run) {
+    auto again = d;
+    place(again, o);
+    check(again.node_x == full.node_x && again.node_y == full.node_y,
+          "multithreaded legalization/detailed placement is nondeterministic");
+  }
+}
 void hpwl_case() {
   Design d;
   d.layout = {0, 0, 20, 10, 1, 1};
@@ -838,10 +898,51 @@ void moving_terminals() {
   GpState state;
   rejects([&] { place(base, o, &state); });
 }
+
+// Fixed nodes only need finite coordinates; one far above the core used to turn
+// an out-of-range double into a negative row index inside is_legal().
+void far_fixed_nodes() {
+  for (const double far : {1e12, -1e12, 3e9}) {
+    Design d;
+    d.layout = {0, 0, 40, 20, 1, 1};
+    d.num_movable = 4;
+    d.node_x = {2, 5, 8, 20, far, 30};
+    d.node_y = {2, 6, 2, 9, far, 5};
+    d.node_size_x = {2, 3, 2, 4, 6, 0};
+    d.node_size_y = {1, 1, 1, 1, 3, 0};
+    d.pin2node = {0, 1, 2, 3, 4, 5};
+    d.pin_offset_x.assign(6, 0.5);
+    d.pin_offset_y.assign(6, 0.5);
+    d.flat_net2pin = {0, 1, 2, 3, 4, 5};
+    d.flat_net2pin_start = {0, 3, 6};
+    d.build_maps();
+    const auto before = d;
+    (void)is_legal(d); // must not index outside the row table
+    Options o;
+    o.max_iterations = 30;
+    o.bins_x = o.bins_y = 8;
+    const auto r = place(d, o);
+    check(r.legal && is_legal(d), "far fixed node broke legalization");
+    check(d.node_x[4] == before.node_x[4] && d.node_y[4] == before.node_y[4],
+          "far fixed node moved");
+  }
+}
+void power2_grid() {
+  // ISM sizes its bin grid with ceil_power2(bins / 8); fewer than eight bins
+  // gives zero, whose log2 used to be cast to int and used as a shift count.
+  using DreamPlace::ceil_power2;
+  const int expected[] = {1, 1, 2, 4, 4, 8, 8, 8, 8, 16};
+  for (int v = 0; v < 10; ++v)
+    check(ceil_power2(v) == expected[v], "ceil_power2 mismatch");
+  check(ceil_power2(-3) == 1, "ceil_power2 of a negative count");
+}
 } // namespace
 int main() {
   try {
     spectral();
+    power2_grid();
+    far_fixed_nodes();
+    threaded_determinism();
     gradients();
     hpwl_case();
     native_flow();

@@ -115,6 +115,26 @@ int main() {
     require(remapped.groups[0].members[0].name == info[0].name &&
                 !remapped.diagnostics.empty(),
             "unstable fallback failed");
+    // Group orientation masks agree between the self-contained overload and
+    // the one reusing a caller-built name index.
+    {
+      std::vector<m::NodeInfo> oi2 = {{"a.m", "a", "ram", true},
+                                      {"b.m", "b", "ram", true}};
+      oi2[0].allowed_orientations = 0b0011;
+      oi2[1].allowed_orientations = 0b0101;
+      std::map<std::string, int> names{{"a.m", 0}, {"b.m", 1}};
+      m::Group g;
+      g.members.resize(2);
+      g.members[0].name = "a.m";
+      g.members[1].name = "b.m";
+      require(m::group_orientations(g, oi2) == 0b0001 &&
+                  m::group_orientations(g, oi2, names) == 0b0001,
+              "common orientation mask");
+      g.members[1].orientation = Orientation::FN;
+      require(m::group_orientations(g, oi2) == 0b0010 &&
+                  m::group_orientations(g, oi2, names) == 0b0010,
+              "member orientation shifts the mask");
+    }
     // Many edge-crowded rigid groups exercise the recovery path used when
     // a prototype has collapsed its soft anchors onto one side.
     Design crowded;
@@ -141,6 +161,60 @@ int main() {
       ct.anchors.push_back({"edge:" + g.id, g.id, Side::left, 0, {false, 1}});
     auto cr = m::group_legalize(m::abstract_design(crowded, ci, ct, p), ct, p);
     require(cr.legal, "edge-crowded group recovery failed");
+    // A frozen group keeps the realized relation even when the geometric
+    // prototype would pick the opposite side; obstacle relations to fixed
+    // objects are always retained, and a hard order owns its pair.
+    {
+      Design row;
+      row.layout = {0, 0, 120, 30, 1, 1};
+      row.num_movable = 3;
+      row.node_x = {10, 40, 70, 100};
+      row.node_y = {10, 10, 10, 10};
+      row.node_size_x = {10, 10, 10, 10};
+      row.node_size_y = {8, 8, 8, 8};
+      row.build_maps();
+      std::vector<m::NodeInfo> ri = {{"a.m", "a", "ram", true},
+                                     {"b.m", "b", "ram", true},
+                                     {"c.m", "c", "ram", true},
+                                     {"f.m", "f", "ram", true}};
+      m::Parameters rp;
+      rp.seed_sa_evals = 0;
+      rp.anchors = rp.order = false;
+      rp.min_channel = 1;
+      auto rt = m::seed_topology(row, ri, {}, rp);
+      const auto ida = rt.groups[0].id, idb = rt.groups[1].id,
+                 idc = rt.groups[2].id;
+      auto position = [&](const m::Topology &topology, const std::string &id) {
+        for (const auto &g : topology.groups)
+          if (g.id == id)
+            return g.x;
+        return -1.;
+      };
+      // Geometry says a < b < c; freeze b with the opposite relation to a.
+      rt.groups[1].freeze_topology = true;
+      rt.realized_graph = {{idb, ida, "sp:" + idb + ":" + ida, Axis::x}};
+      auto ra = m::abstract_design(row, ri, rt, rp);
+      auto realized = m::compact(ra, rt, rp, m::position_graph(ra, rt));
+      require(realized.legal && position(realized.topology, idb) <
+                                    position(realized.topology, ida),
+              "frozen realized relation ignored");
+      require(position(realized.topology, idb) + 10 <=
+                  position(realized.topology, ida),
+              "frozen relation left an overlap");
+      // The geometric prototype still separates the unfrozen pairs, and the
+      // fixed group (index 3) remains an obstacle for every movable group.
+      for (const auto &id : {ida, idb, idc}) {
+        const double x = position(realized.topology, id);
+        require(x + 10 <= 100 || x >= 110, "fixed obstacle not retained");
+      }
+      bool pinned = false;
+      for (const auto &e : realized.graph)
+        pinned |= e.from == idb && e.to == ida;
+      require(pinned, "realized edge missing from the returned graph");
+      for (const auto &e : realized.graph)
+        require(!(e.from == ida && e.to == idb),
+                "opposite prototype edge survived for a frozen pair");
+    }
     // LPbench: 50 groups and 5,000 physical nets exercise multigroup l/u rows.
     Design large;
     large.layout = {0, 0, 1000, 100, 1, 1};
