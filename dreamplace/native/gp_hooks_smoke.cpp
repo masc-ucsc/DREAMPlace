@@ -245,11 +245,13 @@ int main() {
     place(original, base);
     disabled.node_macro = {1, 1, 1, 0, 0};
     disabled.node_align_class = {0, 0, 0, -1, -1};
+    base.macro_align_global = true; // zero weight must remain bit-identical
     base.macro_align_sigma = .25;
     base.macro_align_overlap_boost = 2;
     place(disabled, base);
     check(original.node_x == disabled.node_x &&
           original.node_y == disabled.node_y);
+    base.macro_align_global = false;
     auto aligned = fixture();
     aligned.node_macro = {1, 1, 1, 0, 0};
     aligned.node_align_class = {0, 0, 0, -1, -1};
@@ -274,6 +276,38 @@ int main() {
       mismatch = true;
     }
     check(mismatch);
+    // Active global alignment has deterministic continuation and a salted mode.
+    auto global = fixture();
+    global.node_macro = {1, 1, 1, 0, 0};
+    global.node_align_class = {0, 0, 0, -1, -1};
+    global.node_y[2] += .4;
+    auto global_resumed = global;
+    auto global_options = base;
+    global_options.macro_align_global = true;
+    global_options.macro_align_sigma = .25;
+    global_options.schedule_iterations = 40;
+    global_options.max_iterations = 40;
+    global_options.stop_overflow = 0;
+    const auto global_result = place(global, global_options);
+    check(global_result.macro_alignment_seconds > 0);
+    bool force_seen = false;
+    for (const auto &sample : global_result.history)
+      force_seen |= sample.align_force > 0;
+    check(force_seen);
+    global_options.max_iterations = 20;
+    GpState global_state;
+    place(global_resumed, global_options, &global_state);
+    place(global_resumed, global_options, &global_state);
+    check(global.node_x == global_resumed.node_x &&
+          global.node_y == global_resumed.node_y);
+    global_options.macro_align_global = false;
+    bool global_changed = false;
+    try {
+      place(global_resumed, global_options, &global_state);
+    } catch (const std::invalid_argument &) {
+      global_changed = true;
+    }
+    check(global_changed);
     auto route = fixture();
     route.node_inflatable = {1, 1, 1, 0, 0};
     auto sizes = route.node_size_x;

@@ -63,7 +63,8 @@ struct Design {
   std::vector<double> centroid_node_area; // physical weights, not halo area
   // Explicit non-standard-cell identity, independent of geometry/row height.
   std::vector<std::uint8_t> node_macro;
-  // Same master x synthesis-color identity; -1 opts a node out.
+  // Host alignment identity; -1 opts a node out. LiveHD uses master x color
+  // normally, and master alone for global strip-grid alignment.
   std::vector<int> node_align_class;
   // Same original hierarchy scope AND macro dimensions; -1 excludes a node.
   // Used by both macro snap algorithms, never by GP alignment/cohesion.
@@ -176,6 +177,9 @@ struct Options {
   double macro_align_overlap_boost = 0;
   int macro_align_start = 100, macro_align_full = 500;
   bool macro_align_nearest = false, macro_snap = false;
+  // Rebuild physical-projection pairs every iteration using minimum-size
+  // strips. Host classes must identify master types, independently of color.
+  bool macro_align_global = false;
   // Opt-in centroid-style line/gap/midpoint fitting before macro legalization.
   bool macro_snap_regular = false;
   FloorplanOptions macro_snap_options;
@@ -274,6 +278,7 @@ struct GpSample {
   // Maximum applied L1 force / channel count since the preceding sample.
   double route_peak_utilization = 0, macro_routing_force = 0;
   std::uint64_t macro_routing_channels = 0;
+  double align_force = 0; // peak applied L1 force since the preceding sample
 };
 struct CentroidReport {
   bool started = false, completed = false;
@@ -311,6 +316,7 @@ struct Result {
   AlignmentReport alignment;
   int bins_x = 0, bins_y = 0;
   double poisson_seconds = 0, macro_routing_seconds = 0;
+  double macro_alignment_seconds = 0;
   double global_placement_seconds = 0, detailed_placement_seconds = 0;
   std::vector<GpSample> history;
   std::vector<DetailedSample> detailed_history;
@@ -374,10 +380,13 @@ struct Gradient {
 std::vector<AlignmentPair>
 macro_align_pairs(const Design &, bool nearest = false,
                   const std::vector<int> *classes = nullptr);
+std::vector<AlignmentPair> macro_grid_align_pairs(const Design &,
+                                                  bool nearest = false);
 double macro_align_ramp(const Options &, int iteration);
 Gradient macro_alignment(const Design &, const std::vector<AlignmentPair> &,
                          double lambda_x, double lambda_y, double sigma,
-                         double *residual = nullptr);
+                         double *residual = nullptr,
+                         bool physical_extents = false);
 AlignmentSnap macro_align_snap(const Design &, double tau, std::int64_t weight);
 AlignmentSnap macro_regular_snap(const Design &, const FloorplanOptions &,
                                  std::int64_t weight);

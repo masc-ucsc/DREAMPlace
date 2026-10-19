@@ -837,6 +837,8 @@ Result place(Design &design, const Options &options, GpState *state) {
     salt(std::bit_cast<std::uint64_t>(o.routability_macro_range));
   }
   if (o.macro_align_weight > 0) {
+    if (o.macro_align_global)
+      salt(0x5354524950414c49ULL);
     salt(std::bit_cast<std::uint64_t>(o.macro_align_weight));
     salt(std::bit_cast<std::uint64_t>(o.macro_align_sigma));
     salt(std::bit_cast<std::uint64_t>(o.macro_align_overlap_boost));
@@ -1045,7 +1047,12 @@ Result place(Design &design, const Options &options, GpState *state) {
     auto convergence = warm ? state->convergence : GpConvergence{};
     std::vector<AlignmentPair> align_pairs =
         warm ? state->align_pairs : std::vector<AlignmentPair>{};
-    double align_residual = 0, align_ramp = 0;
+    double align_residual = 0, align_ramp = 0, align_force_peak = 0;
+    const auto alignment_pairs = [&](const Design &view) {
+      return o.macro_align_global
+                 ? detail::macro_grid_align_pairs(view, o.macro_align_nearest)
+                 : detail::macro_align_pairs(view, o.macro_align_nearest);
+    };
     double centroid_repulsion_weight = o.centroid_repulsion_weight;
     double previous_circle_overlap = 1;
     if (warm && o.improved_routability) {
@@ -1317,8 +1324,9 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
       }
       if (o.macro_align_weight > 0) {
-        if (global_iter % 20 == 0)
-          align_pairs = detail::macro_align_pairs(d, o.macro_align_nearest);
+        const auto align_start = std::chrono::steady_clock::now();
+        if (o.macro_align_global || global_iter % 20 == 0)
+          align_pairs = alignment_pairs(d);
         align_ramp = detail::macro_align_ramp(o, global_iter);
         double mean_x = 0, mean_y = 0;
         int macros = 0;
@@ -1334,11 +1342,18 @@ Result place(Design &design, const Options &options, GpState *state) {
             macros ? o.macro_align_weight * align_ramp / macros : 0;
         const auto ag = detail::macro_alignment(
             d, align_pairs, scale * mean_x, scale * mean_y, o.macro_align_sigma,
-            &align_residual);
+            &align_residual, o.macro_align_global);
+        double align_force = 0;
         for (int i = 0; i < original; ++i) {
           wg.x[i] += ag.x[i];
           wg.y[i] += ag.y[i];
+          align_force += std::abs(ag.x[i]) + std::abs(ag.y[i]);
         }
+        align_force_peak = std::max(align_force_peak, align_force);
+        r.macro_alignment_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          align_start)
+                .count();
       }
       if (o.cohesion_weight > 0 && progress > 0 && !d.cohesion_groups.empty()) {
         const auto cg = detail::cohesion(d, o.cohesion_weight * progress);
@@ -1614,7 +1629,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           old_gy.assign(n, 0);
           old_ex = x;
           old_ey = y;
-          align_pairs = detail::macro_align_pairs(d, o.macro_align_nearest);
+          align_pairs = alignment_pairs(d);
         } else {
           Design candidate = model;
           auto assign = [](auto &to, const auto &from) {
@@ -1757,14 +1772,23 @@ Result place(Design &design, const Options &options, GpState *state) {
           best_feasible_iteration = global_iter + 1;
         }
         const auto overlaps = detail::macro_overlap_counts(physical);
-        if (o.macro_align_weight > 0)
+        if (o.macro_align_weight > 0) {
+          // Report the current legal-geometry candidates, not stale pairs from
+          // before this iteration's move. The next force refreshes
+          // independently.
+          if (o.macro_align_global)
+            align_pairs = alignment_pairs(physical);
           detail::macro_alignment(physical, align_pairs, 0, 0,
-                                  o.macro_align_sigma, &align_residual);
+                                  o.macro_align_sigma, &align_residual,
+                                  o.macro_align_global);
+        }
         r.history.push_back(
             {global_iter + 1, r.overflow, current_hpwl, density_weight,
              route_overflow, inflated_ratio, overlaps.first, overlaps.second,
              overflow(physical, o.bins_x, o.bins_y, o.target_density), target,
              filler_scale, align_pairs.size(), align_residual, align_ramp});
+        r.history.back().align_force = align_force_peak;
+        align_force_peak = 0;
         r.history.back().macro_routing_force = macro_routing_force_peak;
         r.history.back().macro_routing_channels = macro_routing_channels_peak;
         macro_routing_force_peak = 0;
