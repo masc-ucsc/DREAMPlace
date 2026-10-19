@@ -339,6 +339,26 @@ void circle_attraction_checks(Design d) {
            g.value, 1e-8, "moving circle depends on world origin");
     } else {
       check(std::hypot(sx, sy) > 1, "frozen anchor loses restoring force");
+      const auto macros =
+          detail::centroid_circle_attraction(d, .3, .5, 4, true);
+      for (size_t n = 0; n < d.node_x.size(); ++n) {
+        const bool active = n < size_t(d.num_movable) && d.node_macro[n];
+        near(macros.x[n], active ? g.x[n] : 0, 0,
+             "macro-only anchor changes macro strength or pulls cells");
+        near(macros.y[n], active ? g.y[n] : 0, 0,
+             "macro-only anchor changes macro strength or pulls cells");
+        for (int axis = 0; axis < 2; ++axis) {
+          auto hi = d, lo = d;
+          (axis ? hi.node_y : hi.node_x)[n] += .001;
+          (axis ? lo.node_y : lo.node_x)[n] -= .001;
+          const double fd =
+              (detail::centroid_circle_attraction(hi, .3, .5, 4, true).value -
+               detail::centroid_circle_attraction(lo, .3, .5, 4, true).value) /
+              .002;
+          near(fd, axis ? macros.y[n] : macros.x[n], 1e-4,
+               "macro-only anchor finite-difference mismatch");
+        }
+      }
     }
     auto padded = d;
     for (int n = 0; n < 6; ++n) {
@@ -442,8 +462,202 @@ void fixed_spring_gp() {
   o.centroid_attraction_outside = -1;
   rejects([&] { place(d, o); });
 }
+void parent_attraction_checks() {
+  auto d = fixture();
+  d.centroid_groups[0].colors = {0, 1, 2, 3, 4};
+  d.centroid_groups[0].repulsion_area = std::acos(-1.) * .5 * 40 * 40;
+  d.centroid_groups[1].parent = 0;
+  d.centroid_groups[1].family += 1;
+  d.validate();
+  std::uint64_t edges = 0;
+  double distance = 0;
+  const auto g =
+      detail::centroid_parent_attraction(d, 2, .5, 4, &edges, &distance);
+  check(edges == 1 && distance > 1 && g.value > 0, "parent edge missing");
+  double sx = 0, sy = 0;
+  for (int n = 0; n < 9; ++n) {
+    sx += g.x[n];
+    sy += g.y[n];
+    for (int axis = 0; axis < 2; ++axis) {
+      auto lo = d, hi = d;
+      (axis ? lo.node_y : lo.node_x)[n] -= 1e-3;
+      (axis ? hi.node_y : hi.node_x)[n] += 1e-3;
+      const double fd =
+          (detail::centroid_parent_attraction(hi, 2, .5, 4).value -
+           detail::centroid_parent_attraction(lo, 2, .5, 4).value) /
+          .002;
+      near(fd, axis ? g.y[n] : g.x[n], 1e-5 * std::max(1., std::abs(fd)),
+           "parent edge chain rule mismatch with nested/shared members");
+    }
+  }
+  near(sx, 0, 1e-7, "parent edge x force not balanced");
+  near(sy, 0, 1e-7, "parent edge y force not balanced");
+  auto shifted = d;
+  for (int n = 0; n < 9; ++n) {
+    shifted.node_x[n] += 30;
+    shifted.node_y[n] -= 20;
+  }
+  near(detail::centroid_parent_attraction(shifted, 2, .5, 4).value, g.value,
+       1e-6, "parent edge pins absolute position");
+  auto inside = d;
+  inside.centroid_groups[0].repulsion_area = std::acos(-1.) * .5 * 1000 * 1000;
+  const auto weak = detail::centroid_parent_attraction(inside, 2, .5, 4);
+  const auto quadratic = detail::centroid_parent_attraction(inside, 2, .5, 0);
+  check(weak.x == quadratic.x && weak.y == quadratic.y,
+        "outside penalty active inside parent circle");
+  const auto outside_linear = detail::centroid_parent_attraction(d, 2, .5, 0);
+  check(std::abs(g.x[4]) > 10 * std::abs(outside_linear.x[4]),
+        "far child has no progressive restoring force");
+  auto unrelated = d;
+  unrelated.centroid_groups[1].parent = -1;
+  check(detail::centroid_parent_attraction(unrelated, 2, .5, 4).value == 0,
+        "unrelated centroids acquired parent attraction");
+  Options o;
+  o.max_iterations = 80;
+  o.bins_x = o.bins_y = 8;
+  o.add_fillers = o.legalize = o.detailed_place = false;
+  o.centroid_weight = .25;
+  o.centroid_ramp = 20;
+  auto baseline = d, disabled = d;
+  place(baseline, o);
+  o.centroid_parent_outside = 8;
+  place(disabled, o);
+  check(baseline.node_x == disabled.node_x &&
+            baseline.node_y == disabled.node_y,
+        "zero parent weight changes GP");
+  o.centroid_parent_weight = 1;
+  auto enabled = d;
+  const auto result = place(enabled, o);
+  bool active = false;
+  for (const auto &sample : result.history)
+    active |=
+        sample.centroid_parent_edges == 1 && sample.centroid_parent_force > 0;
+  check(active && result.centroid.parent_seconds > 0,
+        "parent force not applied during GP");
+  check(enabled.node_x[8] == d.node_x[8] && enabled.node_y[8] == d.node_y[8],
+        "parent force moved fixed node");
+  o.centroid_parent_weight = -1;
+  rejects([&] { place(enabled, o); });
+  d.centroid_targets = {{1, 2}, {3, 4}};
+  rejects([&] { detail::centroid_parent_attraction(d, 1, .5, 4); });
+}
+void alignment_checks() {
+  auto d = fixture();
+  for (int i = 3; i < 6; ++i)
+    d.node_y[i] -= 300;
+  d.node_y[4] += 12;
+  std::uint64_t pairs = 0;
+  double residual = 0;
+  for (double sigma : {0., .25}) {
+    const auto g =
+        detail::centroid_alignment(d, 2, 3, sigma, .5, &pairs, &residual);
+    check(pairs == 1 && residual > 0 && g.value > 0,
+          "centroid row pair missing");
+    double sx = 0, sy = 0;
+    for (int n = 0; n < 9; ++n) {
+      sx += g.x[n];
+      sy += g.y[n];
+      for (int axis = 0; axis < 2; ++axis) {
+        auto lo = d, hi = d;
+        (axis ? lo.node_y : lo.node_x)[n] -= 1e-3;
+        (axis ? hi.node_y : hi.node_x)[n] += 1e-3;
+        const double fd =
+            (detail::centroid_alignment(hi, 2, 3, sigma, .5).value -
+             detail::centroid_alignment(lo, 2, 3, sigma, .5).value) /
+            .002;
+        near(fd, axis ? g.y[n] : g.x[n], 1e-7,
+             "shared-member alignment chain rule mismatch");
+      }
+      near(g.x[n], 0, 0, "row alignment applies an x force");
+    }
+    near(sx, 0, 1e-10, "alignment x force imbalance");
+    near(sy, 0, 1e-10, "alignment y force imbalance");
+    auto shifted = d;
+    for (int n = 0; n < 9; ++n) {
+      shifted.node_x[n] += 50;
+      shifted.node_y[n] -= 70;
+    }
+    near(detail::centroid_alignment(shifted, 2, 3, sigma, .5).value, g.value,
+         1e-9, "centroid alignment pins absolute locations");
+    auto padded = d;
+    for (int n = 0; n < 6; ++n) {
+      padded.node_x[n] -= 5;
+      padded.node_y[n] -= 5;
+      padded.node_size_x[n] += 10;
+      padded.node_size_y[n] += 10;
+    }
+    near(detail::centroid_alignment(padded, 2, 3, sigma, .5).value, g.value,
+         1e-9, "halo changes centroid alignment circle");
+  }
+  auto column = d;
+  std::swap(column.node_x, column.node_y);
+  detail::centroid_alignment(column, 2, 3, .25, .5, &pairs);
+  check(pairs == 1, "column alignment pair missing");
+  auto other = d;
+  other.centroid_groups[1].family += 1;
+  check(detail::centroid_alignment(other, 2, 3, .25, .5).value == 0,
+        "alignment crosses candidate types");
+  other = d;
+  other.centroid_groups[1].parent = 0;
+  check(detail::centroid_alignment(other, 2, 3, .25, .5).value == 0,
+        "alignment crosses parent scopes");
+  detail::centroid_alignment(d, 2, 3, .25, .001, &pairs);
+  check(pairs == 0, "alignment competes with overlapping circles");
+  auto far = d;
+  for (int n = 3; n < 6; ++n)
+    far.node_y[n] += 1000;
+  detail::centroid_alignment(far, 2, 3, .25, .5, &pairs);
+  check(pairs == 0, "non-overlapping projections attract");
+  detail::Gradient wire, density;
+  wire.x.assign(9, 1);
+  wire.y.assign(9, 2);
+  density.x.assign(9, 0);
+  density.y.assign(9, 0);
+  const auto reference = detail::centroid_force_reference(d, wire, density, 1);
+  near(reference.first, 6, 0, "centroid reference is not total member force");
+  near(reference.second, 12, 0, "centroid force reference y mismatch");
+  Options o;
+  o.max_iterations = 80;
+  o.bins_x = o.bins_y = 8;
+  o.add_fillers = o.legalize = o.detailed_place = false;
+  o.centroid_weight = .25;
+  o.centroid_repulsion_weight = 5;
+  o.centroid_distance_attraction = true;
+  o.centroid_ramp = 20;
+  auto baseline = d, disabled = d;
+  place(baseline, o);
+  o.centroid_align_sigma = .5;
+  o.centroid_align_start = 0;
+  o.centroid_align_full = 60;
+  place(disabled, o);
+  check(disabled.node_x == baseline.node_x &&
+            disabled.node_y == baseline.node_y,
+        "zero centroid alignment changes existing FP");
+  o.centroid_align_weight = 25;
+  auto enabled = d;
+  const auto result = place(enabled, o);
+  check(result.iterations > 60 && result.centroid.alignment_seconds > 0,
+        "centroid alignment ramp or accounting omitted");
+  bool force = false;
+  for (const auto &sample : result.history)
+    force |= sample.centroid_align_force > 0;
+  check(force, "centroid alignment has no applied force");
+  check(enabled.node_x[8] == d.node_x[8] && enabled.node_y[8] == d.node_y[8],
+        "centroid alignment moved fixed node");
+  o.centroid_align_weight = -1;
+  rejects([&] { place(enabled, o); });
+  o.centroid_align_weight = 25;
+  o.centroid_align_full = o.centroid_align_start;
+  rejects([&] { place(enabled, o); });
+  other = d;
+  other.centroid_targets = {{1, 2}, {3, 4}};
+  rejects([&] { detail::centroid_alignment(other, 2, 3, .25, .5); });
+}
+
 int main() {
   try {
+    parent_attraction_checks();
+    alignment_checks();
     candidate_copy_checks();
     auto d = fixture();
     repulsion_checks(d);

@@ -162,6 +162,34 @@ int main() {
   auto unequal =
       snap_floorplan({circle(30, 30, 10), circle(55, 31, 20)}, 0, 0, 120, 120);
   legal(unequal);
+  // FP boundaries reserve the entire circle, including corner cases and
+  // children translated by their parent's snap. Macro center-only mode remains
+  // opt-in unchanged through the default FloorplanOptions.
+  FloorplanOptions bounded;
+  bounded.contain_circles = true;
+  const auto contained = [&](const FloorplanSnap &result) {
+    check(result.feasible && result.maximum_boundary_violation == 0,
+          "circle containment not feasible");
+    for (const auto &c : result.circles)
+      check(c.x - c.radius >= 0 && c.x + c.radius <= 100 &&
+                c.y - c.radius >= 0 && c.y + c.radius <= 100,
+            "centroid circle crosses core edge");
+  };
+  auto corners = snap_floorplan({circle(2, 3, 10), circle(98, 97, 10),
+                                 circle(2, 97, 10), circle(98, 3, 10)},
+                                0, 0, 100, 100, bounded);
+  contained(corners);
+  legal(corners);
+  auto edge_child = snap_floorplan(
+      {circle(2, 30, 10, 0), circle(5, 70, 10, 0), circle(90, 40, 8, 1, 0)}, 0,
+      0, 100, 100, bounded);
+  contained(edge_child);
+  bounded.max_displacement = 0;
+  contained(snap_floorplan({circle(0, 0, 10)}, 0, 0, 100, 100, bounded));
+  auto oversized =
+      snap_floorplan({circle(50, 50, 60)}, 0, 0, 100, 100, bounded);
+  check(!oversized.feasible && oversized.maximum_boundary_violation > 0,
+        "oversized circle silently shrunk to fit");
   // Frozen targets have a real translation force and a correct analytic
   // gradient.
   Design d;

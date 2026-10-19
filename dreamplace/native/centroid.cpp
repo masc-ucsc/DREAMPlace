@@ -159,7 +159,11 @@ std::vector<double> centroid_attraction_reference(const Design &d,
   return out;
 }
 Gradient centroid_circle_attraction(const Design &d, double lambda,
-                                    double density, double outside) {
+                                    double density, double outside,
+                                    bool macros_only) {
+  if (macros_only && d.centroid_targets.empty())
+    throw std::invalid_argument(
+        "macro-only attraction requires frozen targets");
   if (!std::isfinite(lambda) || lambda < 0 || !std::isfinite(outside) ||
       outside < 0)
     throw std::invalid_argument("invalid centroid circle attraction controls");
@@ -172,6 +176,9 @@ Gradient centroid_circle_attraction(const Design &d, double lambda,
   std::vector<double> sum_x(groups.moments.size()),
       sum_y(groups.moments.size());
   groups.members(d, [&](size_t n, size_t k) {
+    if (macros_only && (n >= size_t(d.num_movable) || d.node_macro.empty() ||
+                        !d.node_macro[n]))
+      return;
     const auto p = node(d, n);
     const auto &m = groups.moments[k];
     const double dx = p.x - m.x, dy = p.y - m.y;
@@ -196,6 +203,82 @@ Gradient centroid_circle_attraction(const Design &d, double lambda,
       out.x[n] -= weight * sum_x[k];
       out.y[n] -= weight * sum_y[k];
     });
+  }
+  return out;
+}
+// Explicit hierarchy edges constrain relative centroid positions. The quartic
+// excess-distance energy gives a cubic restoring force outside the parent
+// circle. Both endpoints move, so the resulting member forces sum to zero.
+Gradient centroid_parent_attraction(const Design &d, double lambda,
+                                    double density, double outside,
+                                    std::uint64_t *edges,
+                                    double *max_distance) {
+  if (!std::isfinite(lambda) || lambda < 0 || !std::isfinite(outside) ||
+      outside < 0 || !std::isfinite(density) || density <= 0 || density > 1 ||
+      !d.centroid_targets.empty())
+    throw std::invalid_argument(
+        "invalid moving parent-centroid attraction controls");
+  const auto colors = color_moments(d);
+  std::vector<Moment> moments;
+  for (const auto &g : d.centroid_groups)
+    moments.push_back(group_moment(d, g, colors));
+  std::vector<double> gx(moments.size()), gy(moments.size());
+  Gradient out;
+  out.x.assign(d.node_x.size(), 0);
+  out.y.assign(d.node_y.size(), 0);
+  if (edges)
+    *edges = 0;
+  if (max_distance)
+    *max_distance = 0;
+  for (size_t k = 0; k < moments.size(); ++k) {
+    const int p = d.centroid_groups[k].parent;
+    if (p < 0)
+      continue;
+    const auto &parent = d.centroid_groups[p];
+    const double area =
+        parent.repulsion_area < 0 ? moments[p].area : parent.repulsion_area;
+    if (area <= 0)
+      continue;
+    const double radius = std::sqrt(area / (std::numbers::pi * density));
+    const double dx = moments[k].x - moments[p].x,
+                 dy = moments[k].y - moments[p].y;
+    const double distance = std::hypot(dx, dy),
+                 excess = std::max(0., distance - radius);
+    const double relative = excess / radius;
+    out.value += lambda * (distance * distance +
+                           outside * excess * excess * relative * relative);
+    const double scale = 2 * lambda *
+                         (distance > 0 ? 1 + 2 * outside * relative * relative *
+                                                 excess / distance
+                                       : 1);
+    gx[k] += scale * dx;
+    gy[k] += scale * dy;
+    gx[p] -= scale * dx;
+    gy[p] -= scale * dy;
+    if (edges)
+      ++*edges;
+    if (max_distance)
+      *max_distance = std::max(*max_distance, distance / radius);
+  }
+  std::vector<double> cx(colors.size()), cy(colors.size());
+  for (size_t k = 0; k < moments.size(); ++k) {
+    const double x = gx[k] / moments[k].area, y = gy[k] / moments[k].area;
+    const auto &g = d.centroid_groups[k];
+    for (int c : g.colors) {
+      cx[c] += x;
+      cy[c] += y;
+    }
+    for (int n : g.nodes) {
+      out.x[n] += d.centroid_node_area[n] * x;
+      out.y[n] += d.centroid_node_area[n] * y;
+    }
+  }
+  for (size_t n = 0; n < d.node_centroid_color.size(); ++n) {
+    const int c = d.node_centroid_color[n];
+    if (c >= 0) {
+      out.x[n] += d.centroid_node_area[n] * cx[c];
+      out.y[n] += d.centroid_node_area[n] * cy[c];
+    }
   }
   return out;
 }
@@ -304,6 +387,106 @@ Gradient centroid_repulsion(const Design &d, double lambda, double density) {
   }
   return out;
 }
+std::pair<double, double> centroid_force_reference(const Design &d,
+                                                   const Gradient &wire,
+                                                   const Gradient &density,
+                                                   double density_weight) {
+  std::vector<double> cx(d.centroid_color_names.size()), cy(cx.size());
+  const auto force = [&](int n) {
+    return std::pair{wire.x[n] + density_weight * density.x[n],
+                     wire.y[n] + density_weight * density.y[n]};
+  };
+  for (int n = 0; n < d.num_movable; ++n) {
+    const int c = d.node_centroid_color[n];
+    if (c >= 0) {
+      const auto [x, y] = force(n);
+      cx[c] += x;
+      cy[c] += y;
+    }
+  }
+  double x = 0, y = 0;
+  for (const auto &g : d.centroid_groups) {
+    double gx = 0, gy = 0;
+    for (int c : g.colors) {
+      gx += cx[c];
+      gy += cy[c];
+    }
+    for (int n : g.nodes) {
+      if (n >= d.num_movable)
+        continue;
+      const auto [fx, fy] = force(n);
+      gx += fx;
+      gy += fy;
+    }
+    x += std::abs(gx);
+    y += std::abs(gy);
+  }
+  const auto count = d.centroid_groups.size();
+  return {count ? x / count : 0, count ? y / count : 0};
+}
+
+Gradient centroid_alignment(const Design &d, double lambda_x, double lambda_y,
+                            double sigma, double density, std::uint64_t *count,
+                            double *residual) {
+  if (!std::isfinite(density) || density <= 0 || density > 1)
+    throw std::invalid_argument("invalid centroid alignment density");
+  if (!d.centroid_targets.empty())
+    throw std::invalid_argument("centroid alignment requires moving centroids");
+  const auto colors = color_moments(d);
+  std::vector<Moment> moments;
+  Design circles;
+  circles.layout = d.layout;
+  circles.num_movable = d.centroid_groups.size();
+  std::map<std::pair<int, int>, int> classes;
+  for (const auto &g : d.centroid_groups) {
+    const auto m = group_moment(d, g, colors);
+    moments.push_back(m);
+    const double radius =
+        std::sqrt((g.repulsion_area < 0 ? m.area : g.repulsion_area) /
+                  (std::numbers::pi * density));
+    circles.node_x.push_back(m.x + d.layout.xl - radius);
+    circles.node_y.push_back(m.y + d.layout.yl - radius);
+    circles.node_size_x.push_back(2 * radius);
+    circles.node_size_y.push_back(2 * radius);
+    circles.node_macro.push_back(1);
+    const auto [it, inserted] =
+        classes.try_emplace({g.family, g.parent}, classes.size());
+    (void)inserted;
+    circles.node_align_class.push_back(radius > 0 ? it->second : -1);
+  }
+  const auto pairs = macro_grid_align_pairs(circles);
+  if (count)
+    *count = pairs.size();
+  const auto centers =
+      macro_alignment(circles, pairs, lambda_x, lambda_y, sigma, residual);
+  Gradient out;
+  out.value = centers.value;
+  out.x.assign(d.node_x.size(), 0);
+  out.y.assign(d.node_y.size(), 0);
+  std::vector<double> cx(colors.size()), cy(colors.size());
+  for (size_t k = 0; k < moments.size(); ++k) {
+    const double x = centers.x[k] / moments[k].area,
+                 y = centers.y[k] / moments[k].area;
+    const auto &g = d.centroid_groups[k];
+    for (int c : g.colors) {
+      cx[c] += x;
+      cy[c] += y;
+    }
+    for (int n : g.nodes) {
+      out.x[n] += d.centroid_node_area[n] * x;
+      out.y[n] += d.centroid_node_area[n] * y;
+    }
+  }
+  for (size_t n = 0; n < d.node_centroid_color.size(); ++n) {
+    const int c = d.node_centroid_color[n];
+    if (c >= 0) {
+      out.x[n] += d.centroid_node_area[n] * cx[c];
+      out.y[n] += d.centroid_node_area[n] * cy[c];
+    }
+  }
+  return out;
+}
+
 double centroid_cell_area(const Design &d) {
   double area = 0;
   int count = 0;

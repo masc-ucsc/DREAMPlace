@@ -191,6 +191,8 @@ struct Options {
   // Calibrate attraction once at one circle radius, retaining restoring force
   // as members drift. The legacy per-iteration normalization stays available.
   bool centroid_distance_attraction = false;
+  // Frozen targets only: keep all-member area/calibration, omit cell springs.
+  bool centroid_anchor_macros_only = false;
   // Additional stiffness outside the area/density circle; 4 means 5x slope.
   double centroid_attraction_outside = 4;
   // Relative to centroid attraction. Same-family circles have area A/density.
@@ -201,6 +203,11 @@ struct Options {
   bool centroid_adaptive_repulsion = false;
   double centroid_stop_overlap = .001;
   int centroid_ramp = 100;
+  // Moving-centroid alignment during FP only. Same family and candidate parent.
+  double centroid_align_weight = 0, centroid_align_sigma = .25;
+  int centroid_align_start = 100, centroid_align_full = 500;
+  // FP-only child-to-parent spring, relative to calibrated member attraction.
+  double centroid_parent_weight = 0, centroid_parent_outside = 4;
   int num_threads = 1;
   std::uint32_t seed = 1000; // retains the original filler RNG sequence
   double target_density = 0.8;
@@ -279,11 +286,16 @@ struct GpSample {
   double route_peak_utilization = 0, macro_routing_force = 0;
   std::uint64_t macro_routing_channels = 0;
   double align_force = 0; // peak applied L1 force since the preceding sample
+  std::uint64_t centroid_align_pairs = 0;
+  double centroid_align_residual = 0, centroid_align_ramp = 0;
+  double centroid_align_force = 0; // peak applied member L1 force
+  std::uint64_t centroid_parent_edges = 0;
+  double centroid_parent_max_distance = 0, centroid_parent_force = 0;
 };
 struct CentroidReport {
   bool started = false, completed = false;
   int start_iteration = 0, iterations = 0;
-  double force_seconds = 0;
+  double force_seconds = 0, alignment_seconds = 0, parent_seconds = 0;
   double attraction_coefficient = 0;
   int attraction_calibration_iteration = -1;
   bool circles_converged = false;
@@ -316,6 +328,8 @@ struct Result {
   AlignmentReport alignment;
   int bins_x = 0, bins_y = 0;
   double poisson_seconds = 0, macro_routing_seconds = 0;
+  double rudy_seconds = 0;
+  int rudy_calls = 0;
   double macro_alignment_seconds = 0;
   double global_placement_seconds = 0, detailed_placement_seconds = 0;
   std::vector<GpSample> history;
@@ -403,8 +417,13 @@ centroid_candidates(const Design &, const std::vector<std::string> &paths,
                     const std::vector<std::string> &masters,
                     double minimum_equivalent_cells, int minimum_copies = 4);
 Gradient centroid_attraction(const Design &, double lambda);
+Gradient centroid_parent_attraction(const Design &, double lambda,
+                                    double density, double outside,
+                                    std::uint64_t *edges = nullptr,
+                                    double *max_distance = nullptr);
 Gradient centroid_circle_attraction(const Design &, double lambda,
-                                    double density, double outside);
+                                    double density, double outside,
+                                    bool macros_only = false);
 // Per-node magnitude of the direct attraction gradient at one circle radius.
 // Add contributions when a member participates in multiple candidates.
 std::vector<double> centroid_attraction_reference(const Design &,
@@ -415,6 +434,16 @@ struct CircleOverlap {
 };
 CircleOverlap centroid_circle_overlaps(const Design &, double density);
 Gradient centroid_repulsion(const Design &, double lambda, double density);
+// Reference force is the net wirelength+density force of each candidate's
+// movable members. Alignment uses the same bounded well as macro alignment;
+// gradients return through the area-weighted moving-centroid chain rule.
+std::pair<double, double> centroid_force_reference(const Design &,
+                                                   const Gradient &,
+                                                   const Gradient &, double);
+Gradient centroid_alignment(const Design &, double lambda_x, double lambda_y,
+                            double sigma, double density,
+                            std::uint64_t *pairs = nullptr,
+                            double *residual = nullptr);
 double centroid_cell_area(const Design &);
 std::vector<CentroidSample> centroid_summary(const Design &);
 // Squared exact intersection area, normalized by pair size for unit invariance.

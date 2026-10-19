@@ -607,6 +607,24 @@ Result place(Design &design, const Options &options, GpState *state) {
   const bool centroids =
       o.centroid_weight > 0 && !design.centroid_groups.empty();
   const bool separate_circles = centroids && o.centroid_adaptive_repulsion;
+  require(!centroids || !o.centroid_anchor_macros_only ||
+              !design.centroid_targets.empty(),
+          "macro-only centroid anchors require frozen targets");
+  require(finite(o.centroid_align_weight) && o.centroid_align_weight >= 0 &&
+              finite(o.centroid_align_sigma) && o.centroid_align_sigma >= 0 &&
+              (!o.centroid_align_weight ||
+               (o.centroid_weight > 0 && design.centroid_targets.empty() &&
+                o.centroid_align_start >= 0 &&
+                o.centroid_align_full > o.centroid_align_start)),
+          "invalid centroid alignment controls");
+  const bool align_centroids = centroids && o.centroid_align_weight > 0;
+  require(finite(o.centroid_parent_weight) && o.centroid_parent_weight >= 0 &&
+              finite(o.centroid_parent_outside) &&
+              o.centroid_parent_outside >= 0 &&
+              (!o.centroid_parent_weight ||
+               (o.centroid_weight > 0 && design.centroid_targets.empty())),
+          "invalid parent-centroid attraction controls");
+  const bool parent_centroids = centroids && o.centroid_parent_weight > 0;
   require(
       !centroids || !state,
       "centroid placement requires one GP solve without external continuation");
@@ -1061,6 +1079,14 @@ Result place(Design &design, const Options &options, GpState *state) {
                  : detail::macro_align_pairs(view, o.macro_align_nearest);
     };
     double centroid_repulsion_weight = o.centroid_repulsion_weight;
+    std::uint64_t centroid_parent_edges = 0;
+    double centroid_parent_distance = 0, centroid_parent_force = 0;
+    std::uint64_t centroid_align_pairs = 0;
+    double centroid_align_residual = 0, centroid_align_ramp = 0,
+           centroid_align_force = 0;
+    auto centroid_alignment_schedule = o;
+    centroid_alignment_schedule.macro_align_start = o.centroid_align_start;
+    centroid_alignment_schedule.macro_align_full = o.centroid_align_full;
     double previous_circle_overlap = 1;
     if (warm && o.improved_routability) {
       double inflated = 0;
@@ -1149,10 +1175,15 @@ Result place(Design &design, const Options &options, GpState *state) {
         Design physical = model;
         std::copy_n(d.node_x.begin(), original, physical.node_x.begin());
         std::copy_n(d.node_y.begin(), original, physical.node_y.begin());
+        const auto rudy_start = std::chrono::steady_clock::now();
         const auto route =
             rudy(physical,
                  {o.bins_x, o.bins_y, o.route_capacity_h, o.route_capacity_v,
                   o.improved_routability, o.improved_routability});
+        r.rudy_seconds += std::chrono::duration<double>(
+                              std::chrono::steady_clock::now() - rudy_start)
+                              .count();
+        ++r.rudy_calls;
         route_overflow = route.overflow;
         if (macro_routing) {
           routing_utilization.resize(route.horizontal.size());
@@ -1264,7 +1295,8 @@ Result place(Design &design, const Options &options, GpState *state) {
           density_initialized = true;
         }
       }
-      if (r.centroid.started && o.centroid_distance_attraction &&
+      if (r.centroid.started &&
+          (o.centroid_distance_attraction || parent_centroids) &&
           r.centroid.attraction_calibration_iteration < 0) {
         // Calibrate once against ordinary WL+density, before extra penalties.
         // At one circle radius the spring has the requested relative strength;
@@ -1406,6 +1438,36 @@ Result place(Design &design, const Options &options, GpState *state) {
         const double scale =
             norm > 0 ? o.centroid_weight * ramp * ramp * std::sqrt(base / norm)
                      : 0;
+        detail::Gradient alignment_gradient;
+        if (align_centroids) {
+          const auto alignment_start = std::chrono::steady_clock::now();
+          centroid_align_ramp = detail::macro_align_ramp(
+              centroid_alignment_schedule, global_iter);
+          const auto [fx, fy] =
+              detail::centroid_force_reference(d, wg, dg, density_weight);
+          const double weight = o.centroid_align_weight * centroid_align_ramp;
+          alignment_gradient = detail::centroid_alignment(
+              d, weight * fx, weight * fy, o.centroid_align_sigma,
+              o.target_density, &centroid_align_pairs,
+              &centroid_align_residual);
+          r.centroid.alignment_seconds +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                            alignment_start)
+                  .count();
+        }
+        detail::Gradient parent_gradient;
+        if (parent_centroids) {
+          const auto parent_start = std::chrono::steady_clock::now();
+          parent_gradient = detail::centroid_parent_attraction(
+              d,
+              r.centroid.attraction_coefficient * ramp * ramp *
+                  o.centroid_parent_weight,
+              o.target_density, o.centroid_parent_outside);
+          r.centroid.parent_seconds +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                            parent_start)
+                  .count();
+        }
         detail::Gradient distance_gradient;
         if (o.centroid_distance_attraction) {
           // Frozen targets take effect immediately in the second GP. Only the
@@ -1414,18 +1476,46 @@ Result place(Design &design, const Options &options, GpState *state) {
               d.centroid_targets.empty() ? ramp * ramp : 1;
           distance_gradient = detail::centroid_circle_attraction(
               d, r.centroid.attraction_coefficient * spring_ramp,
-              o.target_density, o.centroid_attraction_outside);
+              o.target_density, o.centroid_attraction_outside,
+              o.centroid_anchor_macros_only);
         }
         for (int i = 0; i < original; ++i) {
-          wg.x[i] += o.centroid_distance_attraction ? distance_gradient.x[i]
-                                                    : scale * cg.x[i];
-          wg.y[i] += o.centroid_distance_attraction ? distance_gradient.y[i]
-                                                    : scale * cg.y[i];
+          const bool anchor_active =
+              !o.centroid_anchor_macros_only ||
+              (i < d.num_movable && !d.node_macro.empty() && d.node_macro[i]);
+          if (anchor_active) {
+            wg.x[i] += o.centroid_distance_attraction ? distance_gradient.x[i]
+                                                      : scale * cg.x[i];
+            wg.y[i] += o.centroid_distance_attraction ? distance_gradient.y[i]
+                                                      : scale * cg.y[i];
+          }
           // Keep circle repulsion on its existing independent schedule/scale.
           if (o.centroid_repulsion_weight > 0) {
             wg.x[i] += scale * centroid_repulsion_weight * rg.x[i];
             wg.y[i] += scale * centroid_repulsion_weight * rg.y[i];
           }
+        }
+        if (align_centroids) {
+          double force = 0;
+          for (int i = 0; i < original; ++i) {
+            wg.x[i] += alignment_gradient.x[i];
+            wg.y[i] += alignment_gradient.y[i];
+            if (i < d.num_movable)
+              force += std::abs(alignment_gradient.x[i]) +
+                       std::abs(alignment_gradient.y[i]);
+          }
+          centroid_align_force = std::max(centroid_align_force, force);
+        }
+        if (parent_centroids) {
+          double force = 0;
+          for (int i = 0; i < original; ++i) {
+            wg.x[i] += parent_gradient.x[i];
+            wg.y[i] += parent_gradient.y[i];
+            if (i < d.num_movable)
+              force += std::abs(parent_gradient.x[i]) +
+                       std::abs(parent_gradient.y[i]);
+          }
+          centroid_parent_force = std::max(centroid_parent_force, force);
         }
         r.centroid.force_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
@@ -1794,6 +1884,27 @@ Result place(Design &design, const Options &options, GpState *state) {
              route_overflow, inflated_ratio, overlaps.first, overlaps.second,
              overflow(physical, o.bins_x, o.bins_y, o.target_density), target,
              filler_scale, align_pairs.size(), align_residual, align_ramp});
+        if (align_centroids) {
+          detail::centroid_alignment(physical, 0, 0, o.centroid_align_sigma,
+                                     o.target_density, &centroid_align_pairs,
+                                     &centroid_align_residual);
+          auto &sample = r.history.back();
+          sample.centroid_align_pairs = centroid_align_pairs;
+          sample.centroid_align_residual = centroid_align_residual;
+          sample.centroid_align_ramp = centroid_align_ramp;
+          sample.centroid_align_force = centroid_align_force;
+          centroid_align_force = 0;
+        }
+        if (parent_centroids) {
+          detail::centroid_parent_attraction(
+              physical, 0, o.target_density, o.centroid_parent_outside,
+              &centroid_parent_edges, &centroid_parent_distance);
+          auto &sample = r.history.back();
+          sample.centroid_parent_edges = centroid_parent_edges;
+          sample.centroid_parent_max_distance = centroid_parent_distance;
+          sample.centroid_parent_force = centroid_parent_force;
+          centroid_parent_force = 0;
+        }
         r.history.back().align_force = align_force_peak;
         align_force_peak = 0;
         r.history.back().macro_routing_force = macro_routing_force_peak;
@@ -1823,6 +1934,7 @@ Result place(Design &design, const Options &options, GpState *state) {
             global_iter + 1 >= o.min_iterations &&
             r.overflow <= o.stop_overflow &&
             (!o.macro_align_weight || global_iter >= o.macro_align_full) &&
+            (!align_centroids || global_iter >= o.centroid_align_full) &&
             (!fixed_macro_weight || progress >= 1);
         const bool geometry_feasible =
             settled && (!centroids || global_iter + 1 >= o.centroid_ramp) &&
@@ -1858,11 +1970,16 @@ Result place(Design &design, const Options &options, GpState *state) {
           if (convergence.stable_samples >= 2 && o.routability) {
             // Inflation feedback is sampled before the step. Recheck the
             // current physical geometry before claiming routing convergence.
+            const auto rudy_start = std::chrono::steady_clock::now();
             route_overflow =
                 rudy(physical, {o.bins_x, o.bins_y, o.route_capacity_h,
                                 o.route_capacity_v, o.improved_routability,
                                 o.improved_routability})
                     .overflow;
+            r.rudy_seconds += std::chrono::duration<double>(
+                                  std::chrono::steady_clock::now() - rudy_start)
+                                  .count();
+            ++r.rudy_calls;
             r.history.back().route_overflow = route_overflow;
           }
           r.objective_converged =
@@ -1986,6 +2103,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       (!gp_ran || !o.post_density_factor || r.objective_converged) &&
       r.overflow <= o.stop_overflow &&
       (!separate_circles || r.centroid.circles_converged) &&
+      (!align_centroids || r.iterations > o.centroid_align_full) &&
       (!o.macro_align_weight ||
        (warm ? state->iteration : 0) + r.iterations > o.macro_align_full);
   if (o.legalize && d.num_movable) {

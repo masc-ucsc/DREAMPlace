@@ -10,6 +10,7 @@ struct FloorplanCircle {
   int family = 0, parent = -1;
 };
 struct FloorplanOptions {
+  bool contain_circles = false; // FP targets reserve their whole circle in-core
   double alignment_tolerance = 1; // center offset / smaller radius; strict <
   double spacing_tolerance = .25; // maximum range / mean gap in a class
   double spacing_penalty = .02;  // normalized squared gap error + penalty/class
@@ -27,6 +28,7 @@ struct FloorplanSnap {
   std::vector<FloorplanRelation> relations;
   int attempted = 0, rejected = 0, infeasible_families = 0;
   double seconds = 0, maximum_overlap = 0, maximum_displacement = 0;
+  double maximum_boundary_violation = 0;
   bool feasible = true;
 };
 // Greedy local relation selection and weighted least-squares fitting. Circle
@@ -35,8 +37,9 @@ struct FloorplanSnap {
 // Root circles (parent -1) share the implicit top scope. Hard same-family
 // separation still applies across parents; parent/child translations are
 // inherited. Failed families retain their input centers and are explicitly
-// reported. Core bounds apply to centers; circles are interaction ranges, not
-// fences.
+// reported. With contain_circles, hard core bounds include the radius.
+// Center-only bounds remain available for rectangular macro regularity, whose
+// actual footprint is subsequently enforced by the macro legalizer.
 FloorplanSnap snap_floorplan(const std::vector<FloorplanCircle> &circles,
                              double xl, double yl, double xh, double yh,
                              const FloorplanOptions &options = {});

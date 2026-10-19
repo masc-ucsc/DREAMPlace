@@ -589,11 +589,36 @@ For an opt-in replacement of the original routability update, combine
 retains inflation monotonically, limits each update to 5% of movable area, and
 reduces the effective target density with accumulated inflation. Macro/fixed charges and the filler-charge budget are rebalanced at that density; shifting only the uniform target would not change Poisson forces. Only nodes in
 `node_inflatable` can inflate. Directional capacity is tracks per layout unit.
-`node_blocked_capacity_h/v` supplies the sum of capacities on each macro's OBS
-layers; the model conservatively blocks each such layer across the full macro
-occupancy envelope. A 1% capacity floor keeps fully blocked bins finite.
+Enhanced RUDY treats every physical macro body as opaque. Overlapping bodies
+remove the union of their footprints; placement halos remain routing whitespace.
+Demand is assigned to reachable free space, with corridor detours and explicit
+blocked-pin/unroutable-net counts instead of a capacity floor.
 `RudyOptions::pin_access` estimates macro signal-pin demand against available
 tracks at bin edges. These estimates are not a detailed router or signoff model.
+
+`routability_macro_weight` (native default 0; LiveHD enables 1) adds direct
+pressure on movable macro edges. It requires `routability` and
+`improved_routability`. The range is `routability_macro_range` density bins
+(default 2, allowed `(0,16]`). Each visible facing-edge segment uses the mean
+squared RUDY utilization in the intervening channel (utilization capped at 3),
+multiplied by its fraction of the smaller facing edge and
+`(1 - gap / range)^2`. This acts below capacity too. Equal-and-opposite
+normalized forces open the gap, with fixed macros/core boundaries unchanged.
+Third macros occlude non-neighboring segments; physical bodies determine gaps,
+including when GP uses halo-padded occupancy. The ordinary macro WL+density
+force calibrates the strength, with a unit-force floor for unconnected blockers.
+The grid refresh follows RUDY's existing cadence; channel geometry is recomputed
+each iteration. This is a local channel-pressure heuristic, not a full routing
+cost gradient. Zero weight preserves the previous path, including its
+lowest-HPWL feasible-snapshot selection. Enabled pressure retains the final GP
+iterate so that selection cannot discard a channel improvement solely for HPWL.
+Continuation retains the sampled utilization grid and validates the controls.
+
+`GpSample::macro_routing_force` and `macro_routing_channels` give the maximum
+applied L1 force and active channel count since the preceding sample.
+`route_peak_utilization` gives the latest RUDY map maximum.
+`Result::macro_routing_seconds` measures pressure calculation time. All-fixed
+macro stages do not apply this force.
 
 ### Optional same-class macro alignment and soft snapping
 
@@ -677,6 +702,32 @@ active groups are rejected. `centroid_test` checks shared n-anchor additivity,
 outside standard cells, finite-difference gradients, physical halo weights,
 default-off identity, fixed positions and from-scratch initialization.
 
+
+`Options::centroid_distance_attraction=true` selects a distance-growing spring
+instead of per-iteration attraction normalization (native default remains false).
+With the physical-area/density circle radius R, a member at distance d contributes
+`lambda*a/A*(d*d + centroid_attraction_outside*max(0,d-R)^2)`. The outside option
+defaults to 4: force is continuous at R, with five times the inside slope beyond
+it. An independent positive repulsion-area budget also determines R; a zero
+budget disables repulsion but uses member area for the attraction radius.
+
+The coefficient is calibrated once at one radius against ordinary wirelength and
+density forces, before extra alignment/overlap penalties, and retained throughout
+the phase. `Result::centroid` records its coefficient and calibration iteration.
+The moving-centroid derivative is included explicitly for the nonlinear term, so
+summed group force is zero. Frozen `Design::centroid_targets` apply the calibrated
+spring immediately without restarting the moving-centroid ramp. Repulsion retains
+its existing scaling and adaptation. With the option off, the legacy path is
+unchanged. Tests also cover force continuity/growth, moving/frozen finite
+differences, overlapping groups, physical-area halo invariance and GP drift.
+
+
+`Options::centroid_anchor_macros_only=true` restricts frozen-target attraction to
+movable macros. It requires fixed `centroid_targets` when groups are active;
+moving FP groups still include all their members. All-member physical areas,
+radii and force calibration are retained, so excluding cells does not amplify
+macro springs. The default is false. Tests check zero cell force, unchanged
+macro force, and finite differences for the restricted energy.
 
 ### Same-type centroid-circle repulsion (R8H3)
 
@@ -806,3 +857,39 @@ callbacks. Initial caller-supplied timing weights remain active.
 and forced-cap flags. An optional `checkpoint_observer` receives these decisions
 before the host callback, allowing a host movement filter to honor forced final
 samples. The gate itself neither calls a timing engine nor resizes cells.
+
+### Global same-type GP alignment
+
+`Options::macro_align_global=true` uses sparse strips of the smallest physical
+macro width/height to rebuild alignment pairs every GP iteration. The host puts
+master identities in `Design::node_align_class`; LiveHD uses a master-only key,
+independent of color and hierarchy. Both nodes must be movable macros in the
+same class. A pair attracts only on the axis where its physical projections
+overlap, and is excluded if it overlaps on both axes. Halo padding does not
+extend pair eligibility or the bounded well. Neighboring bins are included in
+the broad-phase query; a bin boundary cannot hide an overlapping pair.
+
+The strip grid is a neighbor index, not a coordinate constraint. The existing
+alignment weight, sigma, ramp and optional nearest-partner setting control the
+force. The default remains disabled, and zero weight preserves placement
+exactly. `Result::macro_alignment_seconds` measures the pairing/force work;
+`GpSample::align_force` reports the peak applied L1 force since the previous
+sample. The old class-based, 20-iteration-refresh path remains available when
+`macro_align_global=false`. Final snap classes are independent.
+
+### Two macro snap algorithms
+
+With `Options::macro_snap`, alignment snapping remains the default.
+`Options::macro_snap_regular=true` selects the centroid-style symmetry fitter.
+Both use `Design::node_snap_class` when supplied; the host assigns equal-size
+macros from one hierarchy scope to a class. Standard cells and fixed macros do
+not participate. Empty snap classes retain the older `node_align_class` fallback
+for alignment, preserving existing native callers; the symmetry fitter requires
+explicit snap classes. GP alignment still uses `node_align_class` independently.
+
+Symmetry fitting uses `FloorplanOptions` in `Options::macro_snap_options` and
+area-equivalent circles of the halo-padded boxes. It discovers near-lines,
+repeated gaps and common midpoints. Lattice-rounded targets and soft relative
+coordinate offsets enter the macro LP, whose hard box/halo constraints remain
+authoritative. Failed bounded fits supply no symmetry constraints. The alignment
+report retains accepted fit relations and post-legalization soft violations.

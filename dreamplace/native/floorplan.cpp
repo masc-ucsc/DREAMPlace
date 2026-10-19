@@ -213,14 +213,26 @@ FloorplanSnap snap_floorplan(const std::vector<FloorplanCircle> &circles,
     std::vector<Linear> hard;
     for (int i = 0; i < static_cast<int>(ids.size()); ++i) {
       const double reach = o.max_displacement * local[i].radius;
+      const double margin = o.contain_circles ? local[i].radius : 0;
+      // Boundary repair takes priority over the local regularity movement cap,
+      // including when an ancestor translation moved this child outside.
+      const bool fits = 2 * margin <= std::min(xh - xl, yh - yl);
+      const double anchor_x =
+          o.contain_circles && fits
+              ? std::clamp(origin[2 * i], xl + margin, xh - margin)
+              : origin[2 * i];
+      const double anchor_y =
+          o.contain_circles && fits
+              ? std::clamp(origin[2 * i + 1], yl + margin, yh - margin)
+              : origin[2 * i + 1];
+      hard.push_back(linear({{2 * i, -1}},
+                            -std::max(xl + margin, anchor_x - reach), false));
       hard.push_back(
-          linear({{2 * i, -1}}, -std::max(xl, origin[2 * i] - reach), false));
-      hard.push_back(
-          linear({{2 * i, 1}}, std::min(xh, origin[2 * i] + reach), false));
+          linear({{2 * i, 1}}, std::min(xh - margin, anchor_x + reach), false));
       hard.push_back(linear({{2 * i + 1, -1}},
-                            -std::max(yl, origin[2 * i + 1] - reach), false));
+                            -std::max(yl + margin, anchor_y - reach), false));
       hard.push_back(linear({{2 * i + 1, 1}},
-                            std::min(yh, origin[2 * i + 1] + reach), false));
+                            std::min(yh - margin, anchor_y + reach), false));
       for (int j = 0; j < i; ++j) {
         if (ancestor(circles, ids[i], ids[j]) ||
             ancestor(circles, ids[j], ids[i]))
@@ -372,6 +384,12 @@ FloorplanSnap snap_floorplan(const std::vector<FloorplanCircle> &circles,
     } // sibling scope
     for (size_t k = 0; k < ids.size(); ++k) {
       const int i = ids[k];
+      if (o.contain_circles) {
+        x[2 * k] = std::clamp(x[2 * k], xl + circles[i].radius,
+                              xh - circles[i].radius);
+        x[2 * k + 1] = std::clamp(x[2 * k + 1], yl + circles[i].radius,
+                                  yh - circles[i].radius);
+      }
       const double dx = x[2 * k] - out.circles[i].x,
                    dy = x[2 * k + 1] - out.circles[i].y;
       out.circles[i].x = x[2 * k];
@@ -396,6 +414,11 @@ FloorplanSnap snap_floorplan(const std::vector<FloorplanCircle> &circles,
       r.value = (coordinate(r.nodes[0]) + coordinate(r.nodes[1])) / 2;
   }
   for (size_t i = 0; i < circles.size(); ++i) {
+    const auto &c = out.circles[i];
+    const double margin = o.contain_circles ? c.radius : 0;
+    out.maximum_boundary_violation =
+        std::max({out.maximum_boundary_violation, xl + margin - c.x,
+                  c.x + margin - xh, yl + margin - c.y, c.y + margin - yh});
     out.maximum_displacement = std::max(
         out.maximum_displacement, std::hypot(out.circles[i].x - circles[i].x,
                                              out.circles[i].y - circles[i].y));
@@ -409,7 +432,9 @@ FloorplanSnap snap_floorplan(const std::vector<FloorplanCircle> &circles,
         out.maximum_overlap = std::max(out.maximum_overlap, depth);
       }
   }
-  out.feasible &= out.maximum_overlap < 1e-6;
+  out.feasible &=
+      out.maximum_overlap < 1e-6 &&
+      out.maximum_boundary_violation <= 1e-7 * std::max(xh - xl, yh - yl);
   out.seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - begin)
           .count();
