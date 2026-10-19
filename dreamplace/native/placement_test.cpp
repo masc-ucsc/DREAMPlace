@@ -475,6 +475,63 @@ void concurrent_instances() {
     }
   }
 }
+// Floating-point atomic accumulation into the density map makes the result
+// depend on thread arrival order. Repeated identical runs must agree exactly for
+// a fixed worker count, including when OpenMP is enabled (--config=openmp).
+void threaded_determinism() {
+  Design d;
+  d.layout = {0, 0, 64, 32, 1, 1};
+  const int cells = 300, nets = 380;
+  d.num_movable = cells;
+  unsigned state = 12345;
+  const auto next = [&](unsigned bound) {
+    state = state * 1664525u + 1013904223u;
+    return (state >> 8) % bound;
+  };
+  for (int i = 0; i < cells; ++i) {
+    d.node_x.push_back(28 + next(8));
+    d.node_y.push_back(14 + next(4));
+    d.node_size_x.push_back(2);
+    d.node_size_y.push_back(1);
+  }
+  d.flat_net2pin_start = {0};
+  for (int n = 0; n < nets; ++n) {
+    const int degree = 2 + next(3);
+    for (int k = 0; k < degree; ++k) {
+      d.flat_net2pin.push_back(d.pin2node.size());
+      d.pin2node.push_back(next(cells));
+      d.pin_offset_x.push_back(next(3) * .5);
+      d.pin_offset_y.push_back(.5);
+    }
+    d.flat_net2pin_start.push_back(d.flat_net2pin.size());
+  }
+  // A cell may repeat inside a net; build_maps accepts repeated nodes.
+  d.build_maps();
+  Options o;
+  o.bins_x = o.bins_y = 16;
+  o.max_iterations = 120;
+  o.num_threads = 4;
+  o.legalize = false;
+  o.detailed_place = false;
+  auto first = d;
+  place(first, o);
+  for (int run = 0; run < 6; ++run) {
+    auto again = d;
+    place(again, o);
+    check(again.node_x == first.node_x && again.node_y == first.node_y,
+          "multithreaded global placement is nondeterministic");
+  }
+  // The legalizer and detailed-placement kernels also take the worker count.
+  o.legalize = o.detailed_place = true;
+  auto full = d;
+  place(full, o);
+  for (int run = 0; run < 6; ++run) {
+    auto again = d;
+    place(again, o);
+    check(again.node_x == full.node_x && again.node_y == full.node_y,
+          "multithreaded legalization/detailed placement is nondeterministic");
+  }
+}
 void hpwl_case() {
   Design d;
   d.layout = {0, 0, 20, 10, 1, 1};
@@ -778,6 +835,7 @@ int main() {
   try {
     spectral();
     power2_grid();
+    threaded_determinism();
     gradients();
     hpwl_case();
     native_flow();
