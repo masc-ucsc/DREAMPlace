@@ -2,11 +2,14 @@
 #include "dreamplace/native/placement.hpp"
 #include <cmath>
 #include <iostream>
+#include <source_location>
 #include <stdexcept>
 using namespace DreamPlace::native;
-void check(bool ok) {
+void check(bool ok,
+           std::source_location where = std::source_location::current()) {
   if (!ok)
-    throw std::runtime_error("snap assertion");
+    throw std::runtime_error("snap assertion at line " +
+                             std::to_string(where.line()));
 }
 int main() {
   try {

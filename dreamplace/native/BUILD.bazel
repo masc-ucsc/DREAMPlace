@@ -16,6 +16,8 @@ cc_library(
         "orientation.cpp",
         "placement.cpp",
         "rudy.cpp",
+        "rudy_macro.cpp",
+        "rudy_obstacles.cpp",
         "repulsion.cpp",
         "spectral.cpp",
     ],
@@ -120,6 +122,14 @@ cc_test(
 )
 
 cc_test(
+    name = "rudy_macro_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["rudy_macro_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
     name = "rudy_test",
     size = "small",
     timeout = "short",
@@ -153,6 +163,8 @@ filegroup(
         "placement.cpp",
         "placement.hpp",
         "rudy.cpp",
+        "rudy_macro.cpp",
+        "rudy_obstacles.cpp",
         "repulsion.cpp",
         "rudy.hpp",
         "spectral.cpp",

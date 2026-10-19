@@ -68,8 +68,8 @@ struct Design {
   // Same original hierarchy scope AND macro dimensions; -1 excludes a node.
   // Used by both macro snap algorithms, never by GP alignment/cohesion.
   std::vector<int> node_snap_class;
-  // Sum of track densities on LEF layers obstructed by each macro. RUDY
-  // conservatively blocks those layers over its complete occupancy envelope.
+  // Legacy LEF blocked-layer metadata. Enhanced RUDY treats every macro
+  // body as opaque, independently of these values; halos remain routing space.
   std::vector<double> node_blocked_capacity_h, node_blocked_capacity_v;
   int num_movable = 0;
   std::vector<double> node_x, node_y, node_size_x, node_size_y;
@@ -159,6 +159,11 @@ struct Options {
       false; // opt-in physical footprint for movable cells
   bool adaptive_density = false, improved_routability = false;
   bool scale_macro_density = false;
+  // Direct pressure on facing macro edges from the RUDY channel utilization.
+  // Native opt-in; the LiveHD routability flow enables it. Zero is
+  // bit-identical.
+  double routability_macro_weight = 0,
+         routability_macro_range = 2; // range in bins
   bool routability_charge_compensation =
       true; // false replays the earlier R4 charge model
   std::function<void(const GpSample &)> progress_observer;
@@ -266,6 +271,9 @@ struct GpSample {
   double align_residual = 0, align_ramp = 0;
   std::uint64_t centroid_overlaps = 0;
   double centroid_max_overlap = 0, centroid_repulsion_weight = 0;
+  // Maximum applied L1 force / channel count since the preceding sample.
+  double route_peak_utilization = 0, macro_routing_force = 0;
+  std::uint64_t macro_routing_channels = 0;
 };
 struct CentroidReport {
   bool started = false, completed = false;
@@ -302,7 +310,7 @@ struct Result {
   CentroidReport centroid;
   AlignmentReport alignment;
   int bins_x = 0, bins_y = 0;
-  double poisson_seconds = 0;
+  double poisson_seconds = 0, macro_routing_seconds = 0;
   double global_placement_seconds = 0, detailed_placement_seconds = 0;
   std::vector<GpSample> history;
   std::vector<DetailedSample> detailed_history;
@@ -324,6 +332,8 @@ struct GpState {
   double previous_overflow = -1, previous_hpwl = 0;
   std::vector<double> x, y, prev_x, prev_y, old_gx, old_gy, old_ex, old_ey;
   std::vector<double> inflation;
+  std::vector<double>
+      routing_utilization; // last RUDY sample, for macro pressure
   std::vector<AlignmentPair> align_pairs;
 };
 
@@ -361,9 +371,9 @@ struct Gradient {
   double value = 0;
   std::vector<double> x, y;
 };
-std::vector<AlignmentPair> macro_align_pairs(const Design &,
-                                             bool nearest = false,
-                                             const std::vector<int> *classes = nullptr);
+std::vector<AlignmentPair>
+macro_align_pairs(const Design &, bool nearest = false,
+                  const std::vector<int> *classes = nullptr);
 double macro_align_ramp(const Options &, int iteration);
 Gradient macro_alignment(const Design &, const std::vector<AlignmentPair> &,
                          double lambda_x, double lambda_y, double sigma,

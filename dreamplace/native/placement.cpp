@@ -131,6 +131,11 @@ void options_check(const Options &o) {
               (finite(o.route_capacity_h) && o.route_capacity_h > 0 &&
                finite(o.route_capacity_v) && o.route_capacity_v > 0),
           "invalid routing capacity");
+  require(finite(o.routability_macro_weight) &&
+              o.routability_macro_weight >= 0 &&
+              finite(o.routability_macro_range) &&
+              o.routability_macro_range > 0 && o.routability_macro_range <= 16,
+          "invalid macro routing pressure controls");
   require(finite(o.macro_overlap_weight) && o.macro_overlap_weight >= 0 &&
               finite(o.macro_jitter) && o.macro_jitter >= 0 &&
               o.macro_jitter <= .1,
@@ -826,6 +831,11 @@ Result place(Design &design, const Options &options, GpState *state) {
   }
   if (o.improved_routability && !o.routability_charge_compensation)
     salt(0x524f555445434847ULL);
+  if (o.routability && o.routability_macro_weight > 0) {
+    salt(0x525544594d414352ULL);
+    salt(std::bit_cast<std::uint64_t>(o.routability_macro_weight));
+    salt(std::bit_cast<std::uint64_t>(o.routability_macro_range));
+  }
   if (o.macro_align_weight > 0) {
     salt(std::bit_cast<std::uint64_t>(o.macro_align_weight));
     salt(std::bit_cast<std::uint64_t>(o.macro_align_sigma));
@@ -1002,13 +1012,28 @@ Result place(Design &design, const Options &options, GpState *state) {
     double previous_overflow = warm ? state->previous_overflow : -1;
     double previous_hpwl = warm ? state->previous_hpwl : r.initial_hpwl;
     double route_overflow = 0, inflated_ratio = 1;
+    const bool macro_routing =
+        o.routability && o.improved_routability &&
+        o.routability_macro_weight > 0 && !d.node_macro.empty() &&
+        std::any_of(d.node_macro.begin(), d.node_macro.begin() + d.num_movable,
+                    [](auto macro) { return macro != 0; });
+    auto routing_utilization =
+        warm ? state->routing_utilization : std::vector<double>{};
+    require(
+        routing_utilization.empty() ||
+            (routing_utilization.size() == size_t(o.bins_x * o.bins_y) &&
+             std::all_of(routing_utilization.begin(), routing_utilization.end(),
+                         [](double u) { return finite(u) && u >= 0; })),
+        "invalid GP routing continuation");
+    double macro_routing_force = 0, macro_routing_force_peak = 0;
+    std::uint64_t macro_routing_channels = 0, macro_routing_channels_peak = 0;
     // With a soft upper bound, density pressure may overshoot a better feasible
     // placement while waiting for the minimum iteration window. Preserve that
     // placement for a static solve, without changing continuation/checkpoint
     // state or any of the classic density path.
     const bool keep_feasible = o.density_upper_bound && !state &&
                                !o.checkpoint && !centroids &&
-                               !o.macro_align_weight;
+                               !o.macro_align_weight && !macro_routing;
     double best_feasible_hpwl = std::numeric_limits<double>::infinity();
     std::vector<double> best_feasible_x, best_feasible_y;
     int best_feasible_iteration = 0;
@@ -1115,6 +1140,13 @@ Result place(Design &design, const Options &options, GpState *state) {
                  {o.bins_x, o.bins_y, o.route_capacity_h, o.route_capacity_v,
                   o.improved_routability, o.improved_routability});
         route_overflow = route.overflow;
+        if (macro_routing) {
+          routing_utilization.resize(route.horizontal.size());
+          for (size_t k = 0; k < routing_utilization.size(); ++k)
+            routing_utilization[k] =
+                std::max({route.horizontal[k], route.vertical[k],
+                          route.pin_utilization[k]});
+        }
         auto proposed = inflation;
         double added = 0, current = 0;
         for (int i = 0; i < d.num_movable; ++i) {
@@ -1238,6 +1270,43 @@ Result place(Design &design, const Options &options, GpState *state) {
               o.centroid_weight * std::sqrt(base / norm);
           r.centroid.attraction_calibration_iteration = global_iter;
         }
+      }
+      macro_routing_force = 0;
+      macro_routing_channels = 0;
+      if (macro_routing && !routing_utilization.empty()) {
+        const auto routing_start = std::chrono::steady_clock::now();
+        const auto pressure = detail::macro_routing_pressure(
+            d, o.bins_x, o.bins_y, routing_utilization,
+            o.routability_macro_range);
+        double base = 0;
+        int macros = 0;
+        for (int i = 0; i < d.num_movable; ++i) {
+          if (!d.node_macro[i])
+            continue;
+          base += std::abs(wg.x[i] + density_weight * dg.x[i]) +
+                  std::abs(wg.y[i] + density_weight * dg.y[i]);
+          ++macros;
+        }
+        // Keep pressure magnitude: normalization by pressure itself would make
+        // an empty channel as strong as a congested one. The unit-force floor
+        // also lets an otherwise unconnected macro move out of a routing lane.
+        const double scale =
+            o.routability_macro_weight * std::max(1., base / macros);
+        for (int i = 0; i < d.num_movable; ++i) {
+          wg.x[i] += scale * pressure.x[i];
+          wg.y[i] += scale * pressure.y[i];
+          macro_routing_force +=
+              scale * (std::abs(pressure.x[i]) + std::abs(pressure.y[i]));
+        }
+        r.macro_routing_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          routing_start)
+                .count();
+        macro_routing_channels = pressure.channels;
+        macro_routing_force_peak =
+            std::max(macro_routing_force_peak, macro_routing_force);
+        macro_routing_channels_peak =
+            std::max(macro_routing_channels_peak, macro_routing_channels);
       }
       if (fixed_macro_weight > 0) {
         const auto og = detail::fixed_macro_overlap(
@@ -1696,6 +1765,13 @@ Result place(Design &design, const Options &options, GpState *state) {
              route_overflow, inflated_ratio, overlaps.first, overlaps.second,
              overflow(physical, o.bins_x, o.bins_y, o.target_density), target,
              filler_scale, align_pairs.size(), align_residual, align_ramp});
+        r.history.back().macro_routing_force = macro_routing_force_peak;
+        r.history.back().macro_routing_channels = macro_routing_channels_peak;
+        macro_routing_force_peak = 0;
+        macro_routing_channels_peak = 0;
+        if (!routing_utilization.empty())
+          r.history.back().route_peak_utilization = *std::max_element(
+              routing_utilization.begin(), routing_utilization.end());
         if (separate_circles) {
           const auto circles =
               detail::centroid_circle_overlaps(physical, o.target_density);
@@ -1836,6 +1912,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       next.momentum = t;
       next.step = alpha;
       next.inflation = inflation;
+      next.routing_utilization = routing_utilization;
       next.align_pairs = align_pairs;
     }
     r.selected_iteration = offset + r.iterations;

@@ -5,15 +5,20 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <source_location>
 #include <stdexcept>
 using namespace DreamPlace::native;
 namespace {
-void check(bool ok) {
+void check(bool ok, std::source_location at = std::source_location::current()) {
   if (!ok) {
-    throw std::runtime_error("RUDY assertion failed");
+    throw std::runtime_error("RUDY assertion failed at line " +
+                             std::to_string(at.line()));
   }
 }
-void near(double a, double b) { check(std::abs(a - b) < 1e-12); }
+void near(double a, double b,
+          std::source_location at = std::source_location::current()) {
+  check(std::abs(a - b) < 1e-12, at);
+}
 template <typename F> void rejects(F f) {
   bool bad = false;
   try {
@@ -111,8 +116,9 @@ int main() {
     const auto unobstructed = rudy(blocked, access);
     access.macro_blockages = true;
     const auto obstructed = rudy(blocked, access);
-    check(obstructed.horizontal[0] > unobstructed.horizontal[0]);
-    check(obstructed.vertical[0] > unobstructed.vertical[0]);
+    check(obstructed.blocked_fraction[0] > 0);
+    check(obstructed.unroutable_nets > 0 ||
+          obstructed.max_utilization > unobstructed.max_utilization);
     // This macro's signal pin lies outside the core; move its access point in.
     blocked.pin_offset_x[0] = 4;
     blocked.pin_offset_y[0] = 4;
@@ -121,6 +127,87 @@ int main() {
     check(pins.pin_utilization[0] > 0);
     blocked.node_blocked_capacity_h[0] = -1;
     rejects([&] { rudy(blocked, access); });
+    // A horizontal net must consume tracks and go around an opaque macro,
+    // even when that macro has no LEF obstruction-layer metadata.
+    Design corridor;
+    corridor.layout = {0, 0, 100, 100, 1, 1};
+    corridor.node_x = {5, 95, 40};
+    corridor.node_y = {50, 50, 40};
+    corridor.node_size_x = {0, 0, 20};
+    corridor.node_size_y = {0, 0, 20};
+    corridor.node_macro = {0, 0, 1};
+    corridor.pin2node = {0, 1};
+    corridor.pin_offset_x = corridor.pin_offset_y = {0, 0};
+    corridor.flat_net2pin = {0, 1};
+    corridor.flat_net2pin_start = {0, 2};
+    corridor.net_weights = {1};
+    corridor.build_maps();
+    RudyOptions hard{10, 10, .1, .1, true, false};
+    const auto wide = rudy(corridor, hard);
+    check(wide.measured_nets == 1 && wide.degenerate_nets == 0);
+    check(wide.unroutable_nets == 0 && wide.detour_wirelength > 0);
+    near(wide.blocked_fraction[4 * 10 + 4], 1);
+    near(wide.horizontal[4 * 10 + 4], 0);
+    near(wide.vertical[4 * 10 + 4], 0);
+    double hwire = 0, vwire = 0;
+    for (int k = 0; k < 100; ++k) {
+      hwire += wide.horizontal[k] * 100 * .1 * (1 - wide.blocked_fraction[k]);
+      vwire += wide.vertical[k] * 100 * .1 * (1 - wide.blocked_fraction[k]);
+    }
+    near(hwire, 90);
+    near(vwire, wide.detour_wirelength);
+    // Halos reserve placement whitespace, not opaque routing area. Both the
+    // public physical design and the internal padded GP view must agree.
+    auto halo = corridor;
+    halo.node_halo_x = halo.node_halo_y = {0, 0, 5};
+    auto padded = halo;
+    padded.node_pad_x = padded.node_pad_y = {0, 0, 5};
+    padded.node_x[2] -= 5;
+    padded.node_y[2] -= 5;
+    padded.node_size_x[2] += 10;
+    padded.node_size_y[2] += 10;
+    for (const auto &view : {halo, padded}) {
+      const auto measured = rudy(view, hard);
+      check(measured.blocked_fraction == wide.blocked_fraction);
+      check(measured.horizontal == wide.horizontal);
+      check(measured.vertical == wide.vertical);
+    }
+    corridor.node_y[2] = 10;
+    corridor.node_size_y[2] = 80;
+    const auto narrow = rudy(corridor, hard);
+    check(narrow.unroutable_nets == 0);
+    check(narrow.detour_wirelength > wide.detour_wirelength);
+    check(narrow.max_utilization > wide.max_utilization);
+    corridor.node_y[2] = 0;
+    corridor.node_size_y[2] = 100;
+    const auto wall = rudy(corridor, hard);
+    check(wall.unroutable_nets == 1 && wall.overflow > 0);
+    // Sub-bin disconnected whitespace is not capacity for a net on this side.
+    auto pocket = corridor;
+    pocket.node_x[1] = 35;
+    auto one_bin = hard;
+    one_bin.bins_x = one_bin.bins_y = 1;
+    const auto local = rudy(pocket, one_bin);
+    check(local.unroutable_nets == 0);
+    near(local.horizontal[0], 30 / (40 * 100 * .1));
+    // A wall assembled from two macros must also disconnect the free space.
+    corridor.node_size_y[2] = 50;
+    corridor.node_x.push_back(40);
+    corridor.node_y.push_back(50);
+    corridor.node_size_x.push_back(20);
+    corridor.node_size_y.push_back(50);
+    corridor.node_macro.push_back(1);
+    corridor.build_maps();
+    check(rudy(corridor, hard).unroutable_nets == 1);
+    // Overlapping footprints remove their union, not twice their shared area.
+    corridor.node_y[3] = 25;
+    corridor.node_size_y[3] = 50;
+    const auto overlap = rudy(corridor, hard);
+    double blocked_area = 0;
+    for (double f : overlap.blocked_fraction)
+      blocked_area += f * 100;
+    near(blocked_area, 20 * 75);
+    check(overlap.unroutable_nets == 0);
     Design empty;
     empty.layout = {0, 0, 10, 10, 1, 1};
     empty.build_maps();

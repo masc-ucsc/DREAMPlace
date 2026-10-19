@@ -9,6 +9,7 @@
 #include "rudy/src/parameters.h"
 
 namespace DreamPlace::native {
+RudyResult obstacle_rudy(const Design &, const RudyOptions &);
 namespace {
 template <typename T> inline DEFINE_NET_WIRING_DISTRIBUTION_MAP_WEIGHT;
 }
@@ -31,6 +32,9 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
       dx * dy * o.vertical_capacity <= 0) {
     throw std::invalid_argument("RUDY bin capacity overflow or underflow");
   }
+  if (o.macro_blockages) {
+    return obstacle_rudy(d, o);
+  }
   auto bin = [](double coordinate, double lo, double pitch, int count) {
     // Clip before integer conversion, including far-outside terminal positions.
     return static_cast<int>(
@@ -38,34 +42,6 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
   };
   std::vector<double> available_h(o.bins_x * o.bins_y, o.horizontal_capacity);
   std::vector<double> available_v(o.bins_x * o.bins_y, o.vertical_capacity);
-  if (o.macro_blockages) {
-    for (int i = 0; i < static_cast<int>(d.node_macro.size()); ++i) {
-      if (!d.node_macro[i]) {
-        continue;
-      }
-      const double ch =
-          d.node_blocked_capacity_h.empty() ? 0 : d.node_blocked_capacity_h[i];
-      const double cv =
-          d.node_blocked_capacity_v.empty() ? 0 : d.node_blocked_capacity_v[i];
-      const double xl = d.node_x[i], yl = d.node_y[i],
-                   xh = xl + d.node_size_x[i], yh = yl + d.node_size_y[i];
-      for (int x = bin(xl, l.xl, dx, o.bins_x);
-           x < std::min(o.bins_x, bin(xh, l.xl, dx, o.bins_x) + 1); ++x) {
-        for (int y = bin(yl, l.yl, dy, o.bins_y);
-             y < std::min(o.bins_y, bin(yh, l.yl, dy, o.bins_y) + 1); ++y) {
-          const double area = std::max(0., std::min(xh, l.xl + (x + 1) * dx) -
-                                               std::max(xl, l.xl + x * dx)) *
-                              std::max(0., std::min(yh, l.yl + (y + 1) * dy) -
-                                               std::max(yl, l.yl + y * dy));
-          const int k = x * o.bins_y + y;
-          available_h[k] = std::max(o.horizontal_capacity * .01,
-                                    available_h[k] - ch * area / (dx * dy));
-          available_v[k] = std::max(o.vertical_capacity * .01,
-                                    available_v[k] - cv * area / (dx * dy));
-        }
-      }
-    }
-  }
   if (o.pin_access) {
     for (int p = 0; p < static_cast<int>(d.pin2node.size()); ++p) {
       const int node = d.pin2node[p];
