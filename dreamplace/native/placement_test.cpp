@@ -13,6 +13,9 @@
 
 #include "dreamplace/native/spectral.hpp"
 #include "utility/src/detailed_place_db.h"
+#include "utility/src/utils.h"
+
+#include "independent_set_matching/src/bin2node_3d_map.h"
 
 namespace DreamPlace {
 template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int);
@@ -761,10 +764,20 @@ void halos() {
   check(invalid.node_x == before.node_x && invalid.node_y == before.node_y,
         "failed halo placement mutated input");
 }
+void power2_grid() {
+  // ISM sizes its bin grid with ceil_power2(bins / 8); fewer than eight bins
+  // gives zero, whose log2 used to be cast to int and used as a shift count.
+  using DreamPlace::ceil_power2;
+  const int expected[] = {1, 1, 2, 4, 4, 8, 8, 8, 8, 16};
+  for (int v = 0; v < 10; ++v)
+    check(ceil_power2(v) == expected[v], "ceil_power2 mismatch");
+  check(ceil_power2(-3) == 1, "ceil_power2 of a negative count");
+}
 } // namespace
 int main() {
   try {
     spectral();
+    power2_grid();
     gradients();
     hpwl_case();
     native_flow();

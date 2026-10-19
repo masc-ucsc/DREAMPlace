@@ -66,6 +66,12 @@ void make_bin2node_3d_map(const DetailedPlaceDBType& db, const typename Detailed
 
 inline int ceil_power2(int v)
 {
+    // log2(0) is -inf, and casting it to int then shifting by it is undefined.
+    // Fewer than 8 placement bins reach here with v == 0; a grid of 1 is right.
+    if (v <= 1)
+    {
+        return 1;
+    }
     return (1<<(int)ceil(log2(v)));
 }
 
