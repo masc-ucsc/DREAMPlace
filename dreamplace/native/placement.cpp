@@ -66,12 +66,14 @@ double overflow(const Design &d, int bx, int by, double target_density,
     if (i < d.num_movable) {
       total += charge * w * h;
     }
-    int x0 = std::clamp(static_cast<int>(std::floor((x - l.xl) / dx)), 0, bx);
-    int x1 =
-        std::clamp(static_cast<int>(std::ceil((x + w - l.xl) / dx)), 0, bx);
-    int y0 = std::clamp(static_cast<int>(std::floor((y - l.yl) / dy)), 0, by);
-    int y1 =
-        std::clamp(static_cast<int>(std::ceil((y + h - l.yl) / dy)), 0, by);
+    // Clamp before the int conversion: fixed nodes may lie far outside the core.
+    const auto cell = [](double v, int count) {
+      return static_cast<int>(std::clamp(v, 0., double(count)));
+    };
+    int x0 = cell(std::floor((x - l.xl) / dx), bx);
+    int x1 = cell(std::ceil((x + w - l.xl) / dx), bx);
+    int y0 = cell(std::floor((y - l.yl) / dy), by);
+    int y1 = cell(std::ceil((y + h - l.yl) / dy), by);
     auto &map = i < d.num_movable ? movable : fixed;
     for (int k = x0; k < x1; ++k) {
       for (int j = y0; j < y1; ++j) {
@@ -492,9 +494,14 @@ bool is_legal(const Design &d, std::string *reason) {
                   " row=" + std::to_string(l.row_height);
       return false;
     }
-    int first = std::max(0., std::floor((y - l.yl + eps) / l.row_height));
-    int last = std::min<double>(rows.size(),
-                                std::ceil((y + h - l.yl - eps) / l.row_height));
+    // Fixed nodes may lie anywhere (validate() only needs finite coordinates).
+    // Clamp in floating point: converting an out-of-range double to int is
+    // undefined and indexed rows[INT_MIN] for a node far above the core.
+    const double row_count = static_cast<double>(rows.size());
+    const int first = static_cast<int>(
+        std::clamp(std::floor((y - l.yl + eps) / l.row_height), 0., row_count));
+    const int last = static_cast<int>(std::clamp(
+        std::ceil((y + h - l.yl - eps) / l.row_height), 0., row_count));
     for (int r = first; r < last; ++r) {
       rows[r].push_back({x, x + w, i});
     }

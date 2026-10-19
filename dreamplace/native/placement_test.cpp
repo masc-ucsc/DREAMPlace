@@ -821,6 +821,34 @@ void halos() {
   check(invalid.node_x == before.node_x && invalid.node_y == before.node_y,
         "failed halo placement mutated input");
 }
+// Fixed nodes only need finite coordinates; one far above the core used to turn
+// an out-of-range double into a negative row index inside is_legal().
+void far_fixed_nodes() {
+  for (const double far : {1e12, -1e12, 3e9}) {
+    Design d;
+    d.layout = {0, 0, 40, 20, 1, 1};
+    d.num_movable = 4;
+    d.node_x = {2, 5, 8, 20, far, 30};
+    d.node_y = {2, 6, 2, 9, far, 5};
+    d.node_size_x = {2, 3, 2, 4, 6, 0};
+    d.node_size_y = {1, 1, 1, 1, 3, 0};
+    d.pin2node = {0, 1, 2, 3, 4, 5};
+    d.pin_offset_x.assign(6, 0.5);
+    d.pin_offset_y.assign(6, 0.5);
+    d.flat_net2pin = {0, 1, 2, 3, 4, 5};
+    d.flat_net2pin_start = {0, 3, 6};
+    d.build_maps();
+    const auto before = d;
+    (void)is_legal(d); // must not index outside the row table
+    Options o;
+    o.max_iterations = 30;
+    o.bins_x = o.bins_y = 8;
+    const auto r = place(d, o);
+    check(r.legal && is_legal(d), "far fixed node broke legalization");
+    check(d.node_x[4] == before.node_x[4] && d.node_y[4] == before.node_y[4],
+          "far fixed node moved");
+  }
+}
 void power2_grid() {
   // ISM sizes its bin grid with ceil_power2(bins / 8); fewer than eight bins
   // gives zero, whose log2 used to be cast to int and used as a shift count.
@@ -835,6 +863,7 @@ int main() {
   try {
     spectral();
     power2_grid();
+    far_fixed_nodes();
     threaded_determinism();
     gradients();
     hpwl_case();
