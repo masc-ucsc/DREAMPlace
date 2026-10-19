@@ -69,6 +69,19 @@ SearchResult toposearch(const Design &src, std::span<const NodeInfo> info,
   out.cost = basecheap + baseroute;
   out.seed_cost = out.cost;
   out.rudy_overflow = route(incumbent);
+  // Frozen groups must keep their relation to every other group relative to the
+  // incumbent sequence pair. Rank each permutation once: the incumbent never
+  // changes, so only the proposal needs ranking per evaluation.
+  const auto initial = sequence_pair(incumbent.topology);
+  std::map<std::string, int> initial_plus_rank, initial_minus_rank;
+  for (int k = 0; k < int(initial.plus.size()); ++k)
+    initial_plus_rank[initial.plus[k]] = k;
+  for (int k = 0; k < int(initial.minus.size()); ++k)
+    initial_minus_rank[initial.minus[k]] = k;
+  std::vector<std::string> frozen_ids;
+  for (const auto &g : incumbent.topology.groups)
+    if (g.freeze_topology)
+      frozen_ids.push_back(g.id);
   for (int chain = 0; chain < (p.search == "sa" ? p.chains : 1); ++chain) {
     std::mt19937 rng(unsigned(p.seed) + 0x9e3779b9U * unsigned(chain + 1));
     std::uniform_real_distribution<double> unit(0, 1);
@@ -80,27 +93,37 @@ SearchResult toposearch(const Design &src, std::span<const NodeInfo> info,
       ++out.evaluations;
       // A swap of two other groups can cross a frozen group. Preserve its
       // pairwise relations in both permutations, not just its array index.
-      const auto initial = sequence_pair(incumbent.topology);
-      auto preserves = [&](const auto &before, const auto &after,
-                           const std::string &id) {
-        auto a = std::find(before.begin(), before.end(), id),
-             b = std::find(after.begin(), after.end(), id);
-        if (a == before.end() || b == after.end())
-          return false;
-        for (const auto &other : before)
-          if (other != id) {
-            auto x = std::find(before.begin(), before.end(), other),
-                 y = std::find(after.begin(), after.end(), other);
-            if (y == after.end() || ((x < a) != (y < b)))
-              return false;
-          }
-        return true;
-      };
-      for (const auto &g : incumbent.topology.groups)
-        if (g.freeze_topology &&
-            (!preserves(initial.plus, proposed.plus, g.id) ||
-             !preserves(initial.minus, proposed.minus, g.id)))
-          return false;
+      if (!frozen_ids.empty()) {
+        const auto rank = [](const std::vector<std::string> &order) {
+          std::map<std::string, int> out;
+          for (int k = 0; k < int(order.size()); ++k)
+            out[order[k]] = k;
+          return out;
+        };
+        const auto plus_rank = rank(proposed.plus),
+                   minus_rank = rank(proposed.minus);
+        auto preserves = [&](const std::vector<std::string> &before,
+                             const std::map<std::string, int> &before_rank,
+                             const std::map<std::string, int> &after_rank,
+                             const std::string &id) {
+          const auto a = before_rank.find(id), b = after_rank.find(id);
+          if (a == before_rank.end() || b == after_rank.end())
+            return false;
+          for (const auto &other : before)
+            if (other != id) {
+              const auto x = before_rank.find(other),
+                         y = after_rank.find(other);
+              if (y == after_rank.end() ||
+                  ((x->second < a->second) != (y->second < b->second)))
+                return false;
+            }
+          return true;
+        };
+        for (const auto &id : frozen_ids)
+          if (!preserves(initial.plus, initial_plus_rank, plus_rank, id) ||
+              !preserves(initial.minus, initial_minus_rank, minus_rank, id))
+            return false;
+      }
       Realization realized;
       try {
         auto a = abstract_design(src, info, candidate, p);

@@ -5,6 +5,7 @@
 #include "dreamplace/native/macro/report.hpp"
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 using namespace DreamPlace::native;
 namespace m = DreamPlace::native::macro;
@@ -145,6 +146,80 @@ int main() {
     auto ablated = f.d;
     check(m::place_h2d(ablated, f.info, p, input, cells).legal,
           "ablations illegal");
+    // Topology search may permute free groups but must keep a frozen group's
+    // relation to every other group in both sequences.
+    {
+      Fixture row;
+      row.d.layout = {0, 0, 160, 50, 1, 1};
+      row.d.num_movable = 5;
+      for (int i = 0; i < 5; ++i) {
+        row.d.node_x.push_back(4 + 30 * i);
+        row.d.node_y.push_back(20);
+        row.d.node_size_x.push_back(10);
+        row.d.node_size_y.push_back(8);
+        row.d.node_halo_x.push_back(1);
+        row.d.node_halo_y.push_back(1);
+        row.info.push_back({"r" + std::to_string(i) + ".m",
+                            "r" + std::to_string(i), "ram", true});
+      }
+      for (int i = 0; i < 4; ++i)
+        for (int pin : {i, i + 1}) {
+          row.d.flat_net2pin.push_back(row.d.pin2node.size());
+          row.d.pin2node.push_back(pin);
+          row.d.pin_offset_x.push_back(5);
+          row.d.pin_offset_y.push_back(4);
+          if (pin == i + 1)
+            row.d.flat_net2pin_start.push_back(row.d.flat_net2pin.size());
+        }
+      row.d.build_maps();
+      m::Parameters sp;
+      sp.seed_sa_evals = 0;
+      sp.anchors = sp.order = false;
+      sp.search = "sa";
+      sp.evals = 60;
+      sp.bins = 8;
+      auto topology = m::seed_topology(row.d, row.info, {}, sp);
+      topology.groups[2].freeze_topology = true;
+      const auto abstracted = m::abstract_design(row.d, row.info, topology, sp);
+      auto incumbent = m::group_legalize(abstracted, topology, sp);
+      check(incumbent.legal, "frozen search incumbent illegal");
+      const auto initial = m::sequence_pair(incumbent.topology);
+      const auto search = m::toposearch(row.d, row.info, incumbent, sp);
+      check(search.evaluations > 0, "topology search did not run");
+      const std::string frozen = topology.groups[2].id;
+      auto side = [&](const std::vector<std::string> &order,
+                      const std::string &id) {
+        std::vector<bool> before;
+        bool seen = false;
+        for (const auto &other : order) {
+          if (other == id)
+            seen = true;
+          else
+            before.push_back(!seen);
+        }
+        return before;
+      };
+      auto others = [&](const std::vector<std::string> &order) {
+        std::vector<std::string> out;
+        for (const auto &id : order)
+          if (id != frozen)
+            out.push_back(id);
+        return out;
+      };
+      for (auto [was, now] :
+           {std::pair{&initial.plus, &search.sequence.plus},
+            std::pair{&initial.minus, &search.sequence.minus}}) {
+        const auto key = others(*was);
+        std::map<std::string, bool> was_before, now_before;
+        auto a = side(*was, frozen), b = side(*now, frozen);
+        const auto now_others = others(*now);
+        for (size_t k = 0; k < key.size(); ++k)
+          was_before[key[k]] = a[k];
+        for (size_t k = 0; k < now_others.size(); ++k)
+          now_before[now_others[k]] = b[k];
+        check(was_before == now_before, "search crossed a frozen group");
+      }
+    }
     // Factor-grid grouping is based on hierarchy/master, not flat node ids.
     Fixture array;
     array.d.layout = {0, 0, 100, 100, 1, 1};
