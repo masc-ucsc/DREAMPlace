@@ -301,11 +301,154 @@ void repulsion_checks(const Design &d) {
   rejects([&] { detail::centroid_repulsion(two, 1, 0); });
   rejects([&] { detail::centroid_repulsion(two, -1, .5); });
 }
+void circle_attraction_checks(Design d) {
+  // Exercise shared colors, nested anchors, explicit members and fixed nodes.
+  CentroidGroup extra;
+  extra.nodes = {2, 7, 8};
+  extra.repulsion_area = 100;
+  d.centroid_groups.push_back(extra);
+  for (bool frozen : {false, true}) {
+    if (frozen)
+      d.centroid_targets = {{300, 400}, {500, 450}, {600, 650}};
+    const auto g = detail::centroid_circle_attraction(d, .3, .5, 4);
+    double sx = 0, sy = 0;
+    for (size_t n = 0; n < d.node_x.size(); ++n) {
+      sx += g.x[n];
+      sy += g.y[n];
+      for (int axis = 0; axis < 2; ++axis) {
+        auto hi = d, lo = d;
+        (axis ? hi.node_y : hi.node_x)[n] += .001;
+        (axis ? lo.node_y : lo.node_x)[n] -= .001;
+        const double fd =
+            (detail::centroid_circle_attraction(hi, .3, .5, 4).value -
+             detail::centroid_circle_attraction(lo, .3, .5, 4).value) /
+            .002;
+        near(fd, axis ? g.y[n] : g.x[n], 1e-4,
+             "circle attraction finite-difference mismatch");
+      }
+    }
+    if (!frozen) {
+      near(sx, 0, 1e-9, "moving circle anchors x translation");
+      near(sy, 0, 1e-9, "moving circle anchors y translation");
+      auto shifted = d;
+      for (size_t n = 0; n < d.node_x.size(); ++n) {
+        shifted.node_x[n] += 99;
+        shifted.node_y[n] -= 57;
+      }
+      near(detail::centroid_circle_attraction(shifted, .3, .5, 4).value,
+           g.value, 1e-8, "moving circle depends on world origin");
+    } else {
+      check(std::hypot(sx, sy) > 1, "frozen anchor loses restoring force");
+    }
+    auto padded = d;
+    for (int n = 0; n < 6; ++n) {
+      padded.node_x[n] -= 10;
+      padded.node_y[n] -= 10;
+      padded.node_size_x[n] += 20;
+      padded.node_size_y[n] += 20;
+    }
+    near(detail::centroid_circle_attraction(padded, .3, .5, 4).value, g.value,
+         1e-8, "halo changes circle attraction");
+    check(detail::centroid_attraction_reference(padded, .5) ==
+              detail::centroid_attraction_reference(d, .5),
+          "halo changes spring calibration");
+    const auto quadratic = detail::centroid_attraction(d, .3);
+    const auto zero_outside = detail::centroid_circle_attraction(d, .3, .5, 0);
+    near(quadratic.value, zero_outside.value, 1e-8,
+         "zero outside stiffness is not quadratic");
+    for (size_t n = 0; n < d.node_x.size(); ++n) {
+      near(quadratic.x[n], zero_outside.x[n], 1e-9, "quadratic x mismatch");
+      near(quadratic.y[n], zero_outside.y[n], 1e-9, "quadratic y mismatch");
+    }
+  }
+  // Radius ten, one member: force is 2d inside and 2(d+4(d-R)) outside.
+  d.centroid_groups = {extra};
+  d.centroid_groups[0].nodes = {0};
+  d.centroid_groups[0].repulsion_area = 50 * std::acos(-1.);
+  d.centroid_targets = {{115, 215}};
+  for (const auto &[distance, expected] :
+       {std::pair{5., 10.}, {10., 20.}, {20., 120.}}) {
+    d.node_x[0] = 100 + distance;
+    const auto g = detail::centroid_circle_attraction(d, 1, .5, 4);
+    near(g.x[0], expected, 1e-9, "restoring force does not grow with distance");
+    near(g.y[0], 0, 1e-9, "radial spring has tangential force");
+  }
+  d.node_x[0] = 110 - 1e-7;
+  const auto left = detail::centroid_circle_attraction(d, 1, .5, 4);
+  d.node_x[0] = 110 + 1e-7;
+  const auto right = detail::centroid_circle_attraction(d, 1, .5, 4);
+  near(left.x[0], right.x[0], 2e-6, "force discontinuity at circle boundary");
+  // A single member is its own moving centroid, even when moment arithmetic
+  // leaves a tiny residual. There must be no self-pull to amplify in GP.
+  d.centroid_targets.clear();
+  d.node_x[0] = 1398357.29110317;
+  d.node_y[0] = 741953.81801293;
+  const auto singleton = detail::centroid_circle_attraction(d, 1, .5, 4);
+  near(singleton.x[0], 0, 0, "singleton has moving-centroid x self-pull");
+  near(singleton.y[0], 0, 0, "singleton has moving-centroid y self-pull");
+  rejects([&] { detail::centroid_circle_attraction(d, 1, .5, -1); });
+  rejects([&] { detail::centroid_attraction_reference(d, 0); });
+}
+void fixed_spring_gp() {
+  Design d;
+  d.layout = {0, 0, 1000, 1000, 1, 1};
+  d.num_movable = 1;
+  d.node_x = {95, 900};
+  d.node_y = {495, 500};
+  d.node_size_x = d.node_size_y = {10, 1};
+  d.node_macro = {1, 0};
+  d.centroid_node_area = {100, 1};
+  d.node_centroid_color = {-1, -1};
+  CentroidGroup group;
+  group.nodes = {0};
+  group.repulsion_area = 5000 * std::acos(-1.); // R=100 at density .5
+  d.centroid_groups = {group};
+  d.centroid_targets = {{100, 500}};
+  d.pin2node = {0, 1};
+  d.pin_offset_x = d.pin_offset_y = {5, 0};
+  d.flat_net2pin = {0, 1};
+  d.flat_net2pin_start = {0, 2};
+  d.build_maps();
+  Options o;
+  o.max_iterations = 200;
+  o.bins_x = o.bins_y = 8;
+  o.add_fillers = o.legalize = o.detailed_place = false;
+  o.density_upper_bound = true;
+  o.target_density = .5;
+  o.centroid_weight = .25;
+  o.centroid_ramp = 10000; // frozen spring must not restart this ramp
+  auto old = d;
+  place(old, o);
+  auto disabled = d;
+  o.centroid_attraction_outside = 999;
+  place(disabled, o);
+  check(old.node_x == disabled.node_x && old.node_y == disabled.node_y,
+        "new controls change disabled legacy path");
+  o.centroid_distance_attraction = true;
+  o.centroid_attraction_outside = 4;
+  const auto result = place(d, o);
+  const double drift = std::hypot(d.node_x[0] - 95, d.node_y[0] - 495);
+  const double old_drift = std::hypot(old.node_x[0] - 95, old.node_y[0] - 495);
+  std::cout << "frozen spring GP drift " << drift << " legacy " << old_drift
+            << " calibration " << result.centroid.attraction_coefficient
+            << '\n';
+  check(drift < 200 && old_drift > drift * 2,
+        "fixed spring does not bound GP drift");
+  check(result.centroid.attraction_coefficient > 0 &&
+            result.centroid.attraction_calibration_iteration == 0,
+        "spring calibration missing or restarted");
+  check(d.centroid_targets == old.centroid_targets && d.node_x[1] == 900,
+        "target/fixed node moved");
+  o.centroid_attraction_outside = -1;
+  rejects([&] { place(d, o); });
+}
 int main() {
   try {
     candidate_copy_checks();
     auto d = fixture();
     repulsion_checks(d);
+    circle_attraction_checks(d);
+    fixed_spring_gp();
     auto grad = detail::centroid_attraction(d, .3);
     auto a = d, b = d;
     a.centroid_groups.resize(1);

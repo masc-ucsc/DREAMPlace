@@ -11,6 +11,8 @@
 namespace DreamPlace::native::detail {
 namespace {
 bool repel(const CentroidGroup &a, const CentroidGroup &b) {
+  if (a.repulsion_area == 0 || b.repulsion_area == 0)
+    return false;
   if (a.repulsion_scope >= 0 || b.repulsion_scope >= 0)
     return a.repulsion_scope >= 0 && a.repulsion_scope == b.repulsion_scope;
   return a.family == b.family;
@@ -110,6 +112,93 @@ Gradient centroid_attraction(const Design &d, double lambda) {
   }
   return out;
 }
+namespace {
+struct AttractionGroups {
+  std::vector<Moment> moments;
+  std::vector<double> radii;
+  std::vector<std::vector<size_t>> colors;
+  AttractionGroups(const Design &d, double density)
+      : colors(d.centroid_color_names.size()) {
+    if (!std::isfinite(density) || density <= 0 || density > 1)
+      throw std::invalid_argument("invalid centroid attraction density");
+    const auto cm = color_moments(d);
+    for (size_t k = 0; k < d.centroid_groups.size(); ++k) {
+      const auto &g = d.centroid_groups[k];
+      auto m = group_moment(d, g, cm);
+      radii.push_back(
+          std::sqrt((g.repulsion_area > 0 ? g.repulsion_area : m.area) /
+                    (std::numbers::pi * density)));
+      if (!d.centroid_targets.empty()) {
+        m.x = d.centroid_targets[k].first - d.layout.xl;
+        m.y = d.centroid_targets[k].second - d.layout.yl;
+      }
+      moments.push_back(m);
+      for (int c : g.colors)
+        colors[c].push_back(k);
+    }
+  }
+  template <class F> void members(const Design &d, F f) const {
+    for (size_t k = 0; k < d.centroid_groups.size(); ++k)
+      for (int n : d.centroid_groups[k].nodes)
+        f(n, k);
+    for (size_t n = 0; n < d.node_centroid_color.size(); ++n)
+      if (d.node_centroid_color[n] >= 0)
+        for (size_t k : colors[d.node_centroid_color[n]])
+          f(n, k);
+  }
+};
+} // namespace
+std::vector<double> centroid_attraction_reference(const Design &d,
+                                                  double density) {
+  const AttractionGroups groups(d, density);
+  std::vector<double> out(d.node_x.size());
+  groups.members(d, [&](size_t n, size_t k) {
+    out[n] +=
+        2 * d.centroid_node_area[n] / groups.moments[k].area * groups.radii[k];
+  });
+  return out;
+}
+Gradient centroid_circle_attraction(const Design &d, double lambda,
+                                    double density, double outside) {
+  if (!std::isfinite(lambda) || lambda < 0 || !std::isfinite(outside) ||
+      outside < 0)
+    throw std::invalid_argument("invalid centroid circle attraction controls");
+  const AttractionGroups groups(d, density);
+  Gradient out;
+  out.x.assign(d.node_x.size(), 0);
+  out.y.assign(d.node_y.size(), 0);
+  if (!lambda)
+    return out;
+  std::vector<double> sum_x(groups.moments.size()),
+      sum_y(groups.moments.size());
+  groups.members(d, [&](size_t n, size_t k) {
+    const auto p = node(d, n);
+    const auto &m = groups.moments[k];
+    const double dx = p.x - m.x, dy = p.y - m.y;
+    const double distance = std::hypot(dx, dy);
+    const double excess = std::max(0., distance - groups.radii[k]);
+    const double weight = lambda * p.area / m.area;
+    out.value += weight * (distance * distance + outside * excess * excess);
+    const double scale =
+        2 * weight * (distance > 0 ? 1 + outside * excess / distance : 1);
+    const double gx = scale * dx, gy = scale * dy;
+    out.x[n] += gx;
+    out.y[n] += gy;
+    sum_x[k] += gx;
+    sum_y[k] += gy;
+  });
+  if (d.centroid_targets.empty()) {
+    // The centroid moves with its members. Differentiating it removes the
+    // group's resultant force, so the shape spring never pins its translation.
+    // Unlike the quadratic law, these terms do not cancel on their own.
+    groups.members(d, [&](size_t n, size_t k) {
+      const double weight = d.centroid_node_area[n] / groups.moments[k].area;
+      out.x[n] -= weight * sum_x[k];
+      out.y[n] -= weight * sum_y[k];
+    });
+  }
+  return out;
+}
 // A circle reserves the anchored physical area at the caller's requested
 // density, independently of the GP macro-charge scaling and halo padding.
 CircleOverlap centroid_circle_overlaps(const Design &d, double density) {
@@ -123,8 +212,15 @@ CircleOverlap centroid_circle_overlaps(const Design &d, double density) {
         continue;
       ++out.pairs;
       const double reach =
-          (std::sqrt(groups[i].area) + std::sqrt(groups[j].area)) /
+          (std::sqrt(d.centroid_groups[i].repulsion_area < 0
+                         ? groups[i].area
+                         : d.centroid_groups[i].repulsion_area) +
+           std::sqrt(d.centroid_groups[j].repulsion_area < 0
+                         ? groups[j].area
+                         : d.centroid_groups[j].repulsion_area)) /
           std::sqrt(std::numbers::pi * density);
+      if (reach <= 0)
+        continue;
       const double depth =
           1 - std::hypot(groups[i].x - groups[j].x, groups[i].y - groups[j].y) /
                   reach;
@@ -150,8 +246,9 @@ Gradient centroid_repulsion(const Design &d, double lambda, double density) {
       gy(d.centroid_groups.size());
   for (const auto &g : d.centroid_groups) {
     moments.push_back(group_moment(d, g, colors));
-    radii.push_back(
-        std::sqrt(moments.back().area / (std::numbers::pi * density)));
+    radii.push_back(std::sqrt(
+        (g.repulsion_area < 0 ? moments.back().area : g.repulsion_area) /
+        (std::numbers::pi * density)));
   }
   for (size_t i = 0; i < moments.size(); ++i) {
     for (size_t j = i + 1; j < moments.size(); ++j) {

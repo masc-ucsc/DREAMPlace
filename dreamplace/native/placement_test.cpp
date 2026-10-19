@@ -761,6 +761,83 @@ void halos() {
   check(invalid.node_x == before.node_x && invalid.node_y == before.node_y,
         "failed halo placement mutated input");
 }
+
+void moving_terminals() {
+  auto base = design();
+  Options o;
+  o.max_iterations = 12;
+  o.bins_x = o.bins_y = 8;
+  o.add_fillers = false;
+  o.legalize = o.detailed_place = false;
+  o.num_threads = 1;
+  auto plain = base, off = base;
+  place(plain, o);
+  o.terminal_update = [&](const Design &,
+                          int) -> std::vector<TerminalPosition> {
+    throw std::runtime_error("disabled terminal callback was called");
+  };
+  place(off, o);
+  check(off.node_x == plain.node_x && off.node_y == plain.node_y,
+        "disabled terminal adjustment changes GP");
+  for (bool haloed : {false, true}) {
+    auto d = base;
+    d.node_macro.assign(d.node_x.size(), 0);
+    if (haloed) {
+      d.node_macro[6] = 1;
+      d.node_halo_x.assign(d.node_x.size(), 0);
+      d.node_halo_y.assign(d.node_x.size(), 0);
+      d.node_halo_x[6] = d.node_halo_y[6] = 1;
+    }
+    int callbacks = 0, observed = 0;
+    double latest_x = d.node_x[7];
+    o.terminal_interval = 2;
+    o.terminal_update = [&](const Design &snapshot, int iteration) {
+      check(snapshot.node_size_x == base.node_size_x &&
+                snapshot.pin_offset_x == base.pin_offset_x,
+            "terminal callback must use physical geometry with halo");
+      near(snapshot.node_x[7], latest_x, 0,
+           "terminal movement lost between iterations");
+      latest_x = iteration % 4 == 0 ? 11 : 12;
+      ++callbacks;
+      return std::vector<TerminalPosition>{{7, latest_x, 25}};
+    };
+    o.observer = [&](const Design &snapshot, PlacementStage stage, int) {
+      if (stage == PlacementStage::finished) {
+        near(snapshot.node_x[7], latest_x, 0,
+             "observer used stale IO positions");
+        ++observed;
+      }
+    };
+    o.checkpoint_interval = 2;
+    o.checkpoint = [&](const Design &snapshot, int) {
+      near(snapshot.node_x[7], latest_x, 0,
+           "STA checkpoint used stale IO positions");
+      return GpUpdate{};
+    };
+    const auto result = place(d, o);
+    o.checkpoint = {};
+    check(callbacks > 0 && observed == 1, "terminal callback/observer missing");
+    near(d.node_x[7], latest_x, 0, "moved IO not written back");
+    near(hpwl(d), result.hpwl, 1e-9, "reported HPWL uses stale IO positions");
+    near(d.node_x[6], base.node_x[6], 0, "moving terminals moved fixed macro");
+    o.observer = {};
+    o.terminal_update = [&](const Design &, int) {
+      return std::vector<TerminalPosition>{{6, 11, 25}};
+    };
+    auto invalid = base;
+    rejects([&] { place(invalid, o); });
+    check(invalid.node_x == base.node_x,
+          "invalid terminal update mutated input");
+  }
+  o.terminal_update = [](const Design &, int) {
+    return std::vector<TerminalPosition>{};
+  };
+  o.add_fillers = true;
+  rejects([&] { place(base, o); });
+  o.add_fillers = false;
+  GpState state;
+  rejects([&] { place(base, o, &state); });
+}
 } // namespace
 int main() {
   try {
@@ -768,6 +845,7 @@ int main() {
     gradients();
     hpwl_case();
     native_flow();
+    moving_terminals();
     offgrid_macro_swap();
     same_bin_swap();
     weighted_detailed_placement();

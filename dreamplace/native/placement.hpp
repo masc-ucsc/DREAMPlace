@@ -29,8 +29,8 @@ struct CohesionGroup {
   double weight = 1;
   std::vector<double> areas;
 };
-// Candidate colors may overlap across any number of groups. Nodes stores only
-// uncolored descendants; each color includes its full physical membership.
+// Candidate colors may overlap across groups. Explicit nodes may carry a
+// color, but cannot also be covered by a color listed in that same group.
 struct CentroidGroup {
   std::string name;
   int parent = -1, family = 0, scope_macros = 0, scope_cells = 0;
@@ -41,6 +41,9 @@ struct CentroidGroup {
   // -1 keeps same-family repulsion. Nonnegative keys restrict repulsion to
   // one candidate hierarchy scope, independently of snap/type families.
   int repulsion_scope = -1;
+  // Negative uses member area. Otherwise this is an independent space budget;
+  // it changes circle radii only, never centroid moments or density charge.
+  double repulsion_area = -1;
 };
 struct CentroidSample {
   double x = 0, y = 0, radius = 0;
@@ -124,7 +127,16 @@ struct GpUpdate {
 using GpCheckpoint = std::function<GpUpdate(const Design &, int)>;
 struct GpSample;
 struct GpCheckpointSample;
+struct TerminalPosition {
+  int node = -1;
+  double x = 0, y = 0;
+};
 struct Options {
+  // Cheap terminal-only updates, independent of density-gated STA checkpoints.
+  // Only fixed zero-area terminals may move; callbacks see physical geometry.
+  int terminal_interval = 0;
+  std::function<std::vector<TerminalPosition>(const Design &, int)>
+      terminal_update;
   int checkpoint_interval = 0;
   bool checkpoint_final =
       false; // also sample the iteration cap, without double-calling
@@ -160,6 +172,11 @@ struct Options {
   // Zero disables R8H2 exactly. Attraction starts in the first GP iteration;
   // no preliminary macro placement or extra continuation phase is used.
   double centroid_weight = 0;
+  // Calibrate attraction once at one circle radius, retaining restoring force
+  // as members drift. The legacy per-iteration normalization stays available.
+  bool centroid_distance_attraction = false;
+  // Additional stiffness outside the area/density circle; 4 means 5x slope.
+  double centroid_attraction_outside = 4;
   // Relative to centroid attraction. Same-family circles have area A/density.
   // Zero preserves the attraction-only path exactly.
   double centroid_repulsion_weight = 0;
@@ -239,6 +256,8 @@ struct CentroidReport {
   bool started = false, completed = false;
   int start_iteration = 0, iterations = 0;
   double force_seconds = 0;
+  double attraction_coefficient = 0;
+  int attraction_calibration_iteration = -1;
   bool circles_converged = false;
   std::uint64_t circle_overlaps = 0;
   double max_circle_overlap = 0, effective_repulsion_weight = 0;
@@ -347,6 +366,12 @@ centroid_candidates(const Design &, const std::vector<std::string> &paths,
                     const std::vector<std::string> &masters,
                     double minimum_equivalent_cells, int minimum_copies = 4);
 Gradient centroid_attraction(const Design &, double lambda);
+Gradient centroid_circle_attraction(const Design &, double lambda,
+                                    double density, double outside);
+// Per-node magnitude of the direct attraction gradient at one circle radius.
+// Add contributions when a member participates in multiple candidates.
+std::vector<double> centroid_attraction_reference(const Design &,
+                                                  double density);
 struct CircleOverlap {
   std::uint64_t pairs = 0, overlaps = 0;
   double maximum = 0;

@@ -148,6 +148,7 @@ void options_check(const Options &o) {
           "invalid macro snap controls");
   require(finite(o.cohesion_weight) && o.cohesion_weight >= 0,
           "invalid cohesion weight");
+  require(o.terminal_interval >= 0, "negative terminal update interval");
   require(o.checkpoint_interval >= 0, "negative GP checkpoint interval");
   require(!o.observer || o.observer_interval > 0,
           "observer interval must be positive");
@@ -381,14 +382,19 @@ void Design::validate() const {
       require(group.parent >= -1 && group.parent < static_cast<int>(g) &&
                   group.family >= 0 && group.repulsion_scope >= -1,
               "invalid centroid family/parent/repulsion scope");
+      require(finite(group.repulsion_area) &&
+                  (group.repulsion_area == -1 || group.repulsion_area >= 0),
+              "invalid centroid repulsion area");
       require(!group.nodes.empty() || !group.colors.empty(),
               "empty centroid group");
       std::set<int> nodes, colors;
       for (int n : group.nodes)
         require(n >= 0 && n < static_cast<int>(node_x.size()) &&
-                    nodes.insert(n).second && node_centroid_color[n] < 0 &&
+                    nodes.insert(n).second &&
+                    std::find(group.colors.begin(), group.colors.end(),
+                              node_centroid_color[n]) == group.colors.end() &&
                     centroid_node_area[n] > 0,
-                "invalid or duplicate uncolored centroid member");
+                "invalid or duplicate explicit centroid member");
       for (int c : group.colors)
         require(c >= 0 && c < static_cast<int>(centroid_color_names.size()) &&
                     colors.insert(c).second && populated[c],
@@ -566,6 +572,8 @@ Result place(Design &design, const Options &options, GpState *state) {
   options_check(o);
   require(
       finite(o.centroid_weight) && o.centroid_weight >= 0 &&
+          finite(o.centroid_attraction_outside) &&
+          o.centroid_attraction_outside >= 0 &&
           finite(o.centroid_repulsion_weight) &&
           o.centroid_repulsion_weight >= 0 && o.centroid_ramp > 0 &&
           (!o.centroid_repulsion_weight || o.centroid_weight > 0) &&
@@ -582,6 +590,9 @@ Result place(Design &design, const Options &options, GpState *state) {
   require(!o.checkpoint || o.checkpoint_interval == 0 ||
               (!o.add_fillers && !state),
           "GP checkpoints require no fillers or external continuation");
+  require(!o.terminal_update || o.terminal_interval == 0 ||
+              (!o.add_fillers && !state),
+          "terminal updates require no fillers or external continuation");
   if (has_halo(design)) {
     Design padded = padded_design(design);
     Options control = o;
@@ -688,8 +699,19 @@ Result place(Design &design, const Options &options, GpState *state) {
         return update;
       };
     }
+    if (o.terminal_update && o.terminal_interval > 0) {
+      control.terminal_update = [&](const Design &snapshot, int iteration) {
+        return o.terminal_update(unpad(snapshot), iteration);
+      };
+      if (o.observer)
+        control.observer = [&](const Design &snapshot, PlacementStage stage,
+                               int iteration) {
+          o.observer(unpad(snapshot), stage, iteration);
+        };
+    }
     const auto result = place(padded, control, state);
-    if (o.checkpoint && o.checkpoint_interval > 0) {
+    if ((o.checkpoint && o.checkpoint_interval > 0) ||
+        (o.terminal_update && o.terminal_interval > 0)) {
       design = unpad(padded);
       return result;
     }
@@ -1185,6 +1207,27 @@ Result place(Design &design, const Options &options, GpState *state) {
           density_initialized = true;
         }
       }
+      if (r.centroid.started && o.centroid_distance_attraction &&
+          r.centroid.attraction_calibration_iteration < 0) {
+        // Calibrate once against ordinary WL+density, before extra penalties.
+        // At one circle radius the spring has the requested relative strength;
+        // later displacement must increase it, not normalize it away.
+        const auto reference =
+            detail::centroid_attraction_reference(d, o.target_density);
+        double base = 0, norm = 0;
+        for (int i = 0; i < d.num_movable; ++i) {
+          if (reference[i] == 0)
+            continue;
+          base += std::pow(wg.x[i] + density_weight * dg.x[i], 2) +
+                  std::pow(wg.y[i] + density_weight * dg.y[i], 2);
+          norm += reference[i] * reference[i];
+        }
+        if (base > 0 && norm > 0) {
+          r.centroid.attraction_coefficient =
+              o.centroid_weight * std::sqrt(base / norm);
+          r.centroid.attraction_calibration_iteration = global_iter;
+        }
+      }
       if (fixed_macro_weight > 0) {
         const auto og = detail::fixed_macro_overlap(
             d, o.bins_x, o.bins_y, fixed_macro_weight * progress * progress);
@@ -1261,9 +1304,22 @@ Result place(Design &design, const Options &options, GpState *state) {
         const double scale =
             norm > 0 ? o.centroid_weight * ramp * ramp * std::sqrt(base / norm)
                      : 0;
+        detail::Gradient distance_gradient;
+        if (o.centroid_distance_attraction) {
+          // Frozen targets take effect immediately in the second GP. Only the
+          // moving-centroid first phase ramps from scratch.
+          const double spring_ramp =
+              d.centroid_targets.empty() ? ramp * ramp : 1;
+          distance_gradient = detail::centroid_circle_attraction(
+              d, r.centroid.attraction_coefficient * spring_ramp,
+              o.target_density, o.centroid_attraction_outside);
+        }
         for (int i = 0; i < original; ++i) {
-          wg.x[i] += scale * cg.x[i];
-          wg.y[i] += scale * cg.y[i];
+          wg.x[i] += o.centroid_distance_attraction ? distance_gradient.x[i]
+                                                    : scale * cg.x[i];
+          wg.y[i] += o.centroid_distance_attraction ? distance_gradient.y[i]
+                                                    : scale * cg.y[i];
+          // Keep circle repulsion on its existing independent schedule/scale.
           if (o.centroid_repulsion_weight > 0) {
             wg.x[i] += scale * centroid_repulsion_weight * rg.x[i];
             wg.y[i] += scale * centroid_repulsion_weight * rg.y[i];
@@ -1317,6 +1373,42 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
       t = nt;
       r.iterations = iter + 1;
+      if (o.terminal_update && o.terminal_interval > 0 &&
+          (global_iter + 1) % o.terminal_interval == 0) {
+        Design snapshot = model;
+        snapshot.node_x = x;
+        snapshot.node_y = y;
+        const auto updates = o.terminal_update(snapshot, global_iter + 1);
+        std::vector<bool> seen(original);
+        bool changed = false;
+        for (const auto &pin : updates) {
+          require(pin.node >= d.num_movable && pin.node < original &&
+                      d.node_size_x[pin.node] == 0 &&
+                      d.node_size_y[pin.node] == 0 && !seen[pin.node] &&
+                      finite(pin.x) && finite(pin.y),
+                  "invalid fixed zero-area terminal update");
+          seen[pin.node] = true;
+          changed |= x[pin.node] != pin.x || y[pin.node] != pin.y;
+        }
+        for (const auto &pin : updates) {
+          x[pin.node] = d.node_x[pin.node] = model.node_x[pin.node] = pin.x;
+          y[pin.node] = d.node_y[pin.node] = model.node_y[pin.node] = pin.y;
+        }
+        if (changed) {
+          t = 1;
+          prev_x = x;
+          prev_y = y;
+          restart = true;
+          last_checkpoint = global_iter + 1;
+          convergence.previous_hpwl = -1;
+          convergence.previous_inflation = -1;
+          convergence.stable_samples = 0;
+          previous_hpwl = -1;
+          best_feasible_x.clear();
+          best_feasible_y.clear();
+          best_feasible_hpwl = std::numeric_limits<double>::infinity();
+        }
+      }
       const bool forced_checkpoint =
           density_gated_checkpoints &&
           (iter + 1 == o.max_iterations ||
