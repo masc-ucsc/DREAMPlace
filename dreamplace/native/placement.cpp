@@ -146,6 +146,12 @@ void options_check(const Options &o) {
   require(finite(o.macro_snap_tolerance) && o.macro_snap_tolerance >= 0 &&
               o.macro_snap_weight > 0 && o.macro_snap_weight <= 1000000,
           "invalid macro snap controls");
+  for (double value : {o.macro_snap_options.alignment_tolerance,
+                       o.macro_snap_options.spacing_tolerance,
+                       o.macro_snap_options.spacing_penalty,
+                       o.macro_snap_options.symmetry_tolerance,
+                       o.macro_snap_options.max_displacement})
+    require(finite(value) && value >= 0, "invalid macro regularity control");
   require(finite(o.cohesion_weight) && o.cohesion_weight >= 0,
           "invalid cohesion weight");
   require(o.terminal_interval >= 0, "negative terminal update interval");
@@ -302,6 +308,11 @@ void Design::validate() const {
                std::all_of(node_align_class.begin(), node_align_class.end(),
                            [](int v) { return v >= -1; })),
           "invalid macro alignment classes");
+  require(node_snap_class.empty() ||
+              (node_snap_class.size() == node_x.size() &&
+               std::all_of(node_snap_class.begin(), node_snap_class.end(),
+                           [](int c) { return c >= -1; })),
+          "invalid macro snap classes");
   require(node_macro.empty() || node_macro.size() == node_x.size(),
           "macro mask size mismatch");
   require(std::all_of(node_macro.begin(), node_macro.end(),
@@ -1872,8 +1883,12 @@ Result place(Design &design, const Options &options, GpState *state) {
   if (o.legalize && d.num_movable) {
     if (o.macro_snap) {
       const auto before = d;
-      const auto snap = detail::macro_align_snap(d, o.macro_snap_tolerance,
-                                                 o.macro_snap_weight);
+      const auto snap =
+          o.macro_snap_regular
+              ? detail::macro_regular_snap(d, o.macro_snap_options,
+                                           o.macro_snap_weight)
+              : detail::macro_align_snap(d, o.macro_snap_tolerance,
+                                         o.macro_snap_weight);
       AlignmentReport times;
       detail::legalize(d, o.bins_x, o.bins_y, &snap, &times);
       r.alignment = detail::macro_alignment_report(before, d, snap);

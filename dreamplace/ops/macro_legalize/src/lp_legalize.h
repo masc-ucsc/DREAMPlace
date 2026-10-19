@@ -596,8 +596,9 @@ void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macro
                         constraint.b < 0 || constraint.b >= db.num_movable_nodes ||
                         index[constraint.a] < 0 || index[constraint.b] < 0 || constraint.weight <= 0)
                         throw std::invalid_argument("alignment endpoints must be movable macros");
-                    lp.constraints.push_back({index[constraint.a], index[constraint.b], 0, constraint.weight});
-                    lp.constraints.push_back({index[constraint.b], index[constraint.a], 0, constraint.weight});
+                    const auto offset = MacroDifferenceLP::coordinate(std::round(constraint.offset));
+                    lp.constraints.push_back({index[constraint.a], index[constraint.b], offset, constraint.weight});
+                    lp.constraints.push_back({index[constraint.b], index[constraint.a], -offset, constraint.weight});
                 }
             }
             std::uint64_t soft_violations = 0;

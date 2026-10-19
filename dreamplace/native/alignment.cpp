@@ -7,12 +7,16 @@
 #include <tuple>
 
 namespace DreamPlace::native::detail {
-std::vector<AlignmentPair> macro_align_pairs(const Design &d, bool nearest) {
+std::vector<AlignmentPair>
+macro_align_pairs(const Design &d, bool nearest,
+                  const std::vector<int> *class_override) {
+  const auto &node_class =
+      class_override ? *class_override : d.node_align_class;
   std::map<int, std::vector<int>> classes;
   for (int i = 0; i < d.num_movable; ++i)
-    if (!d.node_align_class.empty() && d.node_align_class[i] >= 0 &&
-        !d.node_macro.empty() && d.node_macro[i])
-      classes[d.node_align_class[i]].push_back(i);
+    if (!node_class.empty() && node_class[i] >= 0 && !d.node_macro.empty() &&
+        d.node_macro[i])
+      classes[node_class[i]].push_back(i);
   std::vector<AlignmentPair> pairs;
   for (const auto &[id, nodes] : classes) {
     (void)id;

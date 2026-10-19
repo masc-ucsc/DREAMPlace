@@ -78,6 +78,73 @@ int main() {
       rejected = true;
     }
     check(rejected);
+    // Regularity uses an independent hierarchy/size class, ignoring the
+    // deliberately conflicting synthesis-color classes. Fixed macros stay out.
+    Design regular;
+    regular.layout = {0, 0, 100, 100, 1, 1};
+    regular.num_movable = 4;
+    regular.node_x = {10, 10.7, 10.2, 30, 50};
+    regular.node_y = {5, 23, 41.2, 64, 70};
+    regular.node_size_x.assign(5, 4);
+    regular.node_size_y.assign(5, 4);
+    regular.node_macro.assign(5, 1);
+    regular.node_halo_x.assign(5, 1);
+    regular.node_halo_y.assign(5, 1);
+    regular.node_align_class = {0, 1, 2, 0, 0};
+    regular.node_snap_class = {7, 7, 7, 8, 7};
+    regular.build_maps();
+    auto plain = regular, annotated = regular;
+    plain.node_snap_class.clear();
+    auto old_options = o;
+    old_options.max_iterations = 40;
+    old_options.macro_snap = false;
+    auto old_result = place(plain, old_options);
+    auto annotated_result = place(annotated, old_options);
+    check(plain.node_x == annotated.node_x &&
+          plain.node_y == annotated.node_y &&
+          old_result.hpwl == annotated_result.hpwl);
+    const auto scoped_alignment = detail::macro_align_snap(regular, .25, 100);
+    check(!scoped_alignment.groups.empty());
+    for (const auto &constraint : scoped_alignment.constraints)
+      check(constraint.a < 3 && constraint.b < 3);
+    o.macro_snap_regular = true;
+    const auto regular_result = place(regular, o);
+    check(is_legal(regular) && regular.node_x[0] == regular.node_x[1] &&
+          regular.node_x[1] == regular.node_x[2]);
+    check(regular.node_x[4] == 50 && regular.node_y[4] == 70);
+    check(regular_result.alignment.regularity.feasible &&
+          regular_result.alignment.regularity.circles.size() == 3);
+    check(std::abs(regular_result.alignment.regularity.circles[0].radius -
+                   std::sqrt(36. / std::acos(-1.))) < 1e-8);
+    bool spacing = false;
+    for (const auto &relation : regular_result.alignment.regularity.relations)
+      spacing |= relation.kind == "spacing";
+    check(spacing);
+    for (const auto &constraint : regular_result.alignment.constraints)
+      check(constraint.a < 3 && constraint.b < 3);
+    // Lattice rounding is shared by soft relative offsets and anchor targets.
+    for (const auto &constraint : regular_result.alignment.constraints) {
+      const auto &pos = constraint.axis == 0 ? regular.node_x : regular.node_y;
+      check(std::abs(pos[constraint.b] - pos[constraint.a] -
+                     constraint.offset) < 1e-6);
+    }
+    // A nonzero soft offset that conflicts with hard separation must break.
+    conflict = before;
+    forced.groups.clear();
+    forced.constraints = {{0, 1, 0, 100, 2}};
+    detail::legalize(conflict, 8, 8, &forced);
+    auto offset_report =
+        detail::macro_alignment_report(before, conflict, forced);
+    check(is_legal(conflict) && offset_report.soft_violations == 1);
+    auto invalid = regular;
+    invalid.node_size_x[1] += 1;
+    bool bad_size = false;
+    try {
+      detail::macro_regular_snap(invalid, {}, 100);
+    } catch (const std::invalid_argument &) {
+      bad_size = true;
+    }
+    check(bad_size);
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';
     return 1;

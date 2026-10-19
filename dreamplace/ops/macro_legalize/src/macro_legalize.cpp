@@ -379,7 +379,7 @@ bool macroLegalizationLauncher(LegalizationDB<T> db
     if (c.a < 0 || c.b < 0 || c.a >= db.num_movable_nodes || c.b >= db.num_movable_nodes ||
         c.a == c.b || db.node_size_x[c.a] * db.node_size_y[c.a] <= 0 ||
         db.node_size_x[c.b] * db.node_size_y[c.b] <= 0 || !db.is_dummy_fixed(c.a) || !db.is_dummy_fixed(c.b) ||
-        (c.axis != 0 && c.axis != 1) || c.weight <= 0)
+        (c.axis != 0 && c.axis != 1) || c.weight <= 0 || !std::isfinite(c.offset))
       throw std::invalid_argument("alignment endpoints must be movable macros");
   }
 #endif

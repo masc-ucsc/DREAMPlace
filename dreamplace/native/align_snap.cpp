@@ -4,7 +4,9 @@
 #include <cmath>
 #include <map>
 #include <numeric>
+#include <set>
 #include <stdexcept>
+#include <tuple>
 
 namespace DreamPlace::native::detail {
 AlignmentSnap macro_align_snap(const Design &d, double tau,
@@ -12,7 +14,9 @@ AlignmentSnap macro_align_snap(const Design &d, double tau,
   if (!std::isfinite(tau) || tau < 0 || weight <= 0 || weight > 1000000)
     throw std::invalid_argument("invalid macro snap tolerance/weight");
   AlignmentSnap snap;
-  auto pairs = macro_align_pairs(d, false);
+  const auto &classes =
+      d.node_snap_class.empty() ? d.node_align_class : d.node_snap_class;
+  auto pairs = macro_align_pairs(d, false, &classes);
   for (Axis axis : {Axis::x, Axis::y}) {
     bool x = axis == Axis::x;
     const auto &pos = x ? d.node_x : d.node_y;
@@ -28,7 +32,8 @@ AlignmentSnap macro_align_snap(const Design &d, double tau,
     };
     std::vector<bool> active(d.num_movable);
     for (const auto &p : pairs) {
-      if (p.axis != axis || size[p.a] != size[p.b])
+      if (p.axis != axis || d.node_size_x[p.a] != d.node_size_x[p.b] ||
+          d.node_size_y[p.a] != d.node_size_y[p.b])
         continue;
       double delta = pos[p.a] + size[p.a] / 2 - pos[p.b] - size[p.b] / 2;
       if (std::abs(delta) <= tau * size[p.a]) {
@@ -57,8 +62,7 @@ AlignmentSnap macro_align_snap(const Design &d, double tau,
       double target =
           lo +
           std::round((anchors[(anchors.size() - 1) / 2] - lo) / pitch) * pitch;
-      snap.groups.push_back(
-          {d.node_align_class[members.front()], axis, target, members});
+      snap.groups.push_back({classes[members.front()], axis, target, members});
       for (size_t k = 1; k < members.size(); ++k)
         snap.constraints.push_back(
             {members[k - 1], members[k], x ? 0 : 1, weight});
@@ -67,11 +71,95 @@ AlignmentSnap macro_align_snap(const Design &d, double tau,
   return snap;
 }
 
+// The same fitter used for FP centroids supplies line, spacing and midpoint
+// targets. Equal-area circles describe halo-padded macros; they are NOT hard
+// physical fences. The ordinary rectangular macro LP retains final legality.
+AlignmentSnap macro_regular_snap(const Design &d, const FloorplanOptions &o,
+                                 std::int64_t weight) {
+  if (weight <= 0 || weight > 1000000)
+    throw std::invalid_argument("invalid macro regularity weight");
+  d.validate();
+  AlignmentSnap snap;
+  if (d.node_snap_class.empty() || d.node_macro.empty())
+    return snap;
+  std::map<int, std::vector<int>> classes;
+  for (int n = 0; n < d.num_movable; ++n)
+    if (d.node_macro[n] && d.node_snap_class[n] >= 0)
+      classes[d.node_snap_class[n]].push_back(n);
+  std::vector<FloorplanCircle> circles;
+  std::vector<int> nodes;
+  for (const auto &[id, members] : classes) {
+    if (members.size() < 2)
+      continue;
+    const int first = members.front();
+    for (int n : members) {
+      const double w = d.node_size_x[n], h = d.node_size_y[n];
+      if (w != d.node_size_x[first] || h != d.node_size_y[first])
+        throw std::invalid_argument("macro snap class must have one size");
+      circles.push_back({std::to_string(n), d.node_x[n] + w / 2,
+                         d.node_y[n] + h / 2, std::sqrt(w * h / std::acos(-1.)),
+                         w * h, id, -1});
+      nodes.push_back(n);
+    }
+  }
+  snap.regularity = snap_floorplan(circles, d.layout.xl, d.layout.yl,
+                                   d.layout.xh, d.layout.yh, o);
+  std::vector<double> tx(nodes.size()), ty(nodes.size());
+  auto lattice = [](double center, double size, double lo, double hi,
+                    double pitch) {
+    const double last = std::floor((hi - lo - size) / pitch);
+    return lo + std::clamp(std::round((center - size / 2 - lo) / pitch), 0.,
+                           std::max(0., last)) *
+                    pitch;
+  };
+  for (size_t k = 0; k < nodes.size(); ++k) {
+    int n = nodes[k];
+    const auto &c = snap.regularity.circles[k];
+    tx[k] = lattice(c.x, d.node_size_x[n], d.layout.xl, d.layout.xh,
+                    d.layout.site_width);
+    ty[k] = lattice(c.y, d.node_size_y[n], d.layout.yl, d.layout.yh,
+                    d.layout.row_height);
+  }
+  std::set<std::tuple<int, int, int>> emitted;
+  std::set<int> active;
+  for (const auto &relation : snap.regularity.relations) {
+    auto members = relation.nodes;
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    const auto &target = relation.axis == 0 ? tx : ty;
+    std::stable_sort(members.begin(), members.end(), [&](int a, int b) {
+      return std::pair(target[a], a) < std::pair(target[b], b);
+    });
+    std::vector<int> group;
+    for (int k : members) {
+      active.insert(k);
+      group.push_back(nodes[k]);
+    }
+    if (relation.kind == "alignment")
+      snap.groups.push_back({circles[members.front()].family,
+                             relation.axis == 0 ? Axis::x : Axis::y,
+                             target[members.front()], group});
+    // Keep the fitted relative positions soft and translation-invariant. Use
+    // chains rather than all-pairs, including nonzero spacing/midpoint offsets.
+    for (size_t k = 1; k < members.size(); ++k) {
+      int a = members[k - 1], b = members[k];
+      if (emitted.emplace(relation.axis, nodes[a], nodes[b]).second)
+        snap.constraints.push_back(
+            {nodes[a], nodes[b], relation.axis, weight, target[b] - target[a]});
+    }
+  }
+  for (int k : active)
+    snap.targets.push_back({nodes[k], tx[k], ty[k]});
+  return snap;
+}
+
 AlignmentReport macro_alignment_report(const Design &before,
                                        const Design &after,
                                        const AlignmentSnap &snap) {
   AlignmentReport r;
   r.groups = snap.groups;
+  r.regularity = snap.regularity;
+  r.constraints = snap.constraints;
   std::vector<unsigned char> axes(before.num_movable);
   for (const auto &g : snap.groups) {
     bool x = g.axis == Axis::x;
@@ -91,7 +179,7 @@ AlignmentReport macro_alignment_report(const Design &before,
   }
   for (const auto &c : snap.constraints) {
     const auto &pos = c.axis == 0 ? after.node_x : after.node_y;
-    r.soft_violations += std::abs(pos[c.a] - pos[c.b]) > 1e-6;
+    r.soft_violations += std::abs(pos[c.b] - pos[c.a] - c.offset) > 1e-6;
   }
   for (int i = 0; i < before.num_movable; ++i)
     if (!before.node_macro.empty() && before.node_macro[i])

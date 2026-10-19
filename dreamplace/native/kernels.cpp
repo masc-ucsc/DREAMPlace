@@ -73,6 +73,15 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
       for (int i : group.nodes)
         anchors[i] = group.target;
     }
+  if (snap)
+    for (const auto &target : snap->targets) {
+      if (target.node < 0 || target.node >= d.num_movable ||
+          d.node_macro.empty() || !d.node_macro[target.node] ||
+          !std::isfinite(target.x) || !std::isfinite(target.y))
+        throw std::invalid_argument("snap targets must name movable macros");
+      ix[target.node] = target.x;
+      iy[target.node] = target.y;
+    }
   std::vector<double> weights(ix.size(), 1);
   std::vector<int> regions(ix.size(), 0);
   const auto &l = d.layout;

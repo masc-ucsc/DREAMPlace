@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "dreamplace/native/constraints.hpp"
+#include "dreamplace/native/floorplan.hpp"
 #include "dreamplace/native/orientation.hpp"
 #include "macro_legalize/src/alignment.h"
 
@@ -64,6 +65,9 @@ struct Design {
   std::vector<std::uint8_t> node_macro;
   // Same master x synthesis-color identity; -1 opts a node out.
   std::vector<int> node_align_class;
+  // Same original hierarchy scope AND macro dimensions; -1 excludes a node.
+  // Used by both macro snap algorithms, never by GP alignment/cohesion.
+  std::vector<int> node_snap_class;
   // Sum of track densities on LEF layers obstructed by each macro. RUDY
   // conservatively blocks those layers over its complete occupancy envelope.
   std::vector<double> node_blocked_capacity_h, node_blocked_capacity_v;
@@ -167,6 +171,9 @@ struct Options {
   double macro_align_overlap_boost = 0;
   int macro_align_start = 100, macro_align_full = 500;
   bool macro_align_nearest = false, macro_snap = false;
+  // Opt-in centroid-style line/gap/midpoint fitting before macro legalization.
+  bool macro_snap_regular = false;
+  FloorplanOptions macro_snap_options;
   double macro_snap_tolerance = .25;
   std::int64_t macro_snap_weight = 100;
   // Zero disables R8H2 exactly. Attraction starts in the first GP iteration;
@@ -229,11 +236,19 @@ struct AlignmentGroup {
   double target;
   std::vector<int> nodes;
 };
+struct MacroSnapTarget {
+  int node;
+  double x, y;
+};
 struct AlignmentSnap {
+  std::vector<MacroSnapTarget> targets;
+  FloorplanSnap regularity;
   std::vector<AlignmentGroup> groups;
   std::vector<::DreamPlace::MacroAlignConstraint> constraints;
 };
 struct AlignmentReport {
+  FloorplanSnap regularity;
+  std::vector<::DreamPlace::MacroAlignConstraint> constraints;
   std::vector<AlignmentGroup> groups;
   std::uint64_t x_groups = 0, y_groups = 0, members = 0, both_axes = 0;
   std::uint64_t exact_groups = 0, broken_groups = 0, soft_violations = 0;
@@ -347,12 +362,15 @@ struct Gradient {
   std::vector<double> x, y;
 };
 std::vector<AlignmentPair> macro_align_pairs(const Design &,
-                                             bool nearest = false);
+                                             bool nearest = false,
+                                             const std::vector<int> *classes = nullptr);
 double macro_align_ramp(const Options &, int iteration);
 Gradient macro_alignment(const Design &, const std::vector<AlignmentPair> &,
                          double lambda_x, double lambda_y, double sigma,
                          double *residual = nullptr);
 AlignmentSnap macro_align_snap(const Design &, double tau, std::int64_t weight);
+AlignmentSnap macro_regular_snap(const Design &, const FloorplanOptions &,
+                                 std::int64_t weight);
 AlignmentReport macro_alignment_report(const Design &, const Design &,
                                        const AlignmentSnap &);
 Gradient cohesion(const Design &design, double lambda);
