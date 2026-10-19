@@ -3,6 +3,7 @@
 #include "dreamplace/native/placement.hpp"
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 namespace DreamPlace::native {
 bool valid_orientation(Orientation orientation) {
@@ -27,8 +28,10 @@ std::pair<double, double> orient_pin(double x, double y, double width,
     throw std::invalid_argument("oriented pin offset overflow");
   return {x, y};
 }
-void set_orientation(Design &d, int node, Orientation orientation) {
-  d.validate();
+namespace {
+// Touches only the node's own pins; every check and transform happens before
+// the first write, so invalid input leaves the design unchanged.
+void apply_orientation(Design &d, int node, Orientation orientation) {
   if (node < 0 || node >= static_cast<int>(d.node_x.size()) ||
       !valid_orientation(orientation))
     throw std::invalid_argument("invalid node orientation");
@@ -38,21 +41,31 @@ void set_orientation(Design &d, int node, Orientation orientation) {
   const auto old =
       d.node_orientation.empty() ? Orientation::N : d.node_orientation[node];
   const auto delta = compose(orientation, old);
-  auto x = d.pin_offset_x, y = d.pin_offset_y;
-  for (int k = d.flat_node2pin_start[node]; k < d.flat_node2pin_start[node + 1];
-       ++k) {
+  const int begin = d.flat_node2pin_start[node],
+            end = d.flat_node2pin_start[node + 1];
+  std::vector<std::pair<double, double>> pins;
+  pins.reserve(end - begin);
+  for (int k = begin; k < end; ++k) {
     const int p = d.flat_node2pin[k];
-    const auto pin =
-        orient_pin(x[p], y[p], d.node_size_x[node], d.node_size_y[node], delta);
-    x[p] = pin.first;
-    y[p] = pin.second;
+    pins.push_back(orient_pin(d.pin_offset_x[p], d.pin_offset_y[p],
+                              d.node_size_x[node], d.node_size_y[node],
+                              delta));
   }
-  auto orientations = d.node_orientation;
-  if (orientations.empty())
-    orientations.assign(d.node_x.size(), Orientation::N);
-  orientations[node] = orientation;
-  d.pin_offset_x.swap(x);
-  d.pin_offset_y.swap(y);
-  d.node_orientation.swap(orientations);
+  if (d.node_orientation.empty())
+    d.node_orientation.assign(d.node_x.size(), Orientation::N);
+  d.node_orientation[node] = orientation;
+  for (int k = begin; k < end; ++k) {
+    const int p = d.flat_node2pin[k];
+    d.pin_offset_x[p] = pins[k - begin].first;
+    d.pin_offset_y[p] = pins[k - begin].second;
+  }
+}
+} // namespace
+void set_orientation(Design &d, int node, Orientation orientation) {
+  d.validate();
+  apply_orientation(d, node, orientation);
+}
+void set_orientation_unchecked(Design &d, int node, Orientation orientation) {
+  apply_orientation(d, node, orientation);
 }
 } // namespace DreamPlace::native

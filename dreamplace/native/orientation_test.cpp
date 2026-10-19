@@ -94,6 +94,29 @@ int main() {
     rejects([&] { set_orientation(d, -1, Orientation::N); });
     check(d.pin_offset_x == oriented.pin_offset_x &&
           d.pin_offset_y == oriented.pin_offset_y);
+    // The unchecked variant performs the same transform and rejections.
+    {
+      auto checked = design(), fast = checked;
+      for (auto a : all)
+        for (auto b : all) {
+          set_orientation(checked, 0, a);
+          set_orientation_unchecked(fast, 0, a);
+          set_orientation(checked, 0, b);
+          set_orientation_unchecked(fast, 0, b);
+          check(checked.pin_offset_x == fast.pin_offset_x &&
+                checked.pin_offset_y == fast.pin_offset_y &&
+                checked.node_orientation == fast.node_orientation);
+        }
+      const auto before = fast;
+      rejects([&] { set_orientation_unchecked(fast, 2, Orientation::S); });
+      rejects([&] {
+        set_orientation_unchecked(fast, 0, static_cast<Orientation>(4));
+      });
+      rejects([&] { set_orientation_unchecked(fast, 3, Orientation::N); });
+      check(fast.pin_offset_x == before.pin_offset_x &&
+            fast.pin_offset_y == before.pin_offset_y &&
+            fast.node_orientation == before.node_orientation);
+    }
     auto invalid = d;
     invalid.node_orientation.pop_back();
     rejects([&] { invalid.validate(); });

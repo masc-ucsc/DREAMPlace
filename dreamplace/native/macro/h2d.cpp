@@ -43,8 +43,11 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
           "fixed constraint conflicts with fixed input: " + fixed.name);
     working.node_x[i] = fixed.x;
     working.node_y[i] = fixed.y;
-    set_orientation(working, i, fixed.orientation);
+    // Validating the whole design per constraint is O(constraints x design).
+    set_orientation_unchecked(working, i, fixed.orientation);
   }
+  if (!input.fixed.empty())
+    working.validate();
 
   Topology t = seed_topology(working, info, input.dataflow, p, input);
   Result out;

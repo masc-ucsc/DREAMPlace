@@ -15,4 +15,9 @@ std::pair<double, double> orient_pin(double x, double y, double width,
 // Explicit operation, including on fixed nodes; place() itself preserves them.
 // Invalid input leaves the design unchanged.
 void set_orientation(Design &design, int node, Orientation orientation);
+// Same, without validating the whole design first (O(pins of the node) instead
+// of O(design)). The caller must have validated `design` and must validate it
+// again after a batch of edits; node and orientation are still checked.
+void set_orientation_unchecked(Design &design, int node,
+                               Orientation orientation);
 } // namespace DreamPlace::native
