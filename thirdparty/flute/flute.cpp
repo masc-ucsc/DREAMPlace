@@ -1,7 +1,9 @@
 #include "flute.hpp"
 
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace flute {
 
@@ -36,14 +38,15 @@ Tree dmergetree(Tree t1, Tree t2);
 Tree hmergetree(Tree t1, Tree t2, int* s);
 Tree vmergetree(Tree t1, Tree t2);
 
-void readLUT(const char* powv, const char* post) {
+void readLUT(const char *powv, const char *post) {
   static bool LUTread = false;
-  if (LUTread) return;
+  if (LUTread)
+    return;
   // LUTread is set only after a complete load: a failed attempt must not make a
   // later flute() call run against empty tables.
 
   FILE *fpwv, *fprt;
-  struct csoln* p;
+  struct csoln *p;
   int d, i, j, k, kk, ns, nn, ne;
   unsigned char line[99], *linep, c;
   unsigned char charnum[256];
@@ -54,7 +57,7 @@ void readLUT(const char* powv, const char* post) {
       charnum[i] = i - '0';
     else if (i >= 'A')
       charnum[i] = i - 'A' + 10;
-    else  // if (i=='$' || i=='\n' || ... )
+    else // if (i=='$' || i=='\n' || ... )
       charnum[i] = 0;
 
     div16[i] = i / 16;
@@ -75,76 +78,119 @@ void readLUT(const char* powv, const char* post) {
 #else
   fprt = nullptr;
 #endif
-  const auto close_tables = [&] {
-    fclose(fpwv);
-    if (fprt != nullptr) fclose(fprt);
+  const std::unique_ptr<FILE, decltype(&fclose)> powv_file(fpwv, fclose);
+  const std::unique_ptr<FILE, decltype(&fclose)> post_file(fprt, fclose);
+  // Keep partial allocations private until both tables have loaded. A failed
+  // read can then be retried without leaking solutions or retaining aliases.
+  std::vector<std::unique_ptr<csoln, decltype(&std::free)>> allocations;
+  const auto invalid = [] {
+    throw std::runtime_error("FLUTE: invalid or truncated lookup table");
   };
+  try {
 
-  for (d = 4; d <= DEGREE; d++) {
-    for (i = 0; i <= 255; i++) {
-      divd[i] = i / d;
-      modd[i] = i % d;
-    }
-    dsq = d * d;
+    for (d = 4; d <= DEGREE; d++) {
+      for (i = 0; i <= 255; i++) {
+        divd[i] = i / d;
+        modd[i] = i % d;
+      }
+      dsq = d * d;
 
-    (void)fscanf(fpwv, "d=%d\n", &d);
+      int degree = 0;
+      if (fscanf(fpwv, "d=%d\n", &degree) != 1 || degree != d)
+        invalid();
 #if FLUTEROUTING == 1
-    (void)fscanf(fprt, "d=%d\n", &d);
+      if (fscanf(fprt, "d=%d\n", &degree) != 1 || degree != d)
+        invalid();
 #endif
-    for (k = 0; k < numgrp[d]; k++) {
-      ns = (int)charnum[fgetc(fpwv)];
+      for (k = 0; k < numgrp[d]; k++) {
+        const int count = fgetc(fpwv);
+        if (count == EOF)
+          invalid();
+        ns = (int)charnum[count];
+        if (ns > MPOWV)
+          invalid();
 
-      if (ns == 0) {  // same as some previous group
-        (void)fscanf(fpwv, "%d\n", &kk);
-        numsoln[d][k] = numsoln[d][kk];
-        LUT[d][k] = LUT[d][kk];
-      } else {
-        fgetc(fpwv);  // '\n'
-        numsoln[d][k] = ns;
-        p = (struct csoln*)malloc(ns * sizeof(struct csoln));
-        LUT[d][k] = p;
-        for (i = 1; i <= ns; i++) {
-          linep = (unsigned char*)fgets((char*)line, 99, fpwv);
-          if (linep == nullptr) {
-            close_tables();
-            throw std::runtime_error("FLUTE: truncated lookup table");
-          }
-          p->parent = charnum[*(linep++)];
-          j = 0;
-          while ((p->seg[j++] = charnum[*(linep++)]) != 0)
-            ;
-          j = 10;
-          while ((p->seg[j--] = charnum[*(linep++)]) != 0)
-            ;
+        if (ns == 0) { // same as some previous group
+          if (fscanf(fpwv, "%d\n", &kk) != 1 || kk < 0 || kk >= k)
+            invalid();
+          numsoln[d][k] = numsoln[d][kk];
+          LUT[d][k] = LUT[d][kk];
+        } else {
+          if (fgetc(fpwv) != '\n')
+            invalid();
+          numsoln[d][k] = ns;
+          p = (struct csoln *)malloc(ns * sizeof(struct csoln));
+          if (p == nullptr)
+            throw std::bad_alloc();
+          allocations.emplace_back(p, std::free);
+          LUT[d][k] = p;
+          for (i = 1; i <= ns; i++) {
+            linep = (unsigned char *)fgets((char *)line, 99, fpwv);
+            if (linep == nullptr)
+              invalid();
+            const auto *line_end =
+                line + std::char_traits<char>::length(
+                           reinterpret_cast<const char *>(line));
+            if (line_end - linep < 3)
+              invalid();
+            p->parent = charnum[*(linep++)];
+            j = 0;
+            do {
+              if (j >= 12 || linep >= line_end)
+                invalid();
+              p->seg[j++] = charnum[*(linep++)];
+            } while (p->seg[j - 1] != 0);
+            j = 10;
+            do {
+              if (j < 0 || linep >= line_end)
+                invalid();
+              p->seg[j--] = charnum[*(linep++)];
+            } while (p->seg[j + 1] != 0);
 #if FLUTEROUTING == 1
-          nn = 2 * d - 2;
-          ne = 2 * d - 3;
-          (void)fread(line, 1, d - 2, fprt);
-          linep = line;
-          for (j = d; j < nn; j++) {
-            c = *(linep++);
-            if (c >= dsq) {
-              c -= dsq;
-              p->neighbor[divd[c]] = j;
-              ne--;
+            nn = 2 * d - 2;
+            ne = 2 * d - 3;
+            if (fread(line, 1, d - 2, fprt) != size_t(d - 2))
+              invalid();
+            linep = line;
+            for (j = d; j < nn; j++) {
+              c = *(linep++);
+              if (c >= dsq) {
+                c -= dsq;
+                if (divd[c] >= nn)
+                  invalid();
+                p->neighbor[divd[c]] = j;
+                ne--;
+              }
+              p->row[j - d] = divd[c];
+              p->col[j - d] = modd[c];
+              p->neighbor[j] = j; // initialized
             }
-            p->row[j - d] = divd[c];
-            p->col[j - d] = modd[c];
-            p->neighbor[j] = j;  // initialized
-          }
-          (void)fread(line, 1, ne + 1, fprt);
-          linep = line;  // last char = \n
-          for (j = 0; j < ne; j++) {
-            c = *(linep++);
-            p->neighbor[div16[c]] = mod16[c];
-          }
+            if (ne < 0 || fread(line, 1, ne + 1, fprt) != size_t(ne + 1))
+              invalid();
+            linep = line; // last char = \n
+            for (j = 0; j < ne; j++) {
+              c = *(linep++);
+              if (div16[c] >= nn || mod16[c] >= nn)
+                invalid();
+              p->neighbor[div16[c]] = mod16[c];
+            }
 #endif
-          p++;
+            p++;
+          }
         }
       }
     }
+  } catch (...) {
+    for (auto &row : LUT)
+      for (auto &entry : row)
+        entry = nullptr;
+    for (auto &row : numsoln)
+      for (auto &entry : row)
+        entry = 0;
+    throw;
   }
-  close_tables();
+  for (auto &allocation : allocations)
+    (void)allocation.release();
   LUTread = true;
 }
 
