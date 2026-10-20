@@ -620,6 +620,30 @@ template <typename T> void zero_area_fixed_terminals() {
   check(bins[0] == std::vector<int>({0, 2}) && bins[1].empty(),
         "zero-area fixed terminals must not become Abacus row obstacles");
   DreamPlace::sortNodesInRow(x, y, w, h, 1, bins[0]);
+  DreamPlace::DetailedPlaceDB<T> db{};
+  db.num_nodes = 5;
+  db.num_movable_nodes = 1;
+  db.num_sites_y = 2;
+  db.yl = 0;
+  db.row_height = 1;
+  db.node_size_x = w;
+  db.node_size_y = h;
+  std::vector<std::vector<int>> rows(2);
+  db.make_row2node_map(x, y, rows, 1);
+  check(rows[0] == std::vector<int>({0, 2}) && rows[1].empty(),
+        "zero-area fixed terminals must not truncate detailed-placement row space");
+}
+void fractional_io_detailed_placement() {
+  auto d = design();
+  d.node_x.back() = 35.5;
+  d.node_y.back() = 25.5;
+  Options o;
+  o.max_iterations = 0;
+  o.add_fillers = false;
+  const auto result = place(d, o);
+  check(result.legal && is_legal(d), "fractional IO terminal broke detailed placement");
+  near(d.node_x.back(), 35.5, 0, "detailed placement moved fixed IO x");
+  near(d.node_y.back(), 25.5, 0, "detailed placement moved fixed IO y");
 }
 void continued_fixed_terminals() {
   auto d = design();
@@ -973,6 +997,7 @@ int main() {
     macros();
     zero_area_fixed_terminals<float>();
     zero_area_fixed_terminals<double>();
+    fractional_io_detailed_placement();
     continued_fixed_terminals();
     mixed_sizes();
     relocated_macro_obstacles();

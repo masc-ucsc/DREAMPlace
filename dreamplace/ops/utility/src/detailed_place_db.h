@@ -207,6 +207,11 @@ struct DetailedPlaceDB {
                          int num_threads) const {
     // distribute cells to rows
     for (int i = 0; i < num_nodes; ++i) {
+      // Fixed IO pseudo-terminals have no footprint. They remain connected
+      // for HPWL but must not bound the row space available to real cells.
+      if (i >= num_movable_nodes && (node_size_x[i] <= 0 || node_size_y[i] <= 0)) {
+        continue;
+      }
       // T node_xl = vx[i];
       T node_yl = vy[i];
       // T node_xh = node_xl+node_size_x[i];
