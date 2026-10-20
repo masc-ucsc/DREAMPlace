@@ -126,6 +126,12 @@ void distributeMovableAndFixedCells2BinsCPU(
     int num_bins_x, int num_bins_y, int num_nodes, int num_movable_nodes,
     std::vector<std::vector<int> >& bin_cells) {
   for (int i = 0; i < num_nodes; i += 1) {
+    // IO pseudo-terminals constrain nets but occupy no row area. Fractional
+    // coordinates can round a zero-size box into a bin and break Abacus's
+    // strictly ordered cell-edge invariant, even when it only touches a cell.
+    if (i >= num_movable_nodes && (node_size_x[i] <= 0 || node_size_y[i] <= 0)) {
+      continue;
+    }
     if (i < num_movable_nodes && roundDiv(node_size_y[i], bin_size_y) <= 1) {
       // single-row movable nodes only distribute to one bin
       int bin_id_x = (x[i] + node_size_x[i] / 2 - xl) / bin_size_x;

@@ -16,6 +16,7 @@
 #include "utility/src/utils.h"
 
 #include "independent_set_matching/src/bin2node_3d_map.h"
+#include "abacus_legalize/src/abacus_legalize_cpu.h"
 
 namespace DreamPlace {
 template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int);
@@ -607,6 +608,19 @@ void macros() {
   check(place(shifted, o).legal,
         "macro legalization with negative core origin");
 }
+template <typename T> void zero_area_fixed_terminals() {
+  const T x[] = {T(3.5), T(5.5), T(10), T(7), T(8)};
+  const T y[] = {T(0), T(.5), T(0), T(.5), T(.5)};
+  const T w[] = {T(2), T(0), T(1), T(0), T(1)};
+  const T h[] = {T(1), T(0), T(1), T(1), T(0)};
+  std::vector<std::vector<int>> bins(2);
+  DreamPlace::distributeMovableAndFixedCells2BinsCPU(
+      x, y, w, h, T(20), T(1), T(0), T(0), T(20), T(2), T(1),
+      1, 2, 5, 1, bins);
+  check(bins[0] == std::vector<int>({0, 2}) && bins[1].empty(),
+        "zero-area fixed terminals must not become Abacus row obstacles");
+  DreamPlace::sortNodesInRow(x, y, w, h, 1, bins[0]);
+}
 void continued_fixed_terminals() {
   auto d = design();
   Options o;
@@ -957,6 +971,8 @@ int main() {
     placer_instances();
     concurrent_instances();
     macros();
+    zero_area_fixed_terminals<float>();
+    zero_area_fixed_terminals<double>();
     continued_fixed_terminals();
     mixed_sizes();
     relocated_macro_obstacles();
