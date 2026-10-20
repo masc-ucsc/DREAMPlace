@@ -6,6 +6,20 @@ Torch tensors, pybind11, CUDA, Boost, Limbo, Cairo, OpenTimer, or PlaceDB.
 The upstream Python/CMake workflow is separate and retains its old dependencies.
 No submodule initialization or pip installation is needed for the Bazel build.
 
+The Poisson transform keeps each output's reduction order while traversing
+adjacent grid lanes in its inner loops. This permits SIMD without reassociating
+floating-point sums; placement defaults and the transform's complexity stay
+unchanged. `spectral_test` checks manufactured Neumann solutions on square and
+rectangular grids. For a repeatable kernel measurement:
+
+```sh
+bazel run -c opt //dreamplace/native:spectral_bench -- 1500 64 64 /tmp/fields.bin
+```
+
+The optional last argument saves potential, x-field and y-field arrays as raw
+doubles, allowing byte comparisons between builds. Time only the built binary
+when comparing performance; building is outside the measurement.
+
 ## Build and run
 
 Use Bazel 9.3.0 (selected by `.bazelversion`) and a C++23 toolchain.

@@ -33,9 +33,12 @@ void PoissonSolver::solve(const std::vector<double>& rho, std::vector<double>& p
   if (rho.size() != static_cast<size_t>(nx_ * ny_)) throw std::invalid_argument("density grid size");
   const int nx = nx_, ny = ny_;
   std::vector<double> temp(nx * ny), coeff(nx * ny);
+  // Accumulate each output in the original x order, with contiguous y lanes
+  // in the inner loop. This exposes independent outputs to SIMD without
+  // reassociating a floating-point reduction.
   for (int k = 0; k < nx; ++k)
-    for (int y = 0; y < ny; ++y)
-      for (int x = 0; x < nx; ++x) temp[k * ny + y] += cx_[k * nx + x] * rho[x * ny + y];
+    for (int x = 0; x < nx; ++x)
+      for (int y = 0; y < ny; ++y) temp[k * ny + y] += cx_[k * nx + x] * rho[x * ny + y];
   for (int k = 0; k < nx; ++k)
     for (int l = 0; l < ny; ++l) {
       double v = 0;
@@ -44,11 +47,11 @@ void PoissonSolver::solve(const std::vector<double>& rho, std::vector<double>& p
       coeff[k * ny + l] = (k || l) ? v / (wx * wx + wy * wy) : 0;
     }
   // Inverse mixed cosine/sine transforms. E = -grad(phi).
-  std::vector<double> vx(nx * ny), vy(nx * ny);
+  std::vector<double> vy(nx * ny);
   std::fill(temp.begin(), temp.end(), 0);
   for (int k = 0; k < nx; ++k)
-    for (int y = 0; y < ny; ++y)
-      for (int l = 0; l < ny; ++l) {
+    for (int l = 0; l < ny; ++l)
+      for (int y = 0; y < ny; ++y) {
         double v = coeff[k * ny + l];
         temp[k * ny + y] += cy_[l * ny + y] * v;
         vy[k * ny + y] += sy_[l * ny + y] * v * std::numbers::pi * l / height_;
@@ -57,8 +60,8 @@ void PoissonSolver::solve(const std::vector<double>& rho, std::vector<double>& p
   fx.assign(nx * ny, 0);
   fy.assign(nx * ny, 0);
   for (int x = 0; x < nx; ++x)
-    for (int y = 0; y < ny; ++y)
-      for (int k = 0; k < nx; ++k) {
+    for (int k = 0; k < nx; ++k)
+      for (int y = 0; y < ny; ++y) {
         int i = x * ny + y, j = k * ny + y;
         phi[i] += cx_[k * nx + x] * temp[j];
         fx[i] += sx_[k * nx + x] * temp[j] * std::numbers::pi * k / width_;

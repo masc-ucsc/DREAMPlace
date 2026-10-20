@@ -90,6 +90,20 @@ cc_binary(
 ]]
 
 cc_test(
+    name = "spectral_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["spectral_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_binary(
+    name = "spectral_bench",
+    srcs = ["spectral_bench.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
     name = "placement_test",
     size = "small",
     timeout = "short",
