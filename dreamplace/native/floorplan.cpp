@@ -384,7 +384,10 @@ FloorplanSnap snap_floorplan(const std::vector<FloorplanCircle> &circles,
     } // sibling scope
     for (size_t k = 0; k < ids.size(); ++k) {
       const int i = ids[k];
-      if (o.contain_circles) {
+      // std::clamp is undefined when lo > hi; a circle wider than the core
+      // keeps its fitted center and is reported through the boundary violation.
+      if (o.contain_circles &&
+          2 * circles[i].radius <= std::min(xh - xl, yh - yl)) {
         x[2 * k] = std::clamp(x[2 * k], xl + circles[i].radius,
                               xh - circles[i].radius);
         x[2 * k + 1] = std::clamp(x[2 * k + 1], yl + circles[i].radius,

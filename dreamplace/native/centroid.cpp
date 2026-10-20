@@ -56,6 +56,32 @@ Moment group_moment(const Design &d, const CentroidGroup &g,
     result.merge(node(d, n));
   return result;
 }
+// Chain rule from a gradient with respect to each group's moving centroid back
+// to its members: explicit nodes directly, colored nodes through every color.
+void scatter_group_gradient(const Design &d, const std::vector<double> &gx,
+                            const std::vector<double> &gy,
+                            const std::vector<Moment> &moments, Gradient &out) {
+  std::vector<double> cx(d.centroid_color_names.size()), cy(cx.size());
+  for (size_t k = 0; k < moments.size(); ++k) {
+    const double x = gx[k] / moments[k].area, y = gy[k] / moments[k].area;
+    const auto &g = d.centroid_groups[k];
+    for (int c : g.colors) {
+      cx[c] += x;
+      cy[c] += y;
+    }
+    for (int n : g.nodes) {
+      out.x[n] += d.centroid_node_area[n] * x;
+      out.y[n] += d.centroid_node_area[n] * y;
+    }
+  }
+  for (size_t n = 0; n < d.node_centroid_color.size(); ++n) {
+    const int c = d.node_centroid_color[n];
+    if (c >= 0) {
+      out.x[n] += d.centroid_node_area[n] * cx[c];
+      out.y[n] += d.centroid_node_area[n] * cy[c];
+    }
+  }
+}
 } // namespace
 std::vector<CentroidSample> centroid_summary(const Design &d) {
   auto colors = color_moments(d);
@@ -260,26 +286,7 @@ Gradient centroid_parent_attraction(const Design &d, double lambda,
     if (max_distance)
       *max_distance = std::max(*max_distance, distance / radius);
   }
-  std::vector<double> cx(colors.size()), cy(colors.size());
-  for (size_t k = 0; k < moments.size(); ++k) {
-    const double x = gx[k] / moments[k].area, y = gy[k] / moments[k].area;
-    const auto &g = d.centroid_groups[k];
-    for (int c : g.colors) {
-      cx[c] += x;
-      cy[c] += y;
-    }
-    for (int n : g.nodes) {
-      out.x[n] += d.centroid_node_area[n] * x;
-      out.y[n] += d.centroid_node_area[n] * y;
-    }
-  }
-  for (size_t n = 0; n < d.node_centroid_color.size(); ++n) {
-    const int c = d.node_centroid_color[n];
-    if (c >= 0) {
-      out.x[n] += d.centroid_node_area[n] * cx[c];
-      out.y[n] += d.centroid_node_area[n] * cy[c];
-    }
-  }
+  scatter_group_gradient(d, gx, gy, moments, out);
   return out;
 }
 // A circle reserves the anchored physical area at the caller's requested
@@ -463,27 +470,7 @@ Gradient centroid_alignment(const Design &d, double lambda_x, double lambda_y,
   out.value = centers.value;
   out.x.assign(d.node_x.size(), 0);
   out.y.assign(d.node_y.size(), 0);
-  std::vector<double> cx(colors.size()), cy(colors.size());
-  for (size_t k = 0; k < moments.size(); ++k) {
-    const double x = centers.x[k] / moments[k].area,
-                 y = centers.y[k] / moments[k].area;
-    const auto &g = d.centroid_groups[k];
-    for (int c : g.colors) {
-      cx[c] += x;
-      cy[c] += y;
-    }
-    for (int n : g.nodes) {
-      out.x[n] += d.centroid_node_area[n] * x;
-      out.y[n] += d.centroid_node_area[n] * y;
-    }
-  }
-  for (size_t n = 0; n < d.node_centroid_color.size(); ++n) {
-    const int c = d.node_centroid_color[n];
-    if (c >= 0) {
-      out.x[n] += d.centroid_node_area[n] * cx[c];
-      out.y[n] += d.centroid_node_area[n] * cy[c];
-    }
-  }
+  scatter_group_gradient(d, centers.x, centers.y, moments, out);
   return out;
 }
 

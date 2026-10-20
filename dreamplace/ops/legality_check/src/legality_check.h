@@ -272,7 +272,7 @@ bool overlapCheck(const T* node_size_x, const T* node_size_y, const T* x,
                 "node %d (%g, %g, %g, %g) site (%d, %d), gap %g\n",
                 i, yl + i * row_height, yl + (i + 1) * row_height, prev_node_id,
                 prev_xl, prev_yl, prev_xh, prev_yh, node_id, cur_xl, cur_yl,
-                cur_xh, cur_yh, cur_site_xl, cur_site_xh,
+                cur_xh, cur_yh, int(cur_site_xl), int(cur_site_xh),
                 prev_xh - cur_xl);
             legal_flag = false;
           }
