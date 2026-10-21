@@ -63,10 +63,16 @@ void fft(std::vector<Complex> &a, bool inverse, const TransformPlan &plan) {
     for (int i = 0; i < n; i += len) {
       Complex w = 1;
       for (int j = 0; j < len / 2; ++j) {
-        const Complex u = a[i + j], v = a[i + j + len / 2] * w;
+        const Complex u = a[i + j], z = a[i + j + len / 2];
+        const double wr = w.real(), wi = w.imag();
+        // Preserve product order without generic complex-multiply recovery
+        // dispatch in the finite FFT butterfly hot loop.
+        const Complex v(z.real() * wr - z.imag() * wi,
+                        z.real() * wi + z.imag() * wr);
         a[i + j] = u + v;
         a[i + j + len / 2] = u - v;
-        w *= root;
+        w = Complex(wr * root.real() - wi * root.imag(),
+                    wr * root.imag() + wi * root.real());
       }
     }
   }
