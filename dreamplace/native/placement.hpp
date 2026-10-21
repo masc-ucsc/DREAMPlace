@@ -176,6 +176,12 @@ struct Options {
   double local_density_weight = 0, local_density_range = 4,
          local_density_jitter = .01;
   int local_density_bins = 512;
+  // Opt-in protection from extra routing/local spreading, using the largest
+  // incident active net weight w >= 1: mobility = 1-a+a/w. Hosts supply timing
+  // weights; this is not an STA or hold-slack model. Keeps full source charge
+  // and the unit-area response in the inflated footprint. Macro forces and
+  // wirelength attraction remain unchanged.
+  double timing_spread_weight = 0; // a in [0,1]; 0 preserves the original flow
   // Extra local standard-cell pressure on movable macros. The host enables
   // it only during FP/macro GP; fixed macros never receive force.
   double macro_cell_density_weight = 0;
@@ -385,6 +391,8 @@ struct Result {
   double macro_density_pull_seconds = 0, macro_density_pull_force = 0;
   double macro_density_pull_anchor_ratio = 0;
   double local_density_grid_seconds = 0;
+  int timing_spread_cells = 0; // last weight update, eligible cells with m < 1
+  double timing_spread_min_mobility = 1;
   double initial_hpwl = 0, hpwl = 0, overflow = 0;
   bool converged = false;
   bool legal = false;

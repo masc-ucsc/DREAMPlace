@@ -990,11 +990,126 @@ void power2_grid() {
     check(ceil_power2(v) == expected[v], "ceil_power2 mismatch");
   check(ceil_power2(-3) == 1, "ceil_power2 of a negative count");
 }
+void timing_spreading() {
+  // Symmetric crowded cells with coincident fixed terminals: initial WL force
+  // is zero even with different net weights. Movement tests the spreading
+  // policy itself, rather than the existing timing-weighted WL attraction.
+  Design seed;
+  seed.layout = {0, 0, 64, 64, 1, 1};
+  seed.num_movable = 2;
+  seed.node_x = {29.5, 33.5, 30, 34};
+  seed.node_y = {31.5, 31.5, 32, 32};
+  seed.node_size_x = {1, 1, 0, 0};
+  seed.node_size_y = {1, 1, 0, 0};
+  seed.node_macro = {0, 0, 0, 0};
+  seed.node_inflatable = {1, 1, 0, 0};
+  seed.pin2node = {0, 2, 1, 3};
+  seed.pin_offset_x = seed.pin_offset_y = {.5, 0, .5, 0};
+  seed.flat_net2pin = {0, 1, 2, 3};
+  seed.flat_net2pin_start = {0, 2, 4};
+  seed.net_weights = {5, 1};
+  seed.build_maps();
+  Options o;
+  o.bins_x = o.bins_y = 8;
+  o.max_iterations = 1;
+  o.add_fillers = o.legalize = o.detailed_place = false;
+  o.local_density_jitter = 0;
+  o.local_density_bins = 64;
+  o.target_density = .01;
+  auto plain = seed, protected_cells = seed;
+  place(plain, o);
+  o.timing_spread_weight = 1;
+  place(protected_cells, o);
+  check(plain.node_x == protected_cells.node_x &&
+            plain.node_y == protected_cells.node_y,
+        "timing spreading changed ordinary physical-density force");
+  o.local_density_weight = 20;
+  protected_cells = seed;
+  const auto protected_result = place(protected_cells, o);
+  const double critical_move = seed.node_x[0] - protected_cells.node_x[0];
+  const double slack_move = protected_cells.node_x[1] - seed.node_x[1];
+  check(critical_move > 0 && critical_move < .5 * slack_move,
+        "critical cell must receive less local spreading than its slack neighbor");
+  check(protected_result.timing_spread_cells == 1 &&
+            protected_result.timing_spread_min_mobility == .2,
+        "timing spreading census");
+  check(protected_cells.node_x[2] == seed.node_x[2] &&
+            protected_cells.node_y[3] == seed.node_y[3] &&
+            protected_cells.node_size_x == seed.node_size_x,
+        "timing spreading changed fixed terminals or physical sizes");
+  auto uniform = seed;
+  uniform.net_weights = {1, 1};
+  auto uniform_on = uniform;
+  place(uniform_on, o);
+  o.timing_spread_weight = 0;
+  place(uniform, o);
+  check(uniform.node_x == uniform_on.node_x &&
+            uniform.node_y == uniform_on.node_y,
+        "unit weights must leave spreading exactly unchanged");
+  auto masked = seed;
+  masked.net_mask[0] = 0;
+  o.timing_spread_weight = 1;
+  check(place(masked, o).timing_spread_cells == 0,
+        "masked nets must not protect cells from spreading");
+  // A timing checkpoint changes which cell is critical. The cached per-cell
+  // mobility must follow the new weights, even without topology replacement.
+  auto refreshed = seed;
+  o.max_iterations = 2;
+  o.checkpoint_interval = 1;
+  o.checkpoint = [](const Design &, int) {
+    GpUpdate update;
+    update.net_weights = {1, 2};
+    return update;
+  };
+  const auto refreshed_result = place(refreshed, o);
+  check(refreshed_result.timing_spread_cells == 1 &&
+            refreshed_result.timing_spread_min_mobility == .5,
+        "checkpoint did not refresh spreading priority");
+  o.checkpoint = {};
+  // A fixed-terminal crossing net produces the same demand around both
+  // movable cells without adding WL force to them. Protection must retain
+  // outward movement while allowing the slack cell to move farther.
+  o.local_density_weight = 0;
+  o.max_iterations = 1;
+  o.routability = true;
+  o.route_capacity_h = o.route_capacity_v = 1e-6;
+  auto routed = seed;
+  routed.node_x.insert(routed.node_x.end(), {20, 44});
+  routed.node_y.insert(routed.node_y.end(), {28, 36});
+  routed.node_size_x.insert(routed.node_size_x.end(), {0, 0});
+  routed.node_size_y.insert(routed.node_size_y.end(), {0, 0});
+  routed.node_macro.insert(routed.node_macro.end(), {0, 0});
+  routed.node_inflatable.insert(routed.node_inflatable.end(), {0, 0});
+  routed.pin2node.insert(routed.pin2node.end(), {4, 5});
+  routed.pin_offset_x.insert(routed.pin_offset_x.end(), {0, 0});
+  routed.pin_offset_y.insert(routed.pin_offset_y.end(), {0, 0});
+  routed.flat_net2pin.insert(routed.flat_net2pin.end(), {4, 5});
+  routed.flat_net2pin_start.push_back(6);
+  routed.net_weights.push_back(1);
+  routed.net_mask.push_back(1);
+  routed.build_maps();
+  GpState state;
+  place(routed, o, &state);
+  check(state.inflation[0] > 1 && state.inflation[1] > 1,
+        "routing spreading fixture did not create congestion");
+  check(seed.node_x[0] - routed.node_x[0] > 0 &&
+            seed.node_x[0] - routed.node_x[0] < routed.node_x[1] - seed.node_x[1],
+        "routing receiver protection must favor the slack cell");
+  auto changed = o;
+  changed.timing_spread_weight = .5;
+  rejects([&] { place(routed, changed, &state); });
+  for (double value : {-1., 1.01, std::numeric_limits<double>::quiet_NaN()}) {
+    o.timing_spread_weight = value;
+    auto bad = seed;
+    rejects([&] { place(bad, o); });
+  }
+}
 } // namespace
 int main() {
   try {
     spectral();
     power2_grid();
+    timing_spreading();
     far_fixed_nodes();
     threaded_determinism();
     gradients();

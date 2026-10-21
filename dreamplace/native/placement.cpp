@@ -108,6 +108,9 @@ void options_check(const Options &o) {
               (o.auxiliary_bins == 0 ||
                (o.auxiliary_bins >= 2 && o.auxiliary_bins <= 1024)),
           "invalid local density controls");
+  require(finite(o.timing_spread_weight) && o.timing_spread_weight >= 0 &&
+              o.timing_spread_weight <= 1,
+          "timing spreading weight must be in [0,1]");
   require(finite(o.macro_cell_density_weight) &&
               o.macro_cell_density_weight >= 0,
           "invalid macro cell density weight");
@@ -865,6 +868,10 @@ Result place(Design &design, const Options &options, GpState *state) {
   if (o.macro_cell_density_weight) {
     salt(std::bit_cast<std::uint64_t>(o.macro_cell_density_weight));
   }
+  if (o.timing_spread_weight) {
+    salt(0x74696d6573707264ULL);
+    salt(std::bit_cast<std::uint64_t>(o.timing_spread_weight));
+  }
   if (o.macro_density_pull_weight) {
     salt(std::bit_cast<std::uint64_t>(o.macro_density_pull_weight));
     salt(std::bit_cast<std::uint64_t>(o.macro_density_pull_range));
@@ -1170,6 +1177,40 @@ Result place(Design &design, const Options &options, GpState *state) {
     if (warm) {
       inflation = state->inflation;
     }
+    // Refresh only when weights/connectivity change, not on every GP step.
+    // The maximum protects a critical branch even if other incident nets have
+    // slack. Masked nets, macros, fixed nodes and virtual fillers do not enter.
+    const auto make_spread_mobility = [&] {
+      std::vector<double> mobility;
+      r.timing_spread_cells = 0;
+      r.timing_spread_min_mobility = 1;
+      if (o.timing_spread_weight == 0) {
+        return mobility;
+      }
+      mobility.assign(n, 1);
+      for (int i = 0; i < d.num_movable; ++i) {
+        if (!d.node_macro.empty() && d.node_macro[i]) {
+          continue;
+        }
+        double weight = 1;
+        for (int k = d.flat_node2pin_start[i];
+             k < d.flat_node2pin_start[i + 1]; ++k) {
+          const int net = d.pin2net[d.flat_node2pin[k]];
+          if (d.net_mask[net]) {
+            weight = std::max(weight, d.net_weights[net]);
+          }
+        }
+        mobility[i] =
+            1 - o.timing_spread_weight + o.timing_spread_weight / weight;
+        if (mobility[i] < 1) {
+          ++r.timing_spread_cells;
+          r.timing_spread_min_mobility =
+              std::min(r.timing_spread_min_mobility, mobility[i]);
+        }
+      }
+      return mobility;
+    };
+    auto spread_mobility = make_spread_mobility();
     std::vector<double> sx(n), sy(n), ox(n), oy(n), ratio(n);
     const auto sharp = [&](int i) {
       return (i < d.num_movable && o.exact_cell_density &&
@@ -1609,11 +1650,21 @@ Result place(Design &design, const Options &options, GpState *state) {
             cell_area * o.target_density * pitch / (2 * std::acos(-1.));
         const double scale =
             o.local_density_weight * base / std::max({reference, force, 1e-12});
-        r.local_density_force = std::max(r.local_density_force, scale * force);
+        double applied_force = 0;
         for (int i = 0; i < d.num_movable; ++i) {
-          wg.x[i] += scale * lg.x[i];
-          wg.y[i] += scale * lg.y[i];
+          // Calibrate before attenuation; otherwise a uniformly critical
+          // region would have its protection normalized away.
+          const double cell_scale =
+              spread_mobility.empty() ? scale : scale * spread_mobility[i];
+          wg.x[i] += cell_scale * lg.x[i];
+          wg.y[i] += cell_scale * lg.y[i];
+          if (!spread_mobility.empty()) {
+            applied_force += cell_scale * (std::abs(lg.x[i]) + std::abs(lg.y[i]));
+          }
         }
+        r.local_density_force = std::max(
+            r.local_density_force, spread_mobility.empty() ? scale * force
+                                                         : applied_force);
         r.local_density_seconds += std::chrono::duration<double>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count();
@@ -1951,8 +2002,17 @@ Result place(Design &design, const Options &options, GpState *state) {
                                        : 0;
           double pre = std::max(1., degree + density_weight * d.node_size_x[i] *
                                                  d.node_size_y[i]);
-          gx[i] = (wg.x[i] + density_weight * dg.x[i]) / pre;
-          gy[i] = (wg.y[i] + density_weight * dg.y[i]) / pre;
+          double cell_density_weight = density_weight;
+          if (o.routability && !spread_mobility.empty() && inflation[i] > 1) {
+            // Keep the full inflated source in the field so neighbors still
+            // see the hotspot. Attenuate only this receiver's extra charge:
+            // unit-area response + mobility * virtual inflation response,
+            // both integrated over the same inflated footprint.
+            cell_density_weight *=
+                (1 + (inflation[i] - 1) * spread_mobility[i]) / inflation[i];
+          }
+          gx[i] = (wg.x[i] + cell_density_weight * dg.x[i]) / pre;
+          gy[i] = (wg.y[i] + cell_density_weight * dg.y[i]) / pre;
           if (!finite(gx[i]) || !finite(gy[i])) {
             throw std::runtime_error("nonfinite placement gradient");
           }
@@ -2209,6 +2269,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           objective_changed = changed;
         }
         if (objective_changed) {
+          spread_mobility = make_spread_mobility();
           area = 0;
           double inflated = 0;
           for (int i = 0; i < original; ++i) {
