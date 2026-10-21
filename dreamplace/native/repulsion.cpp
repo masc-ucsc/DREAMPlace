@@ -99,6 +99,30 @@ std::pair<int, int> automatic_bins(const Design &d) {
   };
   return {bins(d.layout.xh - d.layout.xl), bins(d.layout.yh - d.layout.yl)};
 }
+std::pair<int, int> dynamic_bins(const Design &d, double target, int maximum) {
+  double area = 0;
+  int count = 0;
+  for (int i = 0; i < d.num_movable; ++i) {
+    const double a = d.node_size_x[i] * d.node_size_y[i];
+    if (a > 0) {
+      area += a;
+      ++count;
+    }
+  }
+  if (!count)
+    return {32, 32};
+  const double width = d.layout.xh - d.layout.xl,
+               height = d.layout.yh - d.layout.yl;
+  const double ideal = width * height * target / (area / count);
+  int ratio = 1;
+  while (2 * ratio <= std::max(width, height) / std::min(width, height) &&
+         2 * ratio <= maximum / 2)
+    ratio *= 2;
+  int n = 2;
+  while (n < maximum / ratio && 4. * n * n * ratio <= ideal)
+    n *= 2;
+  return width > height ? std::pair{n * ratio, n} : std::pair{n, n * ratio};
+}
 Gradient macro_overlap(const Design &d, double weight) {
   Gradient g;
   g.x.resize(d.node_x.size());

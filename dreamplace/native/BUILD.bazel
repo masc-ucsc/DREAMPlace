@@ -13,6 +13,7 @@ cc_library(
         "density_force.cpp",
         "density_map.cpp",
         "kernels.cpp",
+        "local_density.cpp",
         "orientation.cpp",
         "placement.cpp",
         "rudy.cpp",
@@ -23,6 +24,7 @@ cc_library(
     ],
     hdrs = [
         "constraints.hpp",
+        "local_density.hpp",
         "floorplan.hpp",
         "orientation.hpp",
         "placement.hpp",
@@ -237,5 +239,19 @@ cc_test(
 cc_binary(
     name = "floorplan_demo",
     srcs = ["floorplan_demo.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "local_density_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["local_density_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_binary(
+    name = "local_density_demo",
+    srcs = ["local_density_demo.cpp"],
     deps = [":placer"],
 )

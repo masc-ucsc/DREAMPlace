@@ -337,23 +337,25 @@ void weighted_detailed_placement() {
 void weighted_detailed_placement_wide_die() {
   const double w = 8e6;
   Design d;
-  // Matching only solves sets of >= 3 equal-size cells sharing a bin, and (upstream
-  // quirk) needs two such sets to run at all. Cells 0-3 are the 1-wide set that must
-  // swap; cells 4-6 are a 2-wide filler set. One cell per row keeps k_reorder from
-  // doing the swap first.
+  // Matching only solves sets of >= 3 equal-size cells sharing a bin, and
+  // (upstream quirk) needs two such sets to run at all. Cells 0-3 are the
+  // 1-wide set that must swap; cells 4-6 are a 2-wide filler set. One cell per
+  // row keeps k_reorder from doing the swap first.
   d.layout = {0, 0, w, 7, 1, 1};
   d.num_movable = 7;
   d.node_x = {1, 3, 5, 7, 1, 4, 7, 0, w};
   d.node_y = {0, 1, 2, 3, 4, 5, 6, 0, 0};
   d.node_size_x = {1, 1, 1, 1, 2, 2, 2, 0, 0};
   d.node_size_y = {1, 1, 1, 1, 1, 1, 1, 0, 0};
-  // net0: cell0-right (heavy), net1: cell3-left (heavy), net2: cell1-left, net3: cell2-right
+  // net0: cell0-right (heavy), net1: cell3-left (heavy), net2: cell1-left,
+  // net3: cell2-right
   d.pin2node = {0, 8, 3, 7, 1, 7, 2, 8};
   d.pin_offset_x.assign(8, 0);
   d.pin_offset_y.assign(8, 0);
   d.flat_net2pin = {0, 1, 2, 3, 4, 5, 6, 7};
   d.flat_net2pin_start = {0, 2, 4, 6, 8};
-  d.net_weights = {1000, 1000, 1, 1};  // weight * die span exceeds INT_MAX unscaled
+  d.net_weights = {1000, 1000, 1,
+                   1}; // weight * die span exceeds INT_MAX unscaled
   d.build_maps();
   const double before = hpwl(d);
   std::vector<DetailedSample> samples;
@@ -477,8 +479,8 @@ void concurrent_instances() {
   }
 }
 // Floating-point atomic accumulation into the density map makes the result
-// depend on thread arrival order. Repeated identical runs must agree exactly for
-// a fixed worker count, including when OpenMP is enabled (--config=openmp).
+// depend on thread arrival order. Repeated identical runs must agree exactly
+// for a fixed worker count, including when OpenMP is enabled (--config=openmp).
 void threaded_determinism() {
   Design d;
   d.layout = {0, 0, 64, 32, 1, 1};
@@ -931,7 +933,18 @@ void moving_terminals() {
     return std::vector<TerminalPosition>{};
   };
   o.add_fillers = true;
-  rejects([&] { place(base, o); });
+  o.filler_max_count = 64;
+  const auto physical_count = base.node_x.size();
+  o.terminal_update = [&](const Design &snapshot, int) {
+    snapshot.validate();
+    check(snapshot.node_x.size() == physical_count,
+          "virtual fillers escaped to IO callback");
+    return std::vector<TerminalPosition>{};
+  };
+  const auto filled = place(base, o);
+  check(filled.filler_count > 0 && filled.filler_count <= 64 &&
+            base.node_x.size() == physical_count,
+        "virtual filler budget or export");
   o.add_fillers = false;
   GpState state;
   rejects([&] { place(base, o, &state); });

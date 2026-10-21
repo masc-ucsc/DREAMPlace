@@ -156,6 +156,24 @@ struct Options {
   int bins_x = 32, bins_y = 32;
   // Opt-in repulsion controls. Automatic bins resolve before halo padding.
   bool automatic_bins = false, exact_macro_density = false;
+  // OpenROAD's movable-area/target-density rule, with a configurable resource
+  // cap. Unlike legacy automatic_bins (macro pitch), this resolves before halo
+  // padding.
+  bool dynamic_bins = false;
+  int bin_max = 512;
+  // Independent auxiliary grid; 0 follows density bins. Keeps RUDY/LG/DP
+  // resolution unchanged.
+  int auxiliary_bins = 0;
+  double local_density_weight = 0, local_density_range = 4,
+         local_density_jitter = .01;
+  int local_density_bins = 512;
+  // Extra local standard-cell pressure on movable macros. The host enables
+  // it only during FP/macro GP; fixed macros never receive force.
+  double macro_cell_density_weight = 0;
+  // Independent weak, local cell-density slope on macro receivers. Weight
+  // is relative to ordinary macro force and capped by centroid reference
+  // force when anchored. Range is in local-density bin pitches.
+  double macro_density_pull_weight = 0, macro_density_pull_range = 4;
   bool exact_cell_density =
       false; // opt-in physical footprint for movable cells
   bool adaptive_density = false, improved_routability = false;
@@ -222,6 +240,10 @@ struct Options {
   double max_step = 0.5; // fraction of a bin
   // Optional H2D hooks. Zero/default controls preserve the original GP.
   double filler_width = 0;
+  // Optional virtual-particle budget. Zero retains the legacy size/count rule.
+  // A positive cap enlarges both dimensions, never the physical design.
+  int filler_max_count = 0;
+  double filler_area_fraction = 1; // fraction of whitespace density charge
   // Soft centroid cohesion, inverse coordinate units. Lambda ramps linearly
   // from zero to this value over schedule_iterations (or max_iterations).
   // Zero disables it exactly; no boxes or changes to legalization.
@@ -330,11 +352,18 @@ struct Result {
   double poisson_seconds = 0, macro_routing_seconds = 0;
   double rudy_seconds = 0;
   int rudy_calls = 0;
+  int filler_count = 0;
+  double filler_area = 0;
   double macro_alignment_seconds = 0;
   double global_placement_seconds = 0, detailed_placement_seconds = 0;
   std::vector<GpSample> history;
   std::vector<DetailedSample> detailed_history;
   int iterations = 0, selected_iteration = 0;
+  double local_density_seconds = 0, local_density_force = 0;
+  double macro_cell_density_seconds = 0, macro_cell_density_force = 0;
+  double macro_density_pull_seconds = 0, macro_density_pull_force = 0;
+  double macro_density_pull_anchor_ratio = 0;
+  double local_density_grid_seconds = 0;
   double initial_hpwl = 0, hpwl = 0, overflow = 0;
   bool converged = false;
   bool legal = false;
@@ -450,7 +479,8 @@ std::vector<CentroidSample> centroid_summary(const Design &);
 Gradient macro_overlap(const Design &, double weight);
 Gradient fixed_macro_overlap(const Design &, int bx, int by, double weight);
 std::pair<std::uint64_t, std::uint64_t> macro_overlap_counts(const Design &);
-std::pair<int, int> automatic_bins(const Design &);
+std::pair<int, int> automatic_bins(const Design &d);
+std::pair<int, int> dynamic_bins(const Design &d, double target, int maximum);
 Gradient wirelength(const Design &design, double gamma, int threads);
 void density_map(const Design &d, int bx, int by, int threads,
                  const std::vector<double> &sx, const std::vector<double> &sy,

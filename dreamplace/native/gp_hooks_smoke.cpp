@@ -2,11 +2,14 @@
 #include "dreamplace/native/placement.hpp"
 #include <cmath>
 #include <iostream>
+#include <source_location>
 #include <stdexcept>
 using namespace DreamPlace::native;
-void check(bool ok) {
+void check(bool ok,
+           std::source_location where = std::source_location::current()) {
   if (!ok)
-    throw std::runtime_error("GP hook assertion failed");
+    throw std::runtime_error("GP hook assertion failed at line " +
+                             std::to_string(where.line()));
 }
 Design fixture() {
   Design d;
@@ -432,6 +435,19 @@ int main() {
     place(haloed, cp);
     check(haloed.node_size_x[0] == 2 && haloed.node_size_x[1] == 3);
     check(haloed.node_halo_x[0] == 2);
+    auto filled_resize = fixture();
+    filled_resize.node_macro = {0, 0, 0, 0, 0};
+    auto filler_resize_options = cp;
+    filler_resize_options.checkpoint = resize_callback;
+    filler_resize_options.add_fillers = true;
+    filler_resize_options.target_density = .5;
+    filler_resize_options.filler_max_count = 64;
+    filler_resize_options.filler_area_fraction = .5;
+    filler_resize_options.min_iterations = filler_resize_options.max_iterations;
+    const auto resize_result = place(filled_resize, filler_resize_options);
+    check(resize_result.filler_count > 0 && resize_result.filler_count <= 64);
+    check(filled_resize.node_size_x[1] == 3 &&
+          filled_resize.node_x.size() == 5);
     auto invalid = fixture();
     invalid.node_macro = {1, 0, 0, 0, 0};
     const auto saved = invalid;
@@ -527,6 +543,26 @@ int main() {
       u.replacement = std::move(next);
       return u;
     };
+    auto with_virtual = topology;
+    auto virtual_options = cp;
+    virtual_options.add_fillers = true;
+    virtual_options.target_density = .5;
+    virtual_options.min_iterations = virtual_options.max_iterations;
+    virtual_options.filler_max_count = 128;
+    virtual_options.local_density_weight = 2;
+    virtual_options.macro_cell_density_weight = 2;
+    virtual_options.local_density_bins = 32;
+    virtual_options.observer = [&](const Design &snapshot, PlacementStage,
+                                   int) {
+      snapshot.validate();
+      check(snapshot.node_x.size() == 5 || snapshot.node_x.size() == 6);
+    };
+    const auto virtual_result = place(with_virtual, virtual_options);
+    check(virtual_result.filler_count > 0 &&
+          virtual_result.filler_count <= 128);
+    check(with_virtual.node_x.size() == 5 && with_virtual.num_movable == 3);
+    check(calls == std::vector<int>({50, 100}));
+    calls.clear();
     place(topology, cp);
     check(calls == std::vector<int>({50, 100}));
     check(topology.node_x.size() == 5 && topology.num_movable == 3);

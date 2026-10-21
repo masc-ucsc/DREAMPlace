@@ -20,6 +20,72 @@ The optional last argument saves potential, x-field and y-field arrays as raw
 doubles, allowing byte comparisons between builds. Time only the built binary
 when comparing performance; building is outside the measurement.
 
+## Optional local density and dynamic grids
+
+`Options::local_density_weight` defaults to zero. Positive values add a screened
+Poisson particle-mesh force on standard cells, using `local_density_bins` (512)
+and `local_density_range` (4 bin pitches). Cloud-in-cell deposition and gather
+avoid abrupt bin-boundary forces. There are no pseudo-nets, filler objects or
+physical footprint edits. Fixed standard cells supply charge but receive no
+force; macros and zero-area nodes are excluded. Tiny seeded cell jitter
+(`local_density_jitter`, .01 of dimensions) breaks identical-position symmetry.
+The force is calibrated against the ordinary GP force, target density and local
+bin pitch, not the current field magnitude. Only local area exceeding the soft
+target emits charge; the field extends beyond overfull bins and repels nearby
+cells without requiring physical overlap. Macro/halo area reduces local capacity.
+The local field only samples real cells, including when virtual fillers are
+present. External continuation is rejected until its calibration state is part
+of `GpState`.
+
+Virtual fillers (`add_fillers`) are internal movable density particles with no
+pins or nets. They have density footprints, but occupy no physical sites: they
+are removed before legalization and never appear in host callbacks or output.
+`filler_max_count=0` retains the legacy sizing/count limit; a positive cap
+(up to one million) sizes particles from the central 90% of standard-cell
+widths/heights, excluding macros, then enlarges both dimensions to bound work in
+sparse cores. `filler_area_fraction=1` supplies the full target-density whitespace
+charge; smaller positive fractions allow an explicit ablation. Neither option
+changes the supplied outline. Timing/netlist and terminal callbacks see only
+real nodes. Internal particles retain positions through buffer insert/remove
+checkpoints, with routability charge compensation tracking the changed area.
+
+`Options::macro_cell_density_weight` defaults to zero. Positive values add
+standard-cell pressure to movable macros by integrating the screened field
+across their halo-padded footprints. This receiver mode uses raw cell area,
+so macros can prefer less crowded regions even below the cell density target.
+Macros never emit charge in this local field, hence it adds no macro-to-macro
+distance force. Fixed macros receive none. The host uses it during FP/macro GP
+and disables it in the final fixed-macro cell pass. Result diagnostics include
+`macro_cell_density_seconds` and `macro_cell_density_force`.
+
+`Options::macro_density_pull_weight` defaults to zero. A positive value up to
+one adds a weak macro-only slide down the local standard-cell density slope.
+Side strips extend `macro_density_pull_range` (4) local-bin pitches beyond the
+halo-padded box. A summed-area table gives constant-time, sub-bin rectangle
+queries; clipped strips use their true area, and off-core space never supplies
+an empty-space attraction. Uniform surrounding density gives zero force.
+The force is capped relative to ordinary macro force, and, when available,
+to the same fraction of the centroid spring reference at one circle radius.
+All local forces share one standard-cell density raster per GP iteration;
+pull adds no Poisson solve. The host disables it in final fixed-macro cell GP.
+
+`Options::dynamic_bins` defaults to false. When true, bin area follows
+average movable-instance area / target density, with aspect-aware power-of-two
+counts and a `bin_max` resource cap (512 by default, maximum 1024). The legacy
+macro-pitch `automatic_bins` control remains separate. `auxiliary_bins=0`
+follows density bins; a positive value keeps RUDY, macro routing pressure and
+LG/DP on an independent grid, as the LiveHD integration does.
+
+The adaptive global field and local field use an internal radix-2 FFT DCT
+implementation; no new dependency is needed. `PoissonSolver` retains the
+original dense transform by default and falls back to it for non-power-of-two
+shapes. Manufactured-solution tests exercise both paths. The screened field's
+zero mode is discarded because it supplies no force.
+
+`bazel run -c opt //dreamplace/native:local_density_demo` runs a small manual
+force-strength experiment; it is not a regression benchmark. Compare local
+spacing, HPWL and runtime together before changing host defaults.
+
 ## Build and run
 
 Use Bazel 9.3.0 (selected by `.bazelversion`) and a C++23 toolchain.

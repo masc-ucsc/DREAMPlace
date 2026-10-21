@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "dreamplace/native/local_density.hpp"
 #include "dreamplace/native/rudy.hpp"
 #include "dreamplace/native/spectral.hpp"
 
@@ -66,7 +67,8 @@ double overflow(const Design &d, int bx, int by, double target_density,
     if (i < d.num_movable) {
       total += charge * w * h;
     }
-    // Clamp before the int conversion: fixed nodes may lie far outside the core.
+    // Clamp before the int conversion: fixed nodes may lie far outside the
+    // core.
     const auto cell = [](double v, int count) {
       return static_cast<int>(std::clamp(v, 0., double(count)));
     };
@@ -97,6 +99,28 @@ void options_check(const Options &o) {
   require(o.max_iterations >= 0 && o.bins_x >= 2 && o.bins_x <= 1024 &&
               o.bins_y >= 2 && o.bins_y <= 1024,
           "invalid iteration limit or bin count (2..1024)");
+  require(finite(o.local_density_weight) && o.local_density_weight >= 0 &&
+              finite(o.local_density_range) && o.local_density_range > 0 &&
+              finite(o.local_density_jitter) && o.local_density_jitter >= 0 &&
+              o.local_density_jitter <= .1 && o.local_density_bins >= 8 &&
+              o.local_density_bins <= 1024 &&
+              std::has_single_bit(unsigned(o.local_density_bins)) &&
+              (o.auxiliary_bins == 0 ||
+               (o.auxiliary_bins >= 2 && o.auxiliary_bins <= 1024)),
+          "invalid local density controls");
+  require(finite(o.macro_cell_density_weight) &&
+              o.macro_cell_density_weight >= 0,
+          "invalid macro cell density weight");
+  require(
+      finite(o.macro_density_pull_weight) && o.macro_density_pull_weight >= 0 &&
+          o.macro_density_pull_weight <= 1 &&
+          finite(o.macro_density_pull_range) &&
+          o.macro_density_pull_range > 0 && o.macro_density_pull_range <= 32,
+      "invalid macro density pull controls");
+  require(o.filler_max_count >= 0 && o.filler_max_count <= 1000000 &&
+              finite(o.filler_area_fraction) && o.filler_area_fraction > 0 &&
+              o.filler_area_fraction <= 1,
+          "invalid virtual filler budget");
   require(o.num_threads > 0 && o.num_threads <= 128,
           "thread count must be 1..128");
   require(finite(o.target_density) && o.target_density > 0 &&
@@ -592,7 +616,17 @@ Result place(Design &design, const Options &options, GpState *state) {
     o.bins_y = bins.second;
     o.automatic_bins = false;
   }
+  if (o.dynamic_bins && design.node_pad_x.empty()) {
+    require(o.bin_max >= 32 && o.bin_max <= 1024 &&
+                std::has_single_bit(unsigned(o.bin_max)),
+            "invalid dynamic bin cap");
+    const auto bins = detail::dynamic_bins(design, o.target_density, o.bin_max);
+    o.bins_x = bins.first;
+    o.bins_y = bins.second;
+  }
   options_check(o);
+  const int aux_x = o.auxiliary_bins ? o.auxiliary_bins : o.bins_x;
+  const int aux_y = o.auxiliary_bins ? o.auxiliary_bins : o.bins_y;
   require(
       finite(o.centroid_weight) && o.centroid_weight >= 0 &&
           finite(o.centroid_attraction_outside) &&
@@ -628,12 +662,10 @@ Result place(Design &design, const Options &options, GpState *state) {
   require(
       !centroids || !state,
       "centroid placement requires one GP solve without external continuation");
-  require(!o.checkpoint || o.checkpoint_interval == 0 ||
-              (!o.add_fillers && !state),
-          "GP checkpoints require no fillers or external continuation");
-  require(!o.terminal_update || o.terminal_interval == 0 ||
-              (!o.add_fillers && !state),
-          "terminal updates require no fillers or external continuation");
+  require(!o.checkpoint || o.checkpoint_interval == 0 || !state,
+          "GP checkpoints require no external continuation");
+  require(!o.terminal_update || o.terminal_interval == 0 || !state,
+          "terminal updates require no external continuation");
   if (has_halo(design)) {
     Design padded = padded_design(design);
     Options control = o;
@@ -777,6 +809,26 @@ Result place(Design &design, const Options &options, GpState *state) {
   salt(o.bins_x);
   salt(o.bins_y);
   salt(o.add_fillers);
+  if (o.add_fillers && (o.filler_max_count || o.filler_area_fraction != 1)) {
+    salt(o.filler_max_count);
+    salt(std::bit_cast<std::uint64_t>(o.filler_area_fraction));
+  }
+  if (o.dynamic_bins || o.local_density_weight || o.macro_cell_density_weight ||
+      o.macro_density_pull_weight || o.auxiliary_bins) {
+    salt(o.dynamic_bins);
+    salt(o.bin_max);
+    salt(o.auxiliary_bins);
+    salt(o.local_density_bins);
+    for (double v : {o.local_density_weight, o.local_density_range,
+                     o.local_density_jitter})
+      salt(std::bit_cast<std::uint64_t>(v));
+  }
+  if (o.macro_cell_density_weight)
+    salt(std::bit_cast<std::uint64_t>(o.macro_cell_density_weight));
+  if (o.macro_density_pull_weight) {
+    salt(std::bit_cast<std::uint64_t>(o.macro_density_pull_weight));
+    salt(std::bit_cast<std::uint64_t>(o.macro_density_pull_range));
+  }
   if (o.density_upper_bound)
     salt(o.density_upper_bound);
   if (o.min_iterations != 40)
@@ -956,6 +1008,14 @@ Result place(Design &design, const Options &options, GpState *state) {
         d.node_x[i] += jitter(local) * d.node_size_x[i];
         d.node_y[i] += jitter(local) * d.node_size_y[i];
       }
+      if (!warm && o.local_density_weight > 0 && o.local_density_jitter > 0 &&
+          (d.node_macro.empty() || !d.node_macro[i])) {
+        std::mt19937 local(o.seed ^ (0x85ebca6bU * (unsigned(i) + 1)));
+        std::uniform_real_distribution<double> jitter(-o.local_density_jitter,
+                                                      o.local_density_jitter);
+        d.node_x[i] += jitter(local) * d.node_size_x[i];
+        d.node_y[i] += jitter(local) * d.node_size_y[i];
+      }
       project(i, d.node_x[i], d.node_y[i]);
     }
     if (centroids) {
@@ -964,18 +1024,60 @@ Result place(Design &design, const Options &options, GpState *state) {
         o.observer(d, PlacementStage::centroid_start, 0);
     }
     if (o.add_fillers) {
-      double target_area = std::max(
-          0., o.target_density * (width * height - fixed_area) - area +
-                  (o.scale_macro_density ? (1 - o.target_density) * macro_area
-                                         : 0));
+      double target_area =
+          std::max(0., o.target_density * (width * height - fixed_area) - area +
+                           (o.scale_macro_density
+                                ? (1 - o.target_density) * macro_area
+                                : 0)) *
+          o.filler_area_fraction;
       double fw = o.filler_width > 0 ? o.filler_width
                                      : area / d.num_movable / l.row_height;
       double fh = l.row_height;
+      if (o.filler_max_count > 0 && o.filler_width == 0) {
+        // Use the central 90% of real standard-cell dimensions, independently
+        // on each axis. SRAM area must not turn virtual particles into long
+        // row-height strips. The uncapped legacy path retains its old sizing.
+        std::vector<double> widths, heights;
+        for (int i = 0; i < d.num_movable; ++i)
+          if ((d.node_macro.empty() || !d.node_macro[i]) &&
+              d.node_size_x[i] > 0 && d.node_size_y[i] > 0) {
+            widths.push_back(d.node_size_x[i]);
+            heights.push_back(d.node_size_y[i]);
+          }
+        const auto trimmed_mean = [](std::vector<double> &v) {
+          std::sort(v.begin(), v.end());
+          const size_t trim = v.size() / 20;
+          return std::accumulate(v.begin() + trim, v.end() - trim, 0.) /
+                 (v.size() - 2 * trim);
+        };
+        if (!widths.empty()) {
+          fw = trimmed_mean(widths);
+          fh = trimmed_mean(heights);
+        }
+      }
       fw = std::clamp(fw, l.site_width, width);
+      if (o.filler_max_count > 0)
+        fh = std::min(height, std::max(fh, l.row_height));
+      if (o.filler_max_count > 0 &&
+          target_area > fw * fh * o.filler_max_count) {
+        const double scale =
+            std::sqrt(target_area / (fw * fh * o.filler_max_count));
+        fw = std::min(width, fw * scale);
+        fh = std::min(height, fh * scale);
+        // Compensate if one dimension hit the outline before the other.
+        fw = std::min(width,
+                      std::max(fw, target_area / (fh * o.filler_max_count)));
+        fh = std::min(height,
+                      std::max(fh, target_area / (fw * o.filler_max_count)));
+      }
       double desired = std::floor(target_area / (fw * fh));
+      if (o.filler_max_count > 0)
+        desired = std::min(desired, double(o.filler_max_count));
       require(desired <= 1000000,
               "too many fillers; reduce core whitespace or disable fillers");
       int fillers = desired;
+      r.filler_count = fillers;
+      r.filler_area = fillers * fw * fh;
       for (int i = 0; i < fillers; ++i) {
         d.node_x.push_back(l.xl + unit(rng) * (width - fw));
         d.node_y.push_back(l.yl + unit(rng) * (height - fh));
@@ -1029,7 +1131,15 @@ Result place(Design &design, const Options &options, GpState *state) {
         ratio[i] *= o.target_density;
       }
     }
-    PoissonSolver solver(o.bins_x, o.bins_y, width, height);
+    PoissonSolver solver(o.bins_x, o.bins_y, width, height, o.dynamic_bins);
+    std::unique_ptr<detail::LocalDensity> local_density;
+
+    if (o.local_density_weight > 0 || o.macro_cell_density_weight > 0 ||
+        o.macro_density_pull_weight > 0) {
+      require(!state, "local spreading continuation is not supported yet");
+      local_density = std::make_unique<detail::LocalDensity>(
+          model, o.local_density_bins, o.local_density_range, o.target_density);
+    }
     std::vector<double> map, phi, fx, fy;
     auto x = d.node_x, y = d.node_y, prev_x = x, prev_y = y;
     std::vector<double> old_gx(n), old_gy(n), old_ex(n), old_ey(n);
@@ -1048,7 +1158,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         warm ? state->routing_utilization : std::vector<double>{};
     require(
         routing_utilization.empty() ||
-            (routing_utilization.size() == size_t(o.bins_x * o.bins_y) &&
+            (routing_utilization.size() == size_t(aux_x * aux_y) &&
              std::all_of(routing_utilization.begin(), routing_utilization.end(),
                          [](double u) { return finite(u) && u >= 0; })),
         "invalid GP routing continuation");
@@ -1176,10 +1286,9 @@ Result place(Design &design, const Options &options, GpState *state) {
         std::copy_n(d.node_x.begin(), original, physical.node_x.begin());
         std::copy_n(d.node_y.begin(), original, physical.node_y.begin());
         const auto rudy_start = std::chrono::steady_clock::now();
-        const auto route =
-            rudy(physical,
-                 {o.bins_x, o.bins_y, o.route_capacity_h, o.route_capacity_v,
-                  o.improved_routability, o.improved_routability});
+        const auto route = rudy(
+            physical, {aux_x, aux_y, o.route_capacity_h, o.route_capacity_v,
+                       o.improved_routability, o.improved_routability});
         r.rudy_seconds += std::chrono::duration<double>(
                               std::chrono::steady_clock::now() - rudy_start)
                               .count();
@@ -1199,16 +1308,18 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         for (int i = 0; i < d.num_movable; ++i) {
           if (!d.node_inflatable.empty() && d.node_inflatable[i]) {
-            const int bx = std::clamp(
-                int((d.node_x[i] + d.node_size_x[i] / 2 - l.xl) / dx), 0,
-                o.bins_x - 1);
-            const int by = std::clamp(
-                int((d.node_y[i] + d.node_size_y[i] / 2 - l.yl) / dy), 0,
-                o.bins_y - 1);
+            const int bx =
+                std::clamp(int((d.node_x[i] + d.node_size_x[i] / 2 - l.xl) /
+                               (width / aux_x)),
+                           0, aux_x - 1);
+            const int by =
+                std::clamp(int((d.node_y[i] + d.node_size_y[i] / 2 - l.yl) /
+                               (height / aux_y)),
+                           0, aux_y - 1);
             const double demand =
-                std::clamp(std::max({route.pin_utilization[bx * o.bins_y + by],
-                                     route.horizontal[bx * o.bins_y + by],
-                                     route.vertical[bx * o.bins_y + by]}),
+                std::clamp(std::max({route.pin_utilization[bx * aux_y + by],
+                                     route.horizontal[bx * aux_y + by],
+                                     route.vertical[bx * aux_y + by]}),
                            1., 3.);
             proposed[i] = o.improved_routability
                               ? std::max(inflation[i], demand)
@@ -1241,7 +1352,8 @@ Result place(Design &design, const Options &options, GpState *state) {
             area * inflated_ratio -
             (o.scale_macro_density ? (1 - target) * macro_area : 0);
         const double budget =
-            std::max(0., target * (width * height - fixed_area) - real_charge);
+            std::max(0., target * (width * height - fixed_area) - real_charge) *
+            o.filler_area_fraction;
         filler_scale = filler_area ? budget / filler_area : 0;
         for (int i = original; i < n; ++i)
           ratio[i] = filler_scale * d.node_size_x[i] * d.node_size_y[i] /
@@ -1295,6 +1407,80 @@ Result place(Design &design, const Options &options, GpState *state) {
           density_initialized = true;
         }
       }
+      std::vector<double> cell_density;
+      double ordinary_macro_force = 0;
+      if (local_density) {
+        const auto begin = std::chrono::steady_clock::now();
+        cell_density = local_density->cell_density(d);
+        r.local_density_grid_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          begin)
+                .count();
+        if (o.macro_density_pull_weight > 0)
+          for (int i = 0; i < d.num_movable; ++i)
+            if (!d.node_macro.empty() && d.node_macro[i])
+              ordinary_macro_force +=
+                  std::abs(wg.x[i] + density_weight * dg.x[i]) +
+                  std::abs(wg.y[i] + density_weight * dg.y[i]);
+      }
+      if (local_density && o.local_density_weight > 0) {
+        const auto begin = std::chrono::steady_clock::now();
+        const auto lg = local_density->gradient(d, false, cell_density);
+        double base = 0, force = 0;
+        for (int i = 0; i < d.num_movable; ++i)
+          if (d.node_macro.empty() || !d.node_macro[i]) {
+            base += std::abs(wg.x[i] + density_weight * dg.x[i]) +
+                    std::abs(wg.y[i] + density_weight * dg.y[i]);
+            force += std::abs(lg.x[i]) + std::abs(lg.y[i]);
+          }
+        // Calibrate to a physical reference at target density, not the
+        // current field. An initially sparse design must not turn tiny noise
+        // into wirelength-sized force. Cap aggregate pressure on dense cases.
+        double cell_area = 0;
+        for (int i = 0; i < d.num_movable; ++i)
+          if (d.node_macro.empty() || !d.node_macro[i])
+            cell_area += d.node_size_x[i] * d.node_size_y[i];
+        const double pitch = std::sqrt(width * height) / o.local_density_bins;
+        const double reference =
+            cell_area * o.target_density * pitch / (2 * std::acos(-1.));
+        const double scale =
+            o.local_density_weight * base / std::max({reference, force, 1e-12});
+        r.local_density_force = std::max(r.local_density_force, scale * force);
+        for (int i = 0; i < d.num_movable; ++i) {
+          wg.x[i] += scale * lg.x[i];
+          wg.y[i] += scale * lg.y[i];
+        }
+        r.local_density_seconds += std::chrono::duration<double>(
+                                       std::chrono::steady_clock::now() - begin)
+                                       .count();
+      }
+      if (local_density && o.macro_cell_density_weight > 0) {
+        const auto begin = std::chrono::steady_clock::now();
+        const auto mg = local_density->gradient(d, true, cell_density);
+        double base = 0, force = 0, macro_area = 0;
+        for (int i = 0; i < d.num_movable; ++i)
+          if (!d.node_macro.empty() && d.node_macro[i]) {
+            base += std::abs(wg.x[i] + density_weight * dg.x[i]) +
+                    std::abs(wg.y[i] + density_weight * dg.y[i]);
+            force += std::abs(mg.x[i]) + std::abs(mg.y[i]);
+            macro_area += d.node_size_x[i] * d.node_size_y[i];
+          }
+        const double pitch = std::sqrt(width * height) / o.local_density_bins;
+        const double reference =
+            macro_area * o.target_density * pitch / (2 * std::acos(-1.));
+        const double scale = o.macro_cell_density_weight * base /
+                             std::max({reference, force, 1e-12});
+        r.macro_cell_density_force =
+            std::max(r.macro_cell_density_force, scale * force);
+        for (int i = 0; i < d.num_movable; ++i) {
+          wg.x[i] += scale * mg.x[i];
+          wg.y[i] += scale * mg.y[i];
+        }
+        r.macro_cell_density_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          begin)
+                .count();
+      }
       if (r.centroid.started &&
           (o.centroid_distance_attraction || parent_centroids) &&
           r.centroid.attraction_calibration_iteration < 0) {
@@ -1317,13 +1503,70 @@ Result place(Design &design, const Options &options, GpState *state) {
           r.centroid.attraction_calibration_iteration = global_iter;
         }
       }
+      if (local_density && o.macro_density_pull_weight > 0) {
+        const auto begin = std::chrono::steady_clock::now();
+        auto pg = local_density->density_pull(d, cell_density,
+                                              o.macro_density_pull_range);
+        double norm = 0, reference = 0;
+        for (int i = 0; i < d.num_movable; ++i)
+          if (!d.node_macro.empty() && d.node_macro[i]) {
+            norm += std::abs(pg.x[i]) + std::abs(pg.y[i]);
+            reference +=
+                d.node_size_x[i] * d.node_size_y[i] * o.target_density /
+                std::max(1e-12, std::min(d.node_size_x[i], d.node_size_y[i]));
+          }
+        const double scale = (centroids && !r.centroid.started)
+                                 ? 0
+                                 : o.macro_density_pull_weight *
+                                       ordinary_macro_force /
+                                       std::max({reference, norm, 1e-12});
+        const double anchor_ramp =
+            d.centroid_targets.empty()
+                ? std::pow(std::clamp(double(global_iter + 1 -
+                                             r.centroid.start_iteration) /
+                                          o.centroid_ramp,
+                                      0., 1.),
+                           2)
+                : 1;
+        std::vector<double> anchor;
+        if (r.centroid.attraction_coefficient > 0)
+          anchor = detail::centroid_attraction_reference(d, o.target_density);
+        double applied = 0;
+        for (int i = 0; i < d.num_movable; ++i) {
+          double gx = scale * pg.x[i], gy = scale * pg.y[i];
+          // Compare with the spring at one circle radius, not its current
+          // force (zero at the centroid). This keeps the slope weaker without
+          // disabling small shifts around an exactly centered macro.
+          const double magnitude = std::hypot(gx, gy);
+          if (!anchor.empty() && anchor[i] > 0 && magnitude > 0) {
+            const double anchor_force =
+                r.centroid.attraction_coefficient * anchor[i] * anchor_ramp;
+            const double cap = o.macro_density_pull_weight * anchor_force;
+            const double fraction = std::min(1., cap / magnitude);
+            gx *= fraction;
+            gy *= fraction;
+            if (anchor_force > 0)
+              r.macro_density_pull_anchor_ratio =
+                  std::max(r.macro_density_pull_anchor_ratio,
+                           std::hypot(gx, gy) / anchor_force);
+          }
+          wg.x[i] += gx;
+          wg.y[i] += gy;
+          applied += std::abs(gx) + std::abs(gy);
+        }
+        r.macro_density_pull_force =
+            std::max(r.macro_density_pull_force, applied);
+        r.macro_density_pull_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          begin)
+                .count();
+      }
       macro_routing_force = 0;
       macro_routing_channels = 0;
       if (macro_routing && !routing_utilization.empty()) {
         const auto routing_start = std::chrono::steady_clock::now();
         const auto pressure = detail::macro_routing_pressure(
-            d, o.bins_x, o.bins_y, routing_utilization,
-            o.routability_macro_range);
+            d, aux_x, aux_y, routing_utilization, o.routability_macro_range);
         double base = 0;
         int macros = 0;
         for (int i = 0; i < d.num_movable; ++i) {
@@ -1568,8 +1811,8 @@ Result place(Design &design, const Options &options, GpState *state) {
       if (o.terminal_update && o.terminal_interval > 0 &&
           (global_iter + 1) % o.terminal_interval == 0) {
         Design snapshot = model;
-        snapshot.node_x = x;
-        snapshot.node_y = y;
+        std::copy_n(x.begin(), original, snapshot.node_x.begin());
+        std::copy_n(y.begin(), original, snapshot.node_y.begin());
         const auto updates = o.terminal_update(snapshot, global_iter + 1);
         std::vector<bool> seen(original);
         bool changed = false;
@@ -1610,8 +1853,8 @@ Result place(Design &design, const Options &options, GpState *state) {
            forced_checkpoint ||
            (o.checkpoint_final && iter + 1 == o.max_iterations))) {
         Design snapshot = model;
-        snapshot.node_x = x;
-        snapshot.node_y = y;
+        std::copy_n(x.begin(), original, snapshot.node_x.begin());
+        std::copy_n(y.begin(), original, snapshot.node_y.begin());
         bool invoke = true;
         if (density_gated_checkpoints) {
           const double measured =
@@ -1712,8 +1955,17 @@ Result place(Design &design, const Options &options, GpState *state) {
             require(seen[i] || (i < d.num_movable && !is_macro(d, i) &&
                                 !d.node_macro.empty()),
                     "GP replacement removed a macro or fixed node");
+          for (int i = original; i < n; ++i) {
+            candidate.node_x.push_back(x[i]);
+            candidate.node_y.push_back(y[i]);
+            candidate.node_size_x.push_back(d.node_size_x[i]);
+            candidate.node_size_y.push_back(d.node_size_y[i]);
+            next_inflation.push_back(inflation[i]);
+          }
+          candidate.build_maps();
           d = std::move(candidate);
-          original = n = size;
+          original = size;
+          n = count(d.node_x.size());
           inflation = std::move(next_inflation);
           x = d.node_x;
           y = d.node_y;
@@ -1762,14 +2014,16 @@ Result place(Design &design, const Options &options, GpState *state) {
                     "GP checkpoint cell does not fit layout");
           }
           const bool changed = candidate.net_weights != d.net_weights ||
-                               candidate.node_size_x != d.node_size_x ||
-                               candidate.node_size_y != d.node_size_y ||
+                               candidate.node_size_x != model.node_size_x ||
+                               candidate.node_size_y != model.node_size_y ||
                                candidate.pin_offset_x != d.pin_offset_x ||
                                candidate.pin_offset_y != d.pin_offset_y;
           if (changed) {
             d.net_weights = candidate.net_weights;
-            d.node_size_x = candidate.node_size_x;
-            d.node_size_y = candidate.node_size_y;
+            std::copy_n(candidate.node_size_x.begin(), original,
+                        d.node_size_x.begin());
+            std::copy_n(candidate.node_size_y.begin(), original,
+                        d.node_size_y.begin());
             d.pin_offset_x = candidate.pin_offset_x;
             d.pin_offset_y = candidate.pin_offset_y;
           }
@@ -1808,8 +2062,8 @@ Result place(Design &design, const Options &options, GpState *state) {
             // path; only scaled movable macros follow the compensation.
             if (!active(i))
               ratio[i] *= o.target_density;
-            else if (o.scale_macro_density && !d.node_macro.empty() &&
-                     d.node_macro[i])
+            else if (o.scale_macro_density && i < original &&
+                     !d.node_macro.empty() && d.node_macro[i])
               ratio[i] *= o.routability_charge_compensation ? capacity
                                                             : o.target_density;
           }
@@ -1822,8 +2076,15 @@ Result place(Design &design, const Options &options, GpState *state) {
               }
           }
           model = d;
-          model.node_x = x;
-          model.node_y = y;
+          model.node_x.assign(x.begin(), x.begin() + original);
+          model.node_y.assign(y.begin(), y.begin() + original);
+          model.node_size_x.resize(original);
+          model.node_size_y.resize(original);
+          model.build_maps();
+          if (local_density)
+            local_density = std::make_unique<detail::LocalDensity>(
+                model, o.local_density_bins, o.local_density_range,
+                o.target_density);
           t = 1;
           prev_x = x;
           prev_y = y;
@@ -1972,9 +2233,9 @@ Result place(Design &design, const Options &options, GpState *state) {
             // current physical geometry before claiming routing convergence.
             const auto rudy_start = std::chrono::steady_clock::now();
             route_overflow =
-                rudy(physical, {o.bins_x, o.bins_y, o.route_capacity_h,
-                                o.route_capacity_v, o.improved_routability,
-                                o.improved_routability})
+                rudy(physical,
+                     {aux_x, aux_y, o.route_capacity_h, o.route_capacity_v,
+                      o.improved_routability, o.improved_routability})
                     .overflow;
             r.rudy_seconds += std::chrono::duration<double>(
                                   std::chrono::steady_clock::now() - rudy_start)
@@ -2116,12 +2377,12 @@ Result place(Design &design, const Options &options, GpState *state) {
               : detail::macro_align_snap(d, o.macro_snap_tolerance,
                                          o.macro_snap_weight);
       AlignmentReport times;
-      detail::legalize(d, o.bins_x, o.bins_y, &snap, &times);
+      detail::legalize(d, aux_x, aux_y, &snap, &times);
       r.alignment = detail::macro_alignment_report(before, d, snap);
       r.alignment.macro_legalization_seconds = times.macro_legalization_seconds;
       r.alignment.cell_legalization_seconds = times.cell_legalization_seconds;
     } else
-      detail::legalize(d, o.bins_x, o.bins_y, nullptr, &r.alignment);
+      detail::legalize(d, aux_x, aux_y, nullptr, &r.alignment);
     if (!is_legal(d) || !detail::kernel_is_legal(d)) {
       throw std::runtime_error("DREAMPlace legalization failed: insufficient "
                                "row space or unsupported geometry");
@@ -2131,7 +2392,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
     if (o.detailed_place && !d.net_weights.empty()) {
       const auto detail_start = std::chrono::steady_clock::now();
-      detail::detailed_place(d, o.bins_x, o.bins_y, o.num_threads, o.macro_snap,
+      detail::detailed_place(d, aux_x, aux_y, o.num_threads, o.macro_snap,
                              o.detailed_iterations, &r.detailed_history);
       r.detailed_placement_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() -
