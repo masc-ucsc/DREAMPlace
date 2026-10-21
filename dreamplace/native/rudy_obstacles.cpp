@@ -1,5 +1,6 @@
 // BSD-3-Clause. See LICENSE.
 #include "dreamplace/native/rudy.hpp"
+#include "dreamplace/native/rudy_tree.hpp"
 
 #include <algorithm>
 #include <array>
@@ -345,10 +346,25 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
         std::max(0., box.xh - box.xl - (initial.xh - initial.xl));
     const double extra_y =
         std::max(0., box.yh - box.yl - (initial.yh - initial.yl));
+    double tree_h = width, tree_v = height;
+    const int degree = d.flat_net2pin_start[n + 1] - d.flat_net2pin_start[n];
+    const bool steiner = o.model == RudyModel::rsmt && degree <= o.degree;
+    if (steiner) {
+      std::vector<std::pair<double, double>> terminals;
+      for (int k = d.flat_net2pin_start[n]; k < d.flat_net2pin_start[n + 1];
+           ++k) {
+        const auto q = pins[d.flat_net2pin[k]];
+        terminals.emplace_back(q[0], q[1]);
+      }
+      tree_h = tree_v = 0;
+      for (auto e : detail::route_tree(terminals, o)) {
+        tree_h += e.xh - e.xl;
+        tree_v += e.yh - e.yl;
+      }
+    }
     const double weight =
         d.net_weights[n] *
-        netWiringDistributionMapWeight<double>(d.flat_net2pin_start[n + 1] -
-                                               d.flat_net2pin_start[n]);
+        (steiner ? 1. : netWiringDistributionMapWeight<double>(degree));
     r.detour_wirelength += weight * 2 * (extra_x + extra_y);
     auto deposit = [&](Rect region, double horizontal, double vertical) {
       const double area = free_area(region);
@@ -366,7 +382,7 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
       });
       return true;
     };
-    double horizontal = width + 2 * extra_x, vertical = height + 2 * extra_y;
+    double horizontal = tree_h + 2 * extra_x, vertical = tree_v + 2 * extra_y;
     // The crossing portion must use a channel beside the blocking macro. Do
     // not dilute it across the whole expanded box: that would make a narrow
     // passage look cheaper simply because the detour made the box larger.

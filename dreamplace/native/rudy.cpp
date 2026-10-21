@@ -10,6 +10,7 @@
 
 namespace DreamPlace::native {
 RudyResult obstacle_rudy(const Design &, const RudyOptions &);
+RudyResult rsmt_rudy(const Design &, const RudyOptions &);
 namespace {
 template <typename T> inline DEFINE_NET_WIRING_DISTRIBUTION_MAP_WEIGHT;
 }
@@ -20,6 +21,9 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
       !std::isfinite(o.vertical_capacity) || o.vertical_capacity <= 0) {
     throw std::invalid_argument("invalid RUDY grid or capacity");
   }
+  if (o.degree < 2 || o.degree > 1000 || o.accuracy < 1 || o.accuracy > 10)
+    throw std::invalid_argument(
+        "invalid FLUTE degree (2..1000) or accuracy (1..10)");
   RudyResult r;
   r.horizontal.resize(o.bins_x * o.bins_y);
   r.vertical.resize(o.bins_x * o.bins_y);
@@ -35,6 +39,8 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
   if (o.macro_blockages) {
     return obstacle_rudy(d, o);
   }
+  if (o.model == RudyModel::rsmt)
+    return rsmt_rudy(d, o);
   auto bin = [](double coordinate, double lo, double pitch, int count) {
     // Clip before integer conversion, including far-outside terminal positions.
     return static_cast<int>(
@@ -56,9 +62,9 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
       }
       // bin() may return `count` for a coordinate a ulp inside the edge, where
       // the division rounds up to the grid size; keep the pin in the last bin.
-      const int k = std::min(bin(x, l.xl, dx, o.bins_x), o.bins_x - 1) *
-                        o.bins_y +
-                    std::min(bin(y, l.yl, dy, o.bins_y), o.bins_y - 1);
+      const int k =
+          std::min(bin(x, l.xl, dx, o.bins_x), o.bins_x - 1) * o.bins_y +
+          std::min(bin(y, l.yl, dy, o.bins_y), o.bins_y - 1);
       // Access sites scale with tracks crossing bin edges, not bin area.
       r.pin_utilization[k] +=
           1 / ((dx + dy) * std::sqrt(available_h[k] * available_v[k]));

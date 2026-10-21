@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -68,4 +68,12 @@ cc_library(
         ":openmp": ["@openmp"],
         "//conditions:default": [],
     }),
+)
+
+cc_test(
+    name = "global_swap_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["global_swap/src/global_swap_test.cpp"],
+    deps = [":native_kernels"],
 )

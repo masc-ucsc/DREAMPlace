@@ -8,7 +8,8 @@ namespace DreamPlace::native::detail {
 // opt-in.
 class LocalDensity {
 public:
-  LocalDensity(const Design &d, int bins, double range, double target = 0);
+  LocalDensity(const Design &d, int bins, double range, double target = 0,
+               int num_threads = 1);
   // macros_only integrates the raw standard-cell field over each movable
   // macro footprint (already halo padded by place). Macros never emit charge.
   std::vector<double> cell_density(const Design &d) const;

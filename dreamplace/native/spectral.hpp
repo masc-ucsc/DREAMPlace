@@ -9,15 +9,20 @@ namespace DreamPlace::native {
 class PoissonSolver {
 public:
   PoissonSolver(int nx, int ny, double width, double height, bool fast = false,
-                double screening_length = 0);
+                double screening_length = 0, int num_threads = 1);
   void solve(const std::vector<double> &density, std::vector<double> &potential,
              std::vector<double> &field_x, std::vector<double> &field_y) const;
 
 private:
+  void solve_dense_parallel(const std::vector<double> &density,
+                            std::vector<double> &potential,
+                            std::vector<double> &field_x,
+                            std::vector<double> &field_y) const;
   int nx_, ny_;
   double width_, height_;
   bool fast_;
   double screening_;
+  int threads_;
   std::vector<double> cx_, cy_, sx_, sy_;
 };
 } // namespace DreamPlace::native

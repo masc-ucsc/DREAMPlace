@@ -3,6 +3,7 @@
 #include "dreamplace/native/macro/dataflow.hpp"
 #include "dreamplace/native/macro/h2d.hpp"
 #include "dreamplace/native/macro/report.hpp"
+#include "dreamplace/native/rudy.hpp"
 #include <cmath>
 #include <iostream>
 #include <map>
@@ -116,6 +117,115 @@ int main() {
       check(pr.legal && is_legal(pitched), "coarse-pitch pipeline illegal");
       check(stages.size() == 1 && stages[0] == PlacementStage::global_placement,
             "coarse-pitch pass leaked internal solver frames");
+    }
+    // Auto can latch in the final cells pass even when abstract GP is disabled.
+    // Its stage merit must use the same physical RSMT estimator as the result.
+    {
+      m::Parameters route_p;
+      route_p.K = 1;
+      route_p.seed_sa_evals = route_p.evals = 0;
+      route_p.toposearch = route_p.pseudonets = false;
+      route_p.anchors = route_p.order = false;
+      route_p.iters_per_outer = 0;
+      route_p.bins = 8;
+      route_p.routability = true;
+      route_p.route_cap_h = route_p.route_cap_v = .001;
+      Options route_cells = cells;
+      route_cells.max_iterations = route_cells.min_iterations = 20;
+      route_cells.post_density_factor = 0;
+      route_cells.improved_routability = false;
+      route_cells.route.model = RouteModel::automatic;
+      route_cells.route.switch_overflow = 1e9;
+      route_cells.route.hold = 1;
+      const auto verify_merit = [&](const Design &d, const m::Result &r) {
+        RudyOptions opts{route_p.bins, route_p.bins, route_p.route_cap_h,
+                         route_p.route_cap_v};
+        opts.model = RudyModel::rsmt;
+        const double overflow = rudy(d, opts).overflow;
+        const double scale =
+            d.layout.xh - d.layout.xl + d.layout.yh - d.layout.yl;
+        const double expected = hpwl(d) + route_p.alpha * scale * overflow;
+        check(overflow > 0, "route fixture did not exercise congestion merit");
+        check(std::abs(r.rudy_overflow - overflow) <= 1e-9 &&
+                  std::abs(r.merit - expected) <= 1e-8 * std::max(1., expected),
+              "H2D merit uses a stale routing model");
+      };
+      auto final_latch = f.d;
+      const auto final_r =
+          m::place_h2d(final_latch, f.info, route_p, input, route_cells);
+      check(final_r.placement.route_model == RouteModel::rsmt,
+            "H2D lost final-cell auto latch");
+      verify_merit(final_latch, final_r);
+
+      // With hold=2 each fresh cells pass remains Rudy. Abstract continuation
+      // latches on round two; all subsequent solver passes must remain RSMT,
+      // and an incumbent from round one must be rescored before comparison.
+      route_p.K = 2;
+      route_p.freeze_after = 3;
+      route_p.iters_per_outer = 20;
+      route_cells.route.hold = 2;
+      bool seen_rsmt = false, downgraded = false;
+      route_cells.progress_observer = [&](const GpSample &sample) {
+        if (sample.route_model == RouteModel::rsmt)
+          seen_rsmt = true;
+        else if (seen_rsmt)
+          downgraded = true;
+      };
+      auto later_latch = f.d;
+      const auto later_r =
+          m::place_h2d(later_latch, f.info, route_p, input, route_cells);
+      check(later_r.iterations.size() == 2 && seen_rsmt && !downgraded,
+            "H2D auto latch did not persist across rounds and cells passes");
+      check(later_r.placement.route_model == RouteModel::rsmt,
+            "H2D incumbent lost the stage routing model");
+      verify_merit(later_latch, later_r);
+      for (const auto &iteration : later_r.iterations)
+        if (iteration.selected)
+          check(std::abs(iteration.merit - later_r.merit) <=
+                    1e-8 * std::max(1., later_r.merit),
+                "H2D selected iteration was not rescored");
+
+      // A failed diagnostic probe also latches the whole stage, not just
+      // the inner GP call that first reaches its convergence candidate.
+      route_cells.route.model = RouteModel::rudy;
+      route_cells.route.probe = true;
+      route_cells.route.target_overflow = 0;
+      route_cells.route.probe_iterations = 20;
+      route_cells.stop_overflow = 1;
+      route_cells.max_iterations = 40;
+      route_p.iters_per_outer = 40;
+      seen_rsmt = downgraded = false;
+      auto probed = f.d;
+      const auto probe_r =
+          m::place_h2d(probed, f.info, route_p, input, route_cells);
+      check(seen_rsmt && !downgraded && probe_r.placement.route_probed &&
+                probe_r.placement.route_model == RouteModel::rsmt,
+            "H2D failed-probe latch did not persist across solver passes");
+      verify_merit(probed, probe_r);
+
+      // A passing abstract probe must not run again in the fresh cells pass.
+      route_p.K = 1;
+      route_cells.route.target_overflow = 1e9;
+      route_cells.progress_observer = {};
+      auto passing = f.d;
+      const auto passing_r =
+          m::place_h2d(passing, f.info, route_p, input, route_cells);
+      check(passing_r.placement.route_probed &&
+                passing_r.placement.route_model == RouteModel::rudy &&
+                !passing_r.placement.history.empty(),
+            "H2D did not preserve the successful abstract probe");
+      for (const auto &sample : passing_r.placement.history)
+        check(!sample.route_probe, "H2D repeated a successful stage probe");
+
+      // The scoring policy remains explicit RSMT even if GP inflation is off.
+      route_p.K = 1;
+      route_p.routability = false;
+      route_cells.route.model = RouteModel::rsmt;
+      route_cells.progress_observer = {};
+      auto no_inflation = f.d;
+      const auto explicit_r =
+          m::place_h2d(no_inflation, f.info, route_p, input, route_cells);
+      verify_merit(no_inflation, explicit_r);
     }
     // Whole hierarchical bus ports resolve to actual fixed physical bit IOs.
     auto bus_info = f.info;

@@ -17,6 +17,7 @@ cc_library(
         "orientation.cpp",
         "placement.cpp",
         "rudy.cpp",
+        "rudy_rsmt.cpp",
         "rudy_macro.cpp",
         "rudy_obstacles.cpp",
         "repulsion.cpp",
@@ -29,6 +30,7 @@ cc_library(
         "orientation.hpp",
         "placement.hpp",
         "rudy.hpp",
+        "rudy_tree.hpp",
         "spectral.hpp",
     ],
     copts = select({
@@ -39,7 +41,7 @@ cc_library(
         "//dreamplace/ops:openmp": ["-fopenmp"],
         "//conditions:default": ["-Wno-unknown-pragmas"],
     }),
-    deps = ["//dreamplace/ops:native_kernels"],
+    deps = ["//dreamplace/ops:native_kernels", "//thirdparty/flute"],
 )
 
 cc_library(
@@ -179,10 +181,12 @@ filegroup(
         "placement.cpp",
         "placement.hpp",
         "rudy.cpp",
+        "rudy_rsmt.cpp",
         "rudy_macro.cpp",
         "rudy_obstacles.cpp",
         "repulsion.cpp",
         "rudy.hpp",
+        "rudy_tree.hpp",
         "spectral.cpp",
         "spectral.hpp",
     ],
@@ -254,4 +258,14 @@ cc_binary(
     name = "local_density_demo",
     srcs = ["local_density_demo.cpp"],
     deps = [":placer"],
+)
+
+cc_test(
+    name = "rudy_rsmt_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["rudy_rsmt_test.cpp"],
+    args = ["$(location //thirdparty/flute:lut.ICCAD2015/POWV9.dat)", "$(location //thirdparty/flute:lut.ICCAD2015/POST9.dat)"],
+    data = ["//thirdparty/flute:lut.ICCAD2015/POWV9.dat", "//thirdparty/flute:lut.ICCAD2015/POST9.dat"],
+    deps = [":placer", "//thirdparty/flute"],
 )

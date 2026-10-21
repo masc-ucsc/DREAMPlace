@@ -17,3 +17,5 @@ cc_test(
 )
 
 exports_files(["LICENSE"])
+
+exports_files(glob(["lut.ICCAD2015/*"]))

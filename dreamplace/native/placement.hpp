@@ -136,6 +136,15 @@ struct TerminalPosition {
   int node = -1;
   double x = 0, y = 0;
 };
+enum class RouteModel { off, rudy, rsmt, automatic };
+const char *route_model_name(RouteModel model);
+struct RoutePolicy {
+  RouteModel model = RouteModel::rudy;
+  double switch_overflow = .05, target_overflow = 1e-9;
+  int hold = 1, degree = 40, accuracy = 3;
+  bool probe = false;
+  int probe_iterations = 100;
+};
 struct Options {
   // Cheap terminal-only updates, independent of density-gated STA checkpoints.
   // Only fixed zero-area terminals may move; callbacks see physical geometry.
@@ -250,6 +259,8 @@ struct Options {
   double cohesion_weight = 0;
   double order_weight = 0, order_growth = 1;
   int schedule_iterations = 0;
+  RoutePolicy route;
+  std::function<void()> route_initialize;
   bool routability = false;
   double route_capacity_h = 1, route_capacity_v = 1;
   // Experimental filler-free upper-bound penalty. Underfull bins contribute
@@ -313,6 +324,12 @@ struct GpSample {
   double centroid_align_force = 0; // peak applied member L1 force
   std::uint64_t centroid_parent_edges = 0;
   double centroid_parent_max_distance = 0, centroid_parent_force = 0;
+  RouteModel route_model = RouteModel::rudy;
+  double route_seconds = 0, route_switch_rudy = -1, route_switch_rsmt = -1;
+  int route_switch_iteration = -1, route_bins = 0;
+  bool route_sampled = false, route_probe = false;
+  int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
+  double route_rudy_seconds = 0, route_rsmt_seconds = 0;
 };
 struct CentroidReport {
   bool started = false, completed = false;
@@ -352,6 +369,10 @@ struct Result {
   double poisson_seconds = 0, macro_routing_seconds = 0;
   double rudy_seconds = 0;
   int rudy_calls = 0;
+  RouteModel route_model = RouteModel::rudy;
+  int route_switch_iteration = -1;
+  double route_switch_rudy = -1, route_switch_rsmt = -1;
+  bool route_probed = false;
   int filler_count = 0;
   double filler_area = 0;
   double macro_alignment_seconds = 0;
@@ -374,6 +395,10 @@ struct Result {
 // rejected; failed calls leave state untouched. Empty state starts a new solve.
 struct GpState {
   GpConvergence convergence;
+  RouteModel route_model = RouteModel::rudy;
+  int route_hold = 0, route_switch_iteration = -1, route_probe_deadline = 0;
+  double route_switch_rudy = -1, route_switch_rsmt = -1;
+  bool route_probed = false;
   std::uint64_t signature = 0;
   int iteration = 0;
   double density_weight = 0, momentum = 1, step = 0;

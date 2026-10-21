@@ -3,6 +3,8 @@
  * @author Yibo Lin
  * @date   Jan 2019
  */
+#include "global_swap/src/SwapCandidate.h"
+#include "global_swap/src/net_bounds.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -10,7 +12,6 @@
 #include <limits>
 #include <numeric>
 #include <vector>
-#include "global_swap/src/SwapCandidate.h"
 #ifndef DREAMPLACE_TORCH_FREE
 #include "utility/src/torch.h"
 #endif
@@ -29,6 +30,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
   dreamplacePrint(kDEBUG, "%dx%d bins, bin size %g x %g\n", db.num_bins_x,
                   db.num_bins_y, db.bin_size_x, db.bin_size_y);
 
+  global_swap_detail::NetBounds<T> net_bounds(db);
   auto compute_pair_hpwl = [&](int node_id, T node_xl, T node_yl,
                                int target_node_id, T target_node_xl,
                                T target_node_yl) {
@@ -38,7 +40,18 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
       int node_pin_id = db.flat_node2pin_map[node2pin_id];
       int net_id = db.pin2net_map[node_pin_id];
       if (db.net_mask[net_id]) {
-         DreamPlace::Utility::Box<T> box(db.xh, db.yh, db.xl, db.yl);
+        if (net_bounds.cached(net_id)) {
+          T hpwl =
+              net_bounds.hpwl(net_id, node_id, node_xl, node_yl, target_node_id,
+                              target_node_xl, target_node_yl);
+#ifdef DREAMPLACE_TORCH_FREE
+          if (db.net_weights)
+            hpwl *= db.net_weights[net_id];
+#endif
+          cost += hpwl;
+          continue;
+        }
+        DreamPlace::Utility::Box<T> box(db.xh, db.yh, db.xl, db.yl);
         for (int net2pin_id = db.flat_net2pin_start_map[net_id];
              net2pin_id < db.flat_net2pin_start_map[net_id + 1]; ++net2pin_id) {
           int net_pin_id = db.flat_net2pin_map[net2pin_id];
@@ -58,19 +71,20 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
             box.yh =
                 std::max(box.yh, target_node_yl + db.pin_offset_y[net_pin_id]);
           } else {
-            box.xl = std::min(
-                box.xl, db.x[other_node_id] + db.pin_offset_x[net_pin_id]);
-            box.xh = std::max(
-                box.xh, db.x[other_node_id] + db.pin_offset_x[net_pin_id]);
-            box.yl = std::min(
-                box.yl, db.y[other_node_id] + db.pin_offset_y[net_pin_id]);
-            box.yh = std::max(
-                box.yh, db.y[other_node_id] + db.pin_offset_y[net_pin_id]);
+            box.xl = std::min(box.xl, db.x[other_node_id] +
+                                          db.pin_offset_x[net_pin_id]);
+            box.xh = std::max(box.xh, db.x[other_node_id] +
+                                          db.pin_offset_x[net_pin_id]);
+            box.yl = std::min(box.yl, db.y[other_node_id] +
+                                          db.pin_offset_y[net_pin_id]);
+            box.yh = std::max(box.yh, db.y[other_node_id] +
+                                          db.pin_offset_y[net_pin_id]);
           }
         }
         T hpwl = box.xh - box.xl + box.yh - box.yl;
 #ifdef DREAMPLACE_TORCH_FREE
-        if (db.net_weights) hpwl *= db.net_weights[net_id];
+        if (db.net_weights)
+          hpwl *= db.net_weights[net_id];
 #endif
         cost += hpwl;
       }
@@ -81,7 +95,20 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
       int node_pin_id = db.flat_node2pin_map[node2pin_id];
       int net_id = db.pin2net_map[node_pin_id];
       if (db.net_mask[net_id]) {
-         DreamPlace::Utility::Box<T> box(db.xh, db.yh, db.xl, db.yl);
+        if (net_bounds.cached(net_id)) {
+          if (net_bounds.contains(node_id, net_id))
+            continue;
+          T hpwl =
+              net_bounds.hpwl(net_id, node_id, node_xl, node_yl, target_node_id,
+                              target_node_xl, target_node_yl);
+#ifdef DREAMPLACE_TORCH_FREE
+          if (db.net_weights)
+            hpwl *= db.net_weights[net_id];
+#endif
+          cost += hpwl;
+          continue;
+        }
+        DreamPlace::Utility::Box<T> box(db.xh, db.yh, db.xl, db.yl);
         // when encounter nets that have both node_id and target_node_id
         // skip them
         bool duplicate_net_flag = false;
@@ -107,14 +134,14 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
             box.yh =
                 std::max(box.yh, target_node_yl + db.pin_offset_y[net_pin_id]);
           } else {
-            box.xl = std::min(
-                box.xl, db.x[other_node_id] + db.pin_offset_x[net_pin_id]);
-            box.xh = std::max(
-                box.xh, db.x[other_node_id] + db.pin_offset_x[net_pin_id]);
-            box.yl = std::min(
-                box.yl, db.y[other_node_id] + db.pin_offset_y[net_pin_id]);
-            box.yh = std::max(
-                box.yh, db.y[other_node_id] + db.pin_offset_y[net_pin_id]);
+            box.xl = std::min(box.xl, db.x[other_node_id] +
+                                          db.pin_offset_x[net_pin_id]);
+            box.xh = std::max(box.xh, db.x[other_node_id] +
+                                          db.pin_offset_x[net_pin_id]);
+            box.yl = std::min(box.yl, db.y[other_node_id] +
+                                          db.pin_offset_y[net_pin_id]);
+            box.yh = std::max(box.yh, db.y[other_node_id] +
+                                          db.pin_offset_y[net_pin_id]);
           }
         }
         if (duplicate_net_flag) {
@@ -122,7 +149,8 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
         }
         T hpwl = box.xh - box.xl + box.yh - box.yl;
 #ifdef DREAMPLACE_TORCH_FREE
-        if (db.net_weights) hpwl *= db.net_weights[net_id];
+        if (db.net_weights)
+          hpwl *= db.net_weights[net_id];
 #endif
         cost += hpwl;
       }
@@ -132,7 +160,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
 
   // divide layout into rows
   // distribute cells into them
-  std::vector<std::vector<int> > row2node_map(db.num_sites_y);
+  std::vector<std::vector<int>> row2node_map(db.num_sites_y);
   // map node index to its location in row2node_map
   // we can compute the rows, so only the index within a row of row2node_map is
   // stored
@@ -160,7 +188,8 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
       // only movable single-row cells use that inverse map during swapping.
       assert((left >= db.num_movable_nodes && right >= db.num_movable_nodes) ||
              db.x[left] + db.node_size_x[left] <= db.x[right]);
-      if (right < db.num_movable_nodes && db.node_size_y[right] == db.row_height) {
+      if (right < db.num_movable_nodes &&
+          db.node_size_y[right] == db.row_height) {
         assert(node2row2node_index_map.at(right) == j);
       }
     }
@@ -168,9 +197,9 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
   dreamplacePrint(kDEBUG, "passed row2node_map check\n");
 #endif
 
-  auto compute_cost = [&](int node_id, T& node_xl, T& node_yl,
-                          int target_node_id, T& target_node_xl,
-                          T& target_node_yl) {
+  auto compute_cost = [&](int node_id, T &node_xl, T &node_yl,
+                          int target_node_id, T &target_node_xl,
+                          T &target_node_yl) {
     // case I: two cells are horizontally abutting
     int row_id = db.pos2site_y(db.y[node_id]);
     int target_row_id = db.pos2site_y(db.y[target_node_id]);
@@ -187,7 +216,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
         target_node_xl = db.x[node_id] + db.node_size_x[node_id] -
                          db.node_size_x[target_node_id];
       }
-    } else  // case II: not abutting
+    } else // case II: not abutting
     {
       node_xl = db.x[target_node_id] + db.node_size_x[target_node_id] / 2 -
                 db.node_size_x[node_id] / 2;
@@ -217,7 +246,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
       space_xh = space.xh;
 #endif
       if (space_xh - space_xl < db.node_size_x[target_node_id]) {
-        return (db.xh - db.xl) + (db.yh - db.yl);  // some large number
+        return (db.xh - db.xl) + (db.yh - db.yl); // some large number
       }
       int target_node2row2node_index = node2row2node_index_map[target_node_id];
       T target_space_xl =
@@ -244,7 +273,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
       target_space_xh = target_space.xh;
 #endif
       if (target_space_xh - target_space_xl < db.node_size_x[node_id]) {
-        return (db.xh - db.xl) + (db.yh - db.yl);  // some large number
+        return (db.xh - db.xl) + (db.yh - db.yl); // some large number
       }
       node_xl = std::min(std::max(node_xl, target_space_xl),
                          target_space_xh - db.node_size_x[node_id]);
@@ -260,9 +289,8 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
          !db.inside_fence(target_node_id, target_node_xl, target_node_yl))) {
       cost = std::numeric_limits<T>::max();
     } else {
-      T orig_cost = compute_pair_hpwl(node_id, db.x[node_id], db.y[node_id],
-                                      target_node_id, db.x[target_node_id],
-                                      db.y[target_node_id]);
+      T orig_cost =
+          net_bounds.compute_original_pair_hpwl(node_id, target_node_id);
       T target_cost =
           compute_pair_hpwl(node_id, node_xl, node_yl, target_node_id,
                             target_node_xl, target_node_yl);
@@ -276,14 +304,15 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
   std::iota(ordered_nodes.begin(), ordered_nodes.end(), 0);
   // This CPU implementation uses deterministic ordering, with no global RNG.
   // generate bin search sequence
-  int grid_size = 10;  // width and height of the diamond shape
+  int grid_size = 10; // width and height of the diamond shape
   const float stop_threshold = 0.1 / 100;
-  std::vector<GridIndex<int> > search_grids(
+  std::vector<GridIndex<int>> search_grids(
       diamond_search_sequence(grid_size, grid_size));
   // swap candidates
-  std::vector<SwapCandidate<T> > candidates;
+  std::vector<SwapCandidate<T>> candidates;
   // optimal region
-  // std::vector< DreamPlace::Utility::Box<T> > optimal_regions (db.num_movable_nodes);
+  // std::vector< DreamPlace::Utility::Box<T> > optimal_regions
+  // (db.num_movable_nodes);
 
   // profiling variables
   CPUTimer::hr_clock_rep timer_start, timer_stop;
@@ -316,15 +345,16 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
       if (db.node_size_y[node_id] != db.row_height) {
         continue;
       }
-       DreamPlace::Utility::Box<T> node_box(db.x[node_id], db.y[node_id],
-                      db.x[node_id] + db.node_size_x[node_id],
-                      db.y[node_id] + db.node_size_y[node_id]);
+      DreamPlace::Utility::Box<T> node_box(
+          db.x[node_id], db.y[node_id], db.x[node_id] + db.node_size_x[node_id],
+          db.y[node_id] + db.node_size_y[node_id]);
       // dreamplacePrint(kDEBUG, "iter %d, node %d\n", iter, node_id);
 
       // compute optimal region
       timer_start = CPUTimer::getGlobaltime();
-      //  DreamPlace::Utility::Box<T> opt_box = (iter&1)? node_box : optimal_regions[node_id];
-       DreamPlace::Utility::Box<T> opt_box = node_box;
+      //  DreamPlace::Utility::Box<T> opt_box = (iter&1)? node_box :
+      //  optimal_regions[node_id];
+      DreamPlace::Utility::Box<T> opt_box = node_box;
       timer_stop = CPUTimer::getGlobaltime();
       compute_search_region_time += timer_stop - timer_start;
       compute_search_region_runs += 1;
@@ -367,21 +397,21 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
         if (bx < 0 || bx >= db.num_bins_x || by < 0 || by >= db.num_bins_y) {
           continue;
         }
-         DreamPlace::Utility::Box<T> bin(db.xl + bx * db.bin_size_x, db.yl + by * db.bin_size_y,
-                   db.xl + (bx + 1) * db.bin_size_x,
-                   db.yl + (by + 1) * db.bin_size_y);
+        DreamPlace::Utility::Box<T> bin(
+            db.xl + bx * db.bin_size_x, db.yl + by * db.bin_size_y,
+            db.xl + (bx + 1) * db.bin_size_x, db.yl + (by + 1) * db.bin_size_y);
         // dreamplacePrint(kDEBUG, "node %d search bin (%d, %d) distance to opt
         // box %g/%g\n", node_id, bx, by, bin.center_distance(opt_box),
         // node_box.center_distance(opt_box));
 
-         DreamPlace::Utility::Box<int> sitebox = db.box2sitebox(bin);
+        DreamPlace::Utility::Box<int> sitebox = db.box2sitebox(bin);
 
         // enumerate sites within the site box and check any space that is large
         // enough to host the node
         candidates.clear();
         timer_start = CPUTimer::getGlobaltime();
         for (int sy = sitebox.yl; sy < sitebox.yh; ++sy) {
-          std::vector<int>& row2nodes = row2node_map.at(sy);
+          std::vector<int> &row2nodes = row2node_map.at(sy);
           int row2node_index_begin = 0;
           // search for the starting cell in the bin
           // by scanning the row
@@ -423,9 +453,9 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
         collect_candidates_runs += 1;
         // dreamplacePrint(kDEBUG, "found %lu candidates\n", candidates.size());
         timer_start = CPUTimer::getGlobaltime();
-        //#pragma omp parallel for num_threads (4)
+        // #pragma omp parallel for num_threads (4)
         for (unsigned int k = 0; k < candidates.size(); ++k) {
-          auto& cand = candidates[k];
+          auto &cand = candidates[k];
           cand.cost = compute_cost(cand.node_id, cand.node_xl, cand.node_yl,
                                    cand.target_node_id, cand.target_node_xl,
                                    cand.target_node_yl);
@@ -437,7 +467,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
           timer_start = CPUTimer::getGlobaltime();
           auto local_best_cand = *std::min_element(
               candidates.begin(), candidates.end(),
-              [](const SwapCandidate<T>& cand1, const SwapCandidate<T>& cand2) {
+              [](const SwapCandidate<T> &cand1, const SwapCandidate<T> &cand2) {
                 return cand1.cost < cand2.cost;
               });
           if (local_best_cand.cost < best_cand.cost) {
@@ -448,7 +478,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
           find_best_candidate_time += timer_stop - timer_start;
           find_best_candidate_runs += 1;
         }
-        if (best_cand.cost < 0)  // already sorted bins
+        if (best_cand.cost < 0) // already sorted bins
         {
           break;
         }
@@ -473,6 +503,7 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
         db.y[best_cand.node_id] = best_cand.node_yl;
         db.x[best_cand.target_node_id] = best_cand.target_node_xl;
         db.y[best_cand.target_node_id] = best_cand.target_node_yl;
+        net_bounds.refresh(best_cand.node_id, best_cand.target_node_id);
         std::swap(
             row2node_map[row_id][node2row2node_index_map[best_cand.node_id]],
             row2node_map[target_node_row_id]
@@ -488,9 +519,9 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
       }
     }
     iter_time_stop = CPUTimer::getGlobaltime();
-    dreamplacePrint(
-        kINFO, "Iter %d time (ms) \t %g\n", iter,
-        CPUTimer::getTimerPeriod() * (iter_time_stop - iter_time_start));
+    dreamplacePrint(kINFO, "Iter %d time (ms) \t %g\n", iter,
+                    CPUTimer::getTimerPeriod() *
+                        (iter_time_stop - iter_time_start));
 
     hpwls[iter + 1] = db.compute_total_hpwl();
     dreamplacePrint(kINFO, "iteration %d: hpwl %.3f => %.3f (imp. %g%%)\n",
@@ -566,9 +597,9 @@ at::Tensor global_swap_forward(
     globalSwapCPULauncher(db, max_iters);
   });
   total_time_stop = CPUTimer::getGlobaltime();
-  dreamplacePrint(
-      kINFO, "Global swap sequential takes %g ms\n",
-      CPUTimer::getTimerPeriod() * (total_time_stop - total_time_start));
+  dreamplacePrint(kINFO, "Global swap sequential takes %g ms\n",
+                  CPUTimer::getTimerPeriod() *
+                      (total_time_stop - total_time_start));
 
   return pos;
 }

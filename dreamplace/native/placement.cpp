@@ -153,6 +153,16 @@ void options_check(const Options &o) {
               finite(o.order_growth) && o.order_growth > 0 &&
               o.schedule_iterations >= 0,
           "invalid H2D GP hook options");
+  require(
+      finite(o.route.switch_overflow) && finite(o.route.target_overflow) &&
+          o.route.target_overflow >= 0 &&
+          o.route.switch_overflow >= o.route.target_overflow &&
+          o.route.hold >= 1 && o.route.hold <= 1000 && o.route.degree >= 2 &&
+          o.route.degree <= 1000 && o.route.accuracy >= 1 &&
+          o.route.accuracy <= 10 && o.route.probe_iterations >= 1 &&
+          o.route.probe_iterations <= 10000,
+      "invalid route switch, target, hold, degree, accuracy or probe budget");
+  route_model_name(o.route.model);
   require(!o.routability ||
               (finite(o.route_capacity_h) && o.route_capacity_h > 0 &&
                finite(o.route_capacity_v) && o.route_capacity_v > 0),
@@ -181,8 +191,9 @@ void options_check(const Options &o) {
                        o.macro_snap_options.spacing_tolerance,
                        o.macro_snap_options.spacing_penalty,
                        o.macro_snap_options.symmetry_tolerance,
-                       o.macro_snap_options.max_displacement})
+                       o.macro_snap_options.max_displacement}) {
     require(finite(value) && value >= 0, "invalid macro regularity control");
+  }
   require(finite(o.cohesion_weight) && o.cohesion_weight >= 0,
           "invalid cohesion weight");
   require(o.terminal_interval >= 0, "negative terminal update interval");
@@ -402,8 +413,9 @@ void Design::validate() const {
   require(centroid_targets.empty() ||
               centroid_targets.size() == centroid_groups.size(),
           "centroid target size mismatch");
-  for (auto [x, y] : centroid_targets)
+  for (auto [x, y] : centroid_targets) {
     require(finite(x) && finite(y), "nonfinite frozen centroid target");
+  }
   if (!centroid_groups.empty()) {
     require(centroid_node_area.size() == node_x.size() &&
                 node_centroid_color.size() == node_x.size(),
@@ -416,8 +428,9 @@ void Design::validate() const {
       require(c >= -1 && c < static_cast<int>(centroid_color_names.size()) &&
                   (c < 0 || centroid_node_area[n] > 0),
               "invalid centroid color identity");
-      if (c >= 0)
+      if (c >= 0) {
         populated[c] = true;
+      }
     }
     for (size_t g = 0; g < centroid_groups.size(); ++g) {
       const auto &group = centroid_groups[g];
@@ -430,17 +443,19 @@ void Design::validate() const {
       require(!group.nodes.empty() || !group.colors.empty(),
               "empty centroid group");
       std::set<int> nodes, colors;
-      for (int n : group.nodes)
+      for (int n : group.nodes) {
         require(n >= 0 && n < static_cast<int>(node_x.size()) &&
                     nodes.insert(n).second &&
                     std::find(group.colors.begin(), group.colors.end(),
                               node_centroid_color[n]) == group.colors.end() &&
                     centroid_node_area[n] > 0,
                 "invalid or duplicate explicit centroid member");
-      for (int c : group.colors)
+      }
+      for (int c : group.colors) {
         require(c >= 0 && c < static_cast<int>(centroid_color_names.size()) &&
                     colors.insert(c).second && populated[c],
                 "invalid or duplicate centroid anchor color");
+      }
     }
   }
   for (const auto &group : cohesion_groups) {
@@ -509,8 +524,9 @@ double hpwl(const Design &d) {
 }
 
 bool is_legal(const Design &d, std::string *reason) {
-  if (reason)
+  if (reason) {
     reason->clear();
+  }
   d.validate();
   if (has_halo(d)) {
     return is_legal(padded_design(d), reason);
@@ -533,11 +549,12 @@ bool is_legal(const Design &d, std::string *reason) {
         (x < l.xl - eps || y < l.yl - eps || x + w > l.xh + eps ||
          y + h > l.yh + eps || !aligned((x - l.xl) / l.site_width) ||
          !aligned((y - l.yl) / l.row_height))) {
-      if (reason)
+      if (reason) {
         *reason = "bounds or grid: node " + std::to_string(i) +
                   " x=" + std::to_string(x) + " y=" + std::to_string(y) +
                   " site=" + std::to_string(l.site_width) +
                   " row=" + std::to_string(l.row_height);
+      }
       return false;
     }
     // Fixed nodes may lie anywhere (validate() only needs finite coordinates).
@@ -607,9 +624,25 @@ const char *stage_name(PlacementStage stage) {
   return "unknown";
 }
 
+const char *route_model_name(RouteModel model) {
+  switch (model) {
+  case RouteModel::off:
+    return "off";
+  case RouteModel::rudy:
+    return "rudy";
+  case RouteModel::rsmt:
+    return "rsmt";
+  case RouteModel::automatic:
+    return "auto";
+  }
+  throw std::invalid_argument("invalid route model");
+}
 Result place(Design &design, const Options &options, GpState *state) {
   design.validate();
   Options o = options;
+  if (o.route.model == RouteModel::off) {
+    o.routability = false;
+  }
   if (o.automatic_bins) {
     const auto bins = detail::automatic_bins(design);
     o.bins_x = bins.first;
@@ -755,17 +788,21 @@ Result place(Design &design, const Options &options, GpState *state) {
                 halo(halo_model.node_halo_x, i, design.layout.site_width);
             const double hy =
                 halo(halo_model.node_halo_y, i, design.layout.row_height);
-            if (!update.node_size_x.empty())
+            if (!update.node_size_x.empty()) {
               update.node_size_x.at(i) += 2 * hx;
-            if (!update.node_size_y.empty())
+            }
+            if (!update.node_size_y.empty()) {
               update.node_size_y.at(i) += 2 * hy;
+            }
             for (int k = physical.flat_node2pin_start[i];
                  k < physical.flat_node2pin_start[i + 1]; ++k) {
               const int pin = physical.flat_node2pin[k];
-              if (!update.pin_offset_x.empty())
+              if (!update.pin_offset_x.empty()) {
                 update.pin_offset_x.at(pin) += hx;
-              if (!update.pin_offset_y.empty())
+              }
+              if (!update.pin_offset_y.empty()) {
                 update.pin_offset_y.at(pin) += hy;
+              }
             }
           }
         }
@@ -776,11 +813,12 @@ Result place(Design &design, const Options &options, GpState *state) {
       control.terminal_update = [&](const Design &snapshot, int iteration) {
         return o.terminal_update(unpad(snapshot), iteration);
       };
-      if (o.observer)
+      if (o.observer) {
         control.observer = [&](const Design &snapshot, PlacementStage stage,
                                int iteration) {
           o.observer(unpad(snapshot), stage, iteration);
         };
+      }
     }
     const auto result = place(padded, control, state);
     if ((o.checkpoint && o.checkpoint_interval > 0) ||
@@ -820,26 +858,31 @@ Result place(Design &design, const Options &options, GpState *state) {
     salt(o.auxiliary_bins);
     salt(o.local_density_bins);
     for (double v : {o.local_density_weight, o.local_density_range,
-                     o.local_density_jitter})
+                     o.local_density_jitter}) {
       salt(std::bit_cast<std::uint64_t>(v));
+    }
   }
-  if (o.macro_cell_density_weight)
+  if (o.macro_cell_density_weight) {
     salt(std::bit_cast<std::uint64_t>(o.macro_cell_density_weight));
+  }
   if (o.macro_density_pull_weight) {
     salt(std::bit_cast<std::uint64_t>(o.macro_density_pull_weight));
     salt(std::bit_cast<std::uint64_t>(o.macro_density_pull_range));
   }
-  if (o.density_upper_bound)
+  if (o.density_upper_bound) {
     salt(o.density_upper_bound);
-  if (o.min_iterations != 40)
+  }
+  if (o.min_iterations != 40) {
     salt(o.min_iterations);
+  }
   if (o.post_density_factor) {
     salt(0x706f737464656e73ULL);
     salt(o.post_density_factor);
     salt(std::bit_cast<std::uint64_t>(o.convergence_tolerance));
   }
-  if (o.wirelength_gamma_end != 0.05)
+  if (o.wirelength_gamma_end != 0.05) {
     salt(std::bit_cast<std::uint64_t>(o.wirelength_gamma_end));
+  }
   salt(o.seed);
   for (double v :
        {design.layout.xl, design.layout.yl, design.layout.xh, design.layout.yh,
@@ -878,8 +921,9 @@ Result place(Design &design, const Options &options, GpState *state) {
   if (o.fixed_macro_overlap_weight > 0) {
     salt(std::uint64_t{0x66697865646d6163});
     salt(std::bit_cast<std::uint64_t>(o.fixed_macro_overlap_weight));
-    for (auto v : design.node_macro)
+    for (auto v : design.node_macro) {
       salt(v);
+    }
   }
   if (o.exact_cell_density) {
     salt(std::uint64_t{0x657861637463656c});
@@ -894,11 +938,14 @@ Result place(Design &design, const Options &options, GpState *state) {
       salt(std::bit_cast<std::uint64_t>(o.route_capacity_h));
       salt(std::bit_cast<std::uint64_t>(o.route_capacity_v));
       for (const auto *values :
-           {&design.node_blocked_capacity_h, &design.node_blocked_capacity_v})
-        for (double v : *values)
+           {&design.node_blocked_capacity_h, &design.node_blocked_capacity_v}) {
+        for (double v : *values) {
           salt(std::bit_cast<std::uint64_t>(v));
-      for (auto v : design.node_inflatable)
+        }
+      }
+      for (auto v : design.node_inflatable) {
         salt(v);
+      }
     }
     salt(std::bit_cast<std::uint64_t>(o.macro_overlap_weight));
     salt(std::bit_cast<std::uint64_t>(o.macro_jitter));
@@ -906,27 +953,39 @@ Result place(Design &design, const Options &options, GpState *state) {
       salt(m);
     }
   }
-  if (o.improved_routability && !o.routability_charge_compensation)
+  if (o.improved_routability && !o.routability_charge_compensation) {
     salt(0x524f555445434847ULL);
+  }
   if (o.routability && o.routability_macro_weight > 0) {
     salt(0x525544594d414352ULL);
     salt(std::bit_cast<std::uint64_t>(o.routability_macro_weight));
     salt(std::bit_cast<std::uint64_t>(o.routability_macro_range));
   }
   if (o.macro_align_weight > 0) {
-    if (o.macro_align_global)
+    if (o.macro_align_global) {
       salt(0x5354524950414c49ULL);
+    }
     salt(std::bit_cast<std::uint64_t>(o.macro_align_weight));
     salt(std::bit_cast<std::uint64_t>(o.macro_align_sigma));
     salt(std::bit_cast<std::uint64_t>(o.macro_align_overlap_boost));
     salt(o.macro_align_start);
     salt(o.macro_align_full);
     salt(o.macro_align_nearest);
-    for (auto c : design.node_align_class)
+    for (auto c : design.node_align_class) {
       salt(c);
-    for (auto m : design.node_macro)
+    }
+    for (auto m : design.node_macro) {
       salt(m);
+    }
   }
+  salt(static_cast<std::uint64_t>(o.route.model));
+  salt(std::bit_cast<std::uint64_t>(o.route.switch_overflow));
+  salt(std::bit_cast<std::uint64_t>(o.route.target_overflow));
+  salt(o.route.hold);
+  salt(o.route.degree);
+  salt(o.route.accuracy);
+  salt(o.route.probe);
+  salt(o.route.probe_iterations);
   if (warm && state->signature != signature) {
     throw std::invalid_argument("GP continuation options changed");
   }
@@ -1020,8 +1079,9 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
     if (centroids) {
       r.centroid.started = true;
-      if (o.observer)
+      if (o.observer) {
         o.observer(d, PlacementStage::centroid_start, 0);
+      }
     }
     if (o.add_fillers) {
       double target_area =
@@ -1038,12 +1098,13 @@ Result place(Design &design, const Options &options, GpState *state) {
         // on each axis. SRAM area must not turn virtual particles into long
         // row-height strips. The uncapped legacy path retains its old sizing.
         std::vector<double> widths, heights;
-        for (int i = 0; i < d.num_movable; ++i)
+        for (int i = 0; i < d.num_movable; ++i) {
           if ((d.node_macro.empty() || !d.node_macro[i]) &&
               d.node_size_x[i] > 0 && d.node_size_y[i] > 0) {
             widths.push_back(d.node_size_x[i]);
             heights.push_back(d.node_size_y[i]);
           }
+        }
         const auto trimmed_mean = [](std::vector<double> &v) {
           std::sort(v.begin(), v.end());
           const size_t trim = v.size() / 20;
@@ -1056,8 +1117,9 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
       }
       fw = std::clamp(fw, l.site_width, width);
-      if (o.filler_max_count > 0)
+      if (o.filler_max_count > 0) {
         fh = std::min(height, std::max(fh, l.row_height));
+      }
       if (o.filler_max_count > 0 &&
           target_area > fw * fh * o.filler_max_count) {
         const double scale =
@@ -1071,8 +1133,9 @@ Result place(Design &design, const Options &options, GpState *state) {
                       std::max(fh, target_area / (fw * o.filler_max_count)));
       }
       double desired = std::floor(target_area / (fw * fh));
-      if (o.filler_max_count > 0)
+      if (o.filler_max_count > 0) {
         desired = std::min(desired, double(o.filler_max_count));
+      }
       require(desired <= 1000000,
               "too many fillers; reduce core whitespace or disable fillers");
       int fillers = desired;
@@ -1131,14 +1194,16 @@ Result place(Design &design, const Options &options, GpState *state) {
         ratio[i] *= o.target_density;
       }
     }
-    PoissonSolver solver(o.bins_x, o.bins_y, width, height, o.dynamic_bins);
+    PoissonSolver solver(o.bins_x, o.bins_y, width, height, o.dynamic_bins, 0,
+                         o.num_threads);
     std::unique_ptr<detail::LocalDensity> local_density;
 
     if (o.local_density_weight > 0 || o.macro_cell_density_weight > 0 ||
         o.macro_density_pull_weight > 0) {
       require(!state, "local spreading continuation is not supported yet");
       local_density = std::make_unique<detail::LocalDensity>(
-          model, o.local_density_bins, o.local_density_range, o.target_density);
+          model, o.local_density_bins, o.local_density_range, o.target_density,
+          o.num_threads);
     }
     std::vector<double> map, phi, fx, fy;
     auto x = d.node_x, y = d.node_y, prev_x = x, prev_y = y;
@@ -1149,6 +1214,100 @@ Result place(Design &design, const Options &options, GpState *state) {
     double previous_overflow = warm ? state->previous_overflow : -1;
     double previous_hpwl = warm ? state->previous_hpwl : r.initial_hpwl;
     double route_overflow = 0, inflated_ratio = 1;
+    RouteModel active_route =
+        warm ? state->route_model
+             : (o.route.model == RouteModel::rsmt ? RouteModel::rsmt
+                                                  : RouteModel::rudy);
+    if (!o.routability) {
+      active_route = RouteModel::off;
+    }
+    int route_hold = warm ? state->route_hold : 0;
+    int probe_deadline = warm ? state->route_probe_deadline : 0;
+    if (warm) {
+      r.route_switch_iteration = state->route_switch_iteration;
+      r.route_switch_rudy = state->route_switch_rudy;
+      r.route_switch_rsmt = state->route_switch_rsmt;
+      r.route_probed = state->route_probed;
+    }
+    double route_sample_seconds = 0, route_peak_utilization = 0;
+    bool route_sampled = false;
+    int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
+    double route_rudy_seconds = 0, route_rsmt_seconds = 0;
+    r.route_model = active_route;
+    auto measure_route = [&](const Design &physical, RouteModel model) {
+      const auto started = std::chrono::steady_clock::now();
+      RudyOptions route_options{aux_x,
+                                aux_y,
+                                o.route_capacity_h,
+                                o.route_capacity_v,
+                                o.improved_routability,
+                                o.improved_routability};
+      route_options.model =
+          model == RouteModel::rsmt ? RudyModel::rsmt : RudyModel::bbox;
+      route_options.degree = o.route.degree;
+      route_options.accuracy = o.route.accuracy;
+      route_options.initialize = o.route_initialize;
+      auto result = rudy(physical, route_options);
+      const double seconds = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now() - started)
+                                 .count();
+      r.rudy_seconds += seconds;
+      route_sample_seconds += seconds;
+      ++r.rudy_calls;
+      ++route_calls;
+      route_sampled = true;
+      if (model == RouteModel::rsmt) {
+        route_rsmt_seconds += seconds;
+      } else {
+        route_rudy_seconds += seconds;
+      }
+      route_blocked_pins = result.blocked_pins;
+      route_unroutable_nets = result.unroutable_nets;
+      return result;
+    };
+    auto latch_route = [&](const Design &physical, RudyResult old,
+                           int iteration) {
+      auto result = measure_route(physical, RouteModel::rsmt);
+      r.route_switch_iteration = iteration;
+      r.route_switch_rudy = old.overflow;
+      r.route_switch_rsmt = result.overflow;
+      active_route = r.route_model = RouteModel::rsmt;
+      return result;
+    };
+    auto estimate_route = [&](const Design &physical, int iteration) {
+      auto result = measure_route(physical, active_route);
+      if (active_route == RouteModel::rudy &&
+          o.route.model == RouteModel::automatic) {
+        route_hold =
+            result.overflow <= o.route.switch_overflow ? route_hold + 1 : 0;
+        if (route_hold >= o.route.hold) {
+          result = latch_route(physical, std::move(result), iteration);
+        }
+      }
+      route_peak_utilization = result.max_utilization;
+      return result;
+    };
+    auto route_history = [&](GpSample &sample) {
+      sample.route_blocked_pins = route_blocked_pins;
+      sample.route_unroutable_nets = route_unroutable_nets;
+      sample.route_peak_utilization = route_peak_utilization;
+      sample.route_calls = route_calls;
+      sample.route_rudy_seconds = route_rudy_seconds;
+      sample.route_rsmt_seconds = route_rsmt_seconds;
+      route_calls = 0;
+      route_rudy_seconds = route_rsmt_seconds = 0;
+      sample.route_model = active_route;
+      sample.route_sampled = route_sampled;
+      sample.route_seconds = route_sample_seconds;
+      sample.route_switch_iteration = r.route_switch_iteration;
+      sample.route_switch_rudy = r.route_switch_rudy;
+      sample.route_switch_rsmt = r.route_switch_rsmt;
+      sample.route_probe = r.route_probed;
+      sample.route_bins = aux_x * aux_y;
+      route_sample_seconds = 0;
+      route_sampled = false;
+    };
+
     const bool macro_routing =
         o.routability && o.improved_routability &&
         o.routability_macro_weight > 0 && !d.node_macro.empty() &&
@@ -1200,8 +1359,9 @@ Result place(Design &design, const Options &options, GpState *state) {
     double previous_circle_overlap = 1;
     if (warm && o.improved_routability) {
       double inflated = 0;
-      for (int i = 0; i < d.num_movable; ++i)
+      for (int i = 0; i < d.num_movable; ++i) {
         inflated += d.node_size_x[i] * d.node_size_y[i] * inflation[i];
+      }
       inflated_ratio = area ? inflated / area : 1;
     }
     if (warm) {
@@ -1285,21 +1445,15 @@ Result place(Design &design, const Options &options, GpState *state) {
         Design physical = model;
         std::copy_n(d.node_x.begin(), original, physical.node_x.begin());
         std::copy_n(d.node_y.begin(), original, physical.node_y.begin());
-        const auto rudy_start = std::chrono::steady_clock::now();
-        const auto route = rudy(
-            physical, {aux_x, aux_y, o.route_capacity_h, o.route_capacity_v,
-                       o.improved_routability, o.improved_routability});
-        r.rudy_seconds += std::chrono::duration<double>(
-                              std::chrono::steady_clock::now() - rudy_start)
-                              .count();
-        ++r.rudy_calls;
+        const auto route = estimate_route(physical, global_iter + 1);
         route_overflow = route.overflow;
         if (macro_routing) {
           routing_utilization.resize(route.horizontal.size());
-          for (size_t k = 0; k < routing_utilization.size(); ++k)
+          for (size_t k = 0; k < routing_utilization.size(); ++k) {
             routing_utilization[k] =
                 std::max({route.horizontal[k], route.vertical[k],
                           route.pin_utilization[k]});
+          }
         }
         auto proposed = inflation;
         double added = 0, current = 0;
@@ -1344,8 +1498,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       if (o.improved_routability && o.routability_charge_compensation &&
           n > original) {
         double filler_area = 0;
-        for (int i = original; i < n; ++i)
+        for (int i = original; i < n; ++i) {
           filler_area += d.node_size_x[i] * d.node_size_y[i];
+        }
         // Keep total charge consistent with the effective capacity. A uniform
         // target shift is the discarded DC mode and cannot change forces.
         const double real_charge =
@@ -1355,13 +1510,15 @@ Result place(Design &design, const Options &options, GpState *state) {
             std::max(0., target * (width * height - fixed_area) - real_charge) *
             o.filler_area_fraction;
         filler_scale = filler_area ? budget / filler_area : 0;
-        for (int i = original; i < n; ++i)
+        for (int i = original; i < n; ++i) {
           ratio[i] = filler_scale * d.node_size_x[i] * d.node_size_y[i] /
                      (sx[i] * sy[i]);
-        for (int i = d.num_movable; i < original; ++i)
+        }
+        for (int i = d.num_movable; i < original; ++i) {
           ratio[i] = sx[i] * sy[i] > 0 ? target * d.node_size_x[i] *
                                              d.node_size_y[i] / (sx[i] * sy[i])
                                        : 0;
+        }
       }
       if (o.routability) {
         for (int i = 0; i < d.num_movable; ++i) {
@@ -1385,8 +1542,9 @@ Result place(Design &design, const Options &options, GpState *state) {
                           ratio, map);
       for (auto &v : map) {
         v = v / (dx * dy) - target;
-        if (o.density_upper_bound)
+        if (o.density_upper_bound) {
           v = std::max(0., v);
+        }
       }
       const auto poisson_start = std::chrono::steady_clock::now();
       solver.solve(map, phi, fx, fy);
@@ -1416,30 +1574,36 @@ Result place(Design &design, const Options &options, GpState *state) {
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           begin)
                 .count();
-        if (o.macro_density_pull_weight > 0)
-          for (int i = 0; i < d.num_movable; ++i)
-            if (!d.node_macro.empty() && d.node_macro[i])
+        if (o.macro_density_pull_weight > 0) {
+          for (int i = 0; i < d.num_movable; ++i) {
+            if (!d.node_macro.empty() && d.node_macro[i]) {
               ordinary_macro_force +=
                   std::abs(wg.x[i] + density_weight * dg.x[i]) +
                   std::abs(wg.y[i] + density_weight * dg.y[i]);
+            }
+          }
+        }
       }
       if (local_density && o.local_density_weight > 0) {
         const auto begin = std::chrono::steady_clock::now();
         const auto lg = local_density->gradient(d, false, cell_density);
         double base = 0, force = 0;
-        for (int i = 0; i < d.num_movable; ++i)
+        for (int i = 0; i < d.num_movable; ++i) {
           if (d.node_macro.empty() || !d.node_macro[i]) {
             base += std::abs(wg.x[i] + density_weight * dg.x[i]) +
                     std::abs(wg.y[i] + density_weight * dg.y[i]);
             force += std::abs(lg.x[i]) + std::abs(lg.y[i]);
           }
+        }
         // Calibrate to a physical reference at target density, not the
         // current field. An initially sparse design must not turn tiny noise
         // into wirelength-sized force. Cap aggregate pressure on dense cases.
         double cell_area = 0;
-        for (int i = 0; i < d.num_movable; ++i)
-          if (d.node_macro.empty() || !d.node_macro[i])
+        for (int i = 0; i < d.num_movable; ++i) {
+          if (d.node_macro.empty() || !d.node_macro[i]) {
             cell_area += d.node_size_x[i] * d.node_size_y[i];
+          }
+        }
         const double pitch = std::sqrt(width * height) / o.local_density_bins;
         const double reference =
             cell_area * o.target_density * pitch / (2 * std::acos(-1.));
@@ -1458,13 +1622,14 @@ Result place(Design &design, const Options &options, GpState *state) {
         const auto begin = std::chrono::steady_clock::now();
         const auto mg = local_density->gradient(d, true, cell_density);
         double base = 0, force = 0, macro_area = 0;
-        for (int i = 0; i < d.num_movable; ++i)
+        for (int i = 0; i < d.num_movable; ++i) {
           if (!d.node_macro.empty() && d.node_macro[i]) {
             base += std::abs(wg.x[i] + density_weight * dg.x[i]) +
                     std::abs(wg.y[i] + density_weight * dg.y[i]);
             force += std::abs(mg.x[i]) + std::abs(mg.y[i]);
             macro_area += d.node_size_x[i] * d.node_size_y[i];
           }
+        }
         const double pitch = std::sqrt(width * height) / o.local_density_bins;
         const double reference =
             macro_area * o.target_density * pitch / (2 * std::acos(-1.));
@@ -1491,8 +1656,9 @@ Result place(Design &design, const Options &options, GpState *state) {
             detail::centroid_attraction_reference(d, o.target_density);
         double base = 0, norm = 0;
         for (int i = 0; i < d.num_movable; ++i) {
-          if (reference[i] == 0)
+          if (reference[i] == 0) {
             continue;
+          }
           base += std::pow(wg.x[i] + density_weight * dg.x[i], 2) +
                   std::pow(wg.y[i] + density_weight * dg.y[i], 2);
           norm += reference[i] * reference[i];
@@ -1508,13 +1674,14 @@ Result place(Design &design, const Options &options, GpState *state) {
         auto pg = local_density->density_pull(d, cell_density,
                                               o.macro_density_pull_range);
         double norm = 0, reference = 0;
-        for (int i = 0; i < d.num_movable; ++i)
+        for (int i = 0; i < d.num_movable; ++i) {
           if (!d.node_macro.empty() && d.node_macro[i]) {
             norm += std::abs(pg.x[i]) + std::abs(pg.y[i]);
             reference +=
                 d.node_size_x[i] * d.node_size_y[i] * o.target_density /
                 std::max(1e-12, std::min(d.node_size_x[i], d.node_size_y[i]));
           }
+        }
         const double scale = (centroids && !r.centroid.started)
                                  ? 0
                                  : o.macro_density_pull_weight *
@@ -1529,8 +1696,9 @@ Result place(Design &design, const Options &options, GpState *state) {
                            2)
                 : 1;
         std::vector<double> anchor;
-        if (r.centroid.attraction_coefficient > 0)
+        if (r.centroid.attraction_coefficient > 0) {
           anchor = detail::centroid_attraction_reference(d, o.target_density);
+        }
         double applied = 0;
         for (int i = 0; i < d.num_movable; ++i) {
           double gx = scale * pg.x[i], gy = scale * pg.y[i];
@@ -1545,10 +1713,11 @@ Result place(Design &design, const Options &options, GpState *state) {
             const double fraction = std::min(1., cap / magnitude);
             gx *= fraction;
             gy *= fraction;
-            if (anchor_force > 0)
+            if (anchor_force > 0) {
               r.macro_density_pull_anchor_ratio =
                   std::max(r.macro_density_pull_anchor_ratio,
                            std::hypot(gx, gy) / anchor_force);
+            }
           }
           wg.x[i] += gx;
           wg.y[i] += gy;
@@ -1570,8 +1739,9 @@ Result place(Design &design, const Options &options, GpState *state) {
         double base = 0;
         int macros = 0;
         for (int i = 0; i < d.num_movable; ++i) {
-          if (!d.node_macro[i])
+          if (!d.node_macro[i]) {
             continue;
+          }
           base += std::abs(wg.x[i] + density_weight * dg.x[i]) +
                   std::abs(wg.y[i] + density_weight * dg.y[i]);
           ++macros;
@@ -1607,8 +1777,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
       if (o.macro_align_weight > 0) {
         const auto align_start = std::chrono::steady_clock::now();
-        if (o.macro_align_global || global_iter % 20 == 0)
+        if (o.macro_align_global || global_iter % 20 == 0) {
           align_pairs = alignment_pairs(d);
+        }
         align_ramp = detail::macro_align_ramp(o, global_iter);
         double mean_x = 0, mean_y = 0;
         int macros = 0;
@@ -1657,15 +1828,17 @@ Result place(Design &design, const Options &options, GpState *state) {
         const auto begin = std::chrono::steady_clock::now();
         const auto cg = detail::centroid_attraction(d, 1);
         detail::Gradient rg;
-        if (o.centroid_repulsion_weight > 0)
+        if (o.centroid_repulsion_weight > 0) {
           rg = detail::centroid_repulsion(d, 1, o.target_density);
+        }
         double base = 0, attraction = 0, repulsion = 0;
         for (int i = 0; i < d.num_movable; ++i) {
           const bool repels =
               o.centroid_repulsion_weight > 0 && (rg.x[i] != 0 || rg.y[i] != 0);
           if (cg.x[i] != 0 || cg.y[i] != 0 || repels) {
-            if (repels)
+            if (repels) {
               repulsion += rg.x[i] * rg.x[i] + rg.y[i] * rg.y[i];
+            }
             base += std::pow(wg.x[i] + density_weight * dg.x[i], 2) +
                     std::pow(wg.y[i] + density_weight * dg.y[i], 2);
             attraction += cg.x[i] * cg.x[i] + cg.y[i] * cg.y[i];
@@ -1743,9 +1916,10 @@ Result place(Design &design, const Options &options, GpState *state) {
           for (int i = 0; i < original; ++i) {
             wg.x[i] += alignment_gradient.x[i];
             wg.y[i] += alignment_gradient.y[i];
-            if (i < d.num_movable)
+            if (i < d.num_movable) {
               force += std::abs(alignment_gradient.x[i]) +
                        std::abs(alignment_gradient.y[i]);
+            }
           }
           centroid_align_force = std::max(centroid_align_force, force);
         }
@@ -1754,9 +1928,10 @@ Result place(Design &design, const Options &options, GpState *state) {
           for (int i = 0; i < original; ++i) {
             wg.x[i] += parent_gradient.x[i];
             wg.y[i] += parent_gradient.y[i];
-            if (i < d.num_movable)
+            if (i < d.num_movable) {
               force += std::abs(parent_gradient.x[i]) +
                        std::abs(parent_gradient.y[i]);
+            }
           }
           centroid_parent_force = std::max(centroid_parent_force, force);
         }
@@ -1863,8 +2038,9 @@ Result place(Design &design, const Options &options, GpState *state) {
           invoke = forced_checkpoint || measured <= o.stop_overflow;
           r.checkpoint_history.push_back(
               {global_iter + 1, measured, invoke, forced_checkpoint});
-          if (o.checkpoint_observer)
+          if (o.checkpoint_observer) {
             o.checkpoint_observer(r.checkpoint_history.back());
+          }
         }
         GpUpdate update;
         if (invoke) {
@@ -1898,12 +2074,13 @@ Result place(Design &design, const Options &options, GpState *state) {
                   "GP replacement missing node mapping");
           require(candidate.centroid_groups.size() == d.centroid_groups.size(),
                   "GP replacement changed centroid candidates");
-          for (size_t g = 0; g < d.centroid_groups.size(); ++g)
+          for (size_t g = 0; g < d.centroid_groups.size(); ++g) {
             require(candidate.centroid_groups[g].name ==
                             d.centroid_groups[g].name &&
                         candidate.centroid_groups[g].parent ==
                             d.centroid_groups[g].parent,
                     "GP replacement changed centroid identity");
+          }
           std::vector<bool> seen(original);
           std::vector<double> next_inflation(size, 1);
           const auto is_macro = [](const Design &v, int i) {
@@ -1942,19 +2119,21 @@ Result place(Design &design, const Options &options, GpState *state) {
                           candidate.node_size_y[i] == d.node_size_y[old] &&
                           pin_geometry(candidate, i) == pin_geometry(d, old),
                       "GP replacement changed macro/fixed geometry");
-              if (old >= d.num_movable)
+              if (old >= d.num_movable) {
                 require(candidate.node_x[i] == x[old] &&
                             candidate.node_y[i] == y[old],
                         "GP replacement moved a fixed node");
+              }
             }
             candidate.node_x[i] = x[old];
             candidate.node_y[i] = y[old];
             next_inflation[i] = inflation[old];
           }
-          for (int i = 0; i < original; ++i)
+          for (int i = 0; i < original; ++i) {
             require(seen[i] || (i < d.num_movable && !is_macro(d, i) &&
                                 !d.node_macro.empty()),
                     "GP replacement removed a macro or fixed node");
+          }
           for (int i = original; i < n; ++i) {
             candidate.node_x.push_back(x[i]);
             candidate.node_y.push_back(y[i]);
@@ -2039,10 +2218,12 @@ Result place(Design &design, const Options &options, GpState *state) {
               inflated += a * inflation[i];
             }
             if (!d.centroid_node_area.empty() &&
-                (d.node_macro.empty() || !d.node_macro[i]))
+                (d.node_macro.empty() || !d.node_macro[i])) {
               d.centroid_node_area[i] = physical_area(i);
-            if (active(i))
+            }
+            if (active(i)) {
               project(i, x[i], y[i]);
+            }
           }
           inflated_ratio = area ? inflated / area : 1;
           const double capacity =
@@ -2060,20 +2241,23 @@ Result place(Design &design, const Options &options, GpState *state) {
                                      : 0;
             // Fixed obstacles keep target_density, as in the no-checkpoint
             // path; only scaled movable macros follow the compensation.
-            if (!active(i))
+            if (!active(i)) {
               ratio[i] *= o.target_density;
-            else if (o.scale_macro_density && i < original &&
-                     !d.node_macro.empty() && d.node_macro[i])
+            } else if (o.scale_macro_density && i < original &&
+                       !d.node_macro.empty() && d.node_macro[i]) {
               ratio[i] *= o.routability_charge_compensation ? capacity
                                                             : o.target_density;
+            }
           }
           for (auto &g : d.cohesion_groups) {
-            if (!g.areas.empty())
+            if (!g.areas.empty()) {
               for (size_t k = 0; k < g.nodes.size(); ++k) {
                 const int i = g.nodes[k];
-                if (d.node_macro.empty() || !d.node_macro[i])
+                if (d.node_macro.empty() || !d.node_macro[i]) {
                   g.areas[k] = physical_area(i);
+                }
               }
+            }
           }
           model = d;
           model.node_x.assign(x.begin(), x.begin() + original);
@@ -2081,10 +2265,11 @@ Result place(Design &design, const Options &options, GpState *state) {
           model.node_size_x.resize(original);
           model.node_size_y.resize(original);
           model.build_maps();
-          if (local_density)
+          if (local_density) {
             local_density = std::make_unique<detail::LocalDensity>(
                 model, o.local_density_bins, o.local_density_range,
-                o.target_density);
+                o.target_density, o.num_threads);
+          }
           t = 1;
           prev_x = x;
           prev_y = y;
@@ -2134,8 +2319,9 @@ Result place(Design &design, const Options &options, GpState *state) {
           // Report the current legal-geometry candidates, not stale pairs from
           // before this iteration's move. The next force refreshes
           // independently.
-          if (o.macro_align_global)
+          if (o.macro_align_global) {
             align_pairs = alignment_pairs(physical);
+          }
           detail::macro_alignment(physical, align_pairs, 0, 0,
                                   o.macro_align_sigma, &align_residual,
                                   o.macro_align_global);
@@ -2172,9 +2358,6 @@ Result place(Design &design, const Options &options, GpState *state) {
         r.history.back().macro_routing_channels = macro_routing_channels_peak;
         macro_routing_force_peak = 0;
         macro_routing_channels_peak = 0;
-        if (!routing_utilization.empty())
-          r.history.back().route_peak_utilization = *std::max_element(
-              routing_utilization.begin(), routing_utilization.end());
         if (separate_circles) {
           const auto circles =
               detail::centroid_circle_overlaps(physical, o.target_density);
@@ -2187,9 +2370,6 @@ Result place(Design &design, const Options &options, GpState *state) {
           r.centroid.circles_converged =
               circles.maximum <= o.centroid_stop_overlap;
           r.centroid.effective_repulsion_weight = centroid_repulsion_weight;
-        }
-        if (o.progress_observer) {
-          o.progress_observer(r.history.back());
         }
         const bool settled =
             global_iter + 1 >= o.min_iterations &&
@@ -2228,49 +2408,74 @@ Result place(Design &design, const Options &options, GpState *state) {
               stable ? convergence.stable_samples + 1 : 0;
           convergence.previous_hpwl = current_hpwl;
           convergence.previous_inflation = inflated_ratio;
-          if (convergence.stable_samples >= 2 && o.routability) {
-            // Inflation feedback is sampled before the step. Recheck the
-            // current physical geometry before claiming routing convergence.
-            const auto rudy_start = std::chrono::steady_clock::now();
-            route_overflow =
-                rudy(physical,
-                     {aux_x, aux_y, o.route_capacity_h, o.route_capacity_v,
-                      o.improved_routability, o.improved_routability})
-                    .overflow;
-            r.rudy_seconds += std::chrono::duration<double>(
-                                  std::chrono::steady_clock::now() - rudy_start)
-                                  .count();
-            ++r.rudy_calls;
-            r.history.back().route_overflow = route_overflow;
+        }
+        const bool route_candidate = o.post_density_factor
+                                         ? convergence.stable_samples >= 2
+                                         : (geometry_ready && o.route.probe);
+        if (route_candidate && o.routability) {
+          auto route = estimate_route(physical, global_iter + 1);
+          if (o.route.probe && !r.route_probed && geometry_ready &&
+              convergence.timing_satisfied &&
+              active_route == RouteModel::rudy) {
+            r.route_probed = true;
+            auto probe = measure_route(physical, RouteModel::rsmt);
+            r.route_switch_rudy = route.overflow;
+            r.route_switch_rsmt = probe.overflow;
+            if (probe.overflow > o.route.target_overflow) {
+              active_route = r.route_model = RouteModel::rsmt;
+              r.route_switch_iteration = global_iter + 1;
+              probe_deadline =
+                  std::min(o.max_iterations + offset,
+                           global_iter + 1 + o.route.probe_iterations);
+              convergence.stable_samples = 0;
+              route = std::move(probe);
+            }
           }
+          route_peak_utilization = route.max_utilization;
+          route_overflow = route.overflow;
+          r.history.back().route_overflow = route_overflow;
+        }
+        if (o.post_density_factor || probe_deadline) {
           r.objective_converged =
               (!density_gated_checkpoints || checkpoint_invoked) &&
-              convergence.stable_samples >= 2 &&
-              (!o.routability || route_overflow <= 1e-9) &&
+              route_candidate &&
+              convergence.stable_samples >= (o.post_density_factor ? 2 : 0) &&
+              (!o.routability || route_overflow <= o.route.target_overflow ||
+               (r.route_probed && r.route_switch_iteration < 0 &&
+                r.route_switch_rsmt <= o.route.target_overflow)) &&
               convergence.timing_satisfied;
           r.continuation_limit =
-              convergence.deadline && iteration >= convergence.deadline;
+              probe_deadline ? global_iter + 1 >= probe_deadline
+                             : (convergence.deadline &&
+                                global_iter + 1 >= convergence.deadline);
           r.density_iteration = convergence.density_iteration;
-          r.continuation_deadline = convergence.deadline;
+          r.continuation_deadline =
+              probe_deadline ? probe_deadline : convergence.deadline;
           r.timing_observed = convergence.timing_observed;
           r.timing_satisfied = convergence.timing_satisfied;
         }
-        if (geometry_ready &&
-            (!o.post_density_factor || r.objective_converged)) {
+        route_history(r.history.back());
+        if (o.progress_observer) {
+          o.progress_observer(r.history.back());
+        }
+        if (geometry_ready && ((!o.post_density_factor && !probe_deadline) ||
+                               r.objective_converged)) {
           r.converged = true;
           break;
         }
-        if (r.continuation_limit)
+        if (r.continuation_limit) {
           break;
+        }
         if (separate_circles && global_iter + 1 >= o.centroid_ramp &&
             !r.centroid.circles_converged) {
           const double improvement =
               (previous_circle_overlap - r.centroid.max_circle_overlap) /
               std::max(previous_circle_overlap, 1e-12);
-          if (improvement < .1)
+          if (improvement < .1) {
             centroid_repulsion_weight =
                 std::min(centroid_repulsion_weight * 2,
                          o.centroid_repulsion_weight * 10000);
+          }
           previous_circle_overlap = r.centroid.max_circle_overlap;
         }
         double growth = 1.15;
@@ -2290,8 +2495,9 @@ Result place(Design &design, const Options &options, GpState *state) {
         // already-satisfied density constraint. Resume if density rises again.
         if ((!separate_circles && !o.density_upper_bound &&
              !o.post_density_factor) ||
-            r.overflow > o.stop_overflow)
+            r.overflow > o.stop_overflow) {
           density_weight = std::min(density_weight * growth, 1e12);
+        }
       }
     }
     r.centroid.completed = r.centroid.started;
@@ -2299,8 +2505,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       // A forced cap need not coincide with a 20-iteration history sample.
       r.timing_observed = convergence.timing_observed;
       r.timing_satisfied = convergence.timing_satisfied;
-      if (!convergence.timing_satisfied)
+      if (!convergence.timing_satisfied) {
         r.objective_converged = false;
+      }
     }
     if (state) {
       next.convergence = convergence;
@@ -2322,6 +2529,13 @@ Result place(Design &design, const Options &options, GpState *state) {
       next.step = alpha;
       next.inflation = inflation;
       next.routing_utilization = routing_utilization;
+      next.route_model = active_route;
+      next.route_hold = route_hold;
+      next.route_probe_deadline = probe_deadline;
+      next.route_probed = r.route_probed;
+      next.route_switch_iteration = r.route_switch_iteration;
+      next.route_switch_rudy = r.route_switch_rudy;
+      next.route_switch_rsmt = r.route_switch_rsmt;
       next.align_pairs = align_pairs;
     }
     r.selected_iteration = offset + r.iterations;
@@ -2381,8 +2595,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       r.alignment = detail::macro_alignment_report(before, d, snap);
       r.alignment.macro_legalization_seconds = times.macro_legalization_seconds;
       r.alignment.cell_legalization_seconds = times.cell_legalization_seconds;
-    } else
+    } else {
       detail::legalize(d, aux_x, aux_y, nullptr, &r.alignment);
+    }
     if (!is_legal(d) || !detail::kernel_is_legal(d)) {
       throw std::runtime_error("DREAMPlace legalization failed: insufficient "
                                "row space or unsupported geometry");

@@ -3,11 +3,16 @@
 #include "dreamplace/native/placement.hpp"
 
 namespace DreamPlace::native {
+enum class RudyModel { bbox, rsmt };
 struct RudyOptions {
   int bins_x = 32, bins_y = 32;
   // Routing tracks per layout unit; callers derive these from their technology.
   double horizontal_capacity = 1, vertical_capacity = 1;
   bool macro_blockages = false, pin_access = false;
+  RudyModel model = RudyModel::bbox;
+  int degree = 40, accuracy = 3;
+  // Caller loads FLUTE tables once. Required for degree >= 4 tree nets.
+  std::function<void()> initialize;
 };
 struct RudyResult {
   // X-major bin index = x*bins_y+y. Directional utilization is demand

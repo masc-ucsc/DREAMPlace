@@ -9,7 +9,8 @@
 namespace DreamPlace::native::macro {
 SearchResult toposearch(const Design &src, std::span<const NodeInfo> info,
                         const Realization &incumbent, const Parameters &p,
-                        const SequencePair &previous) {
+                        const SequencePair &previous,
+                        std::function<double(const Design &)> route_estimator) {
   p.validate();
   SearchResult out;
   out.best = incumbent;
@@ -44,7 +45,10 @@ SearchResult toposearch(const Design &src, std::span<const NodeInfo> info,
     return c;
   };
   auto route = [&](const Realization &r) {
-    return rudy(physical(r), {p.bins, p.bins, caph, capv}).overflow;
+    auto design = physical(r);
+    return route_estimator
+               ? route_estimator(design)
+               : rudy(design, {p.bins, p.bins, caph, capv}).overflow;
   };
   Costs scale = cheap(incumbent);
   scale.route = route(incumbent);

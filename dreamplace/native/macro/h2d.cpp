@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 namespace DreamPlace::native::macro {
 Result place_h2d(Design &design, std::span<const NodeInfo> info,
@@ -83,8 +84,27 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     filler /= high - low;
   }
   const double route_scale = (l.xh - l.xl) + (l.yh - l.yl);
+  RouteModel active_route = cell_options.route.model == RouteModel::rsmt
+                                ? RouteModel::rsmt
+                                : RouteModel::rudy;
+  const bool latches_route =
+      cell_options.route.model == RouteModel::automatic ||
+      (cell_options.route.model == RouteModel::rudy && cell_options.route.probe);
+  bool route_probed = false;
+  auto route_score = [&](const Design &d) {
+    if (cell_options.route.model == RouteModel::off)
+      return 0.;
+    RudyOptions opts{p.bins, p.bins, p.route_cap_h, p.route_cap_v};
+    opts.model =
+        active_route == RouteModel::rsmt ? RudyModel::rsmt : RudyModel::bbox;
+    opts.degree = cell_options.route.degree;
+    opts.accuracy = cell_options.route.accuracy;
+    opts.initialize = cell_options.route_initialize;
+    return rudy(d, opts).overflow;
+  };
   auto merit = [&](const Design &d) {
-    auto route = rudy(d, {p.bins, p.bins, p.route_cap_h, p.route_cap_v});
+    RudyResult route;
+    route.overflow = route_score(d);
     return std::pair{hpwl(d) + p.alpha * route_scale * route.overflow,
                      route.overflow};
   };
@@ -103,6 +123,9 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     cells.legalize = true;
     cells.detailed_place = true;
     cells.observer = {};
+    cells.route.probe = cell_options.route.probe && !route_probed;
+    if (latches_route && active_route == RouteModel::rsmt)
+      cells.route.model = RouteModel::rsmt;
     return cells;
   };
   Parameters realization_parameters = p;
@@ -114,6 +137,35 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
   GpState state;
   std::string state_shape;
   double last = std::numeric_limits<double>::infinity();
+  std::optional<Design> last_design;
+  // Auto and a failed probe have one routing-model latch for the entire H2D
+  // stage. Every merit comparison must use that model, including incumbents
+  // from earlier rounds. A successful probe also runs only once per stage.
+  // A GP with routability disabled reports "off"; it must not downgrade an
+  // explicit RSMT score or an already latched auto stage.
+  const auto observe_route = [&](const DreamPlace::native::Result &result) {
+    route_probed |= result.route_probed;
+    if (!latches_route || active_route == RouteModel::rsmt ||
+        result.route_model != RouteModel::rsmt)
+      return;
+    active_route = RouteModel::rsmt;
+    if (std::isfinite(best_merit)) {
+      const auto [value, route] = merit(best);
+      best_merit = value;
+      for (auto &old : out.iterations)
+        if (old.selected) {
+          old.merit = value;
+          old.rudy_overflow = route;
+        }
+    }
+    if (last_design)
+      last = merit(*last_design).first;
+    last_design.reset();
+    // Subsequent abstract passes use explicit RSMT controls. Their signature
+    // differs from the prior continuation, so start a matching solver state.
+    state = {};
+    state_shape.clear();
+  };
   const int rounds = p.loop ? p.K : 1;
   for (int round = 0; round < rounds; ++round) {
     auto start = std::chrono::steady_clock::now();
@@ -144,6 +196,9 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     control.route_capacity_h = p.route_cap_h;
     control.route_capacity_v = p.route_cap_v;
     control.observer = {};
+    control.route.probe = cell_options.route.probe && !route_probed;
+    if (latches_route && active_route == RouteModel::rsmt)
+      control.route.model = RouteModel::rsmt;
     // A refreshed pseudo-net endpoint can change the abstract connectivity.
     // Reuse full GP history only when that solver topology still matches.
     std::string shape = std::to_string(a.design.node_x.size()) + ":" +
@@ -156,6 +211,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
       state_shape = shape;
     }
     auto gp = place(a.design, control, &state);
+    observe_route(gp);
     stat.gp_iterations = gp.iterations;
     stat.gp_overflow = gp.overflow;
     stat.gp_converged = gp.converged;
@@ -163,7 +219,8 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     update_groups(a, t);
     expand(a, t, working);
     if (cell_options.observer)
-      cell_options.observer(working, PlacementStage::global_placement, gp.iterations);
+      cell_options.observer(working, PlacementStage::global_placement,
+                            gp.iterations);
     // Pseudo-nets never enter physical compaction or the final cells pass.
     (void)physical_nets;
     auto physical = abstract_design(working, info, t, p);
@@ -171,8 +228,8 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     stat.lp_solves += realized.lp_solves;
     phase("group_legalize");
     if (p.toposearch && p.search != "none" && round < p.freeze_after) {
-      auto search =
-          toposearch(working, info, realized, realization_parameters, previous);
+      auto search = toposearch(working, info, realized, realization_parameters,
+                               previous, route_score);
       stat.lp_solves += search.lp_solves;
       stat.evaluations = search.evaluations;
       stat.screened = search.screened;
@@ -211,6 +268,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
       out.iterations.push_back(stat);
       break;
     }
+    observe_route(cell_placement);
     phase("cells");
     Design placed = working;
     expand(frozen, candidate, placed);
@@ -251,6 +309,8 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
         (last - value) <= p.eps * std::max(1., std::abs(last)))
       break;
     last = value;
+    if (latches_route && active_route != RouteModel::rsmt)
+      last_design = working;
   }
   // L22: coarse-pitch compaction on the accepted topology, followed by a fresh
   // cells-only legal pass. Accept only if legal and the shared merit improves.
@@ -263,6 +323,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
         auto frozen = abstract_design(best, info, snapped.topology, p, true);
         const Options cells = final_cells_options(frozen.design);
         const auto snapped_placement = place(frozen.design, cells);
+        observe_route(snapped_placement);
         auto candidate = best;
         expand(frozen, snapped.topology, candidate);
         auto [value, route] = merit(candidate);
@@ -300,9 +361,11 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
   }
   out.legal = true;
   out.hpwl = hpwl(best);
-  out.rudy_overflow =
-      rudy(best, {p.bins, p.bins, p.route_cap_h, p.route_cap_v}).overflow;
+  out.rudy_overflow = route_score(best);
   out.merit = best_merit;
+  if (latches_route)
+    out.placement.route_model = active_route;
+  out.placement.route_probed |= route_probed;
   design = std::move(best);
   return out;
 }
