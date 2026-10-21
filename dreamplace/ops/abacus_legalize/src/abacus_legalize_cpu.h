@@ -183,6 +183,16 @@ bool abacusPlaceRowCPU(const T* init_x, const T* node_size_x,
                        const int num_row_nodes) {
   // a very large number
   T M = std::pow(10, ceilDiv(std::log((xh - xl) * num_row_nodes), log(10)));
+  // Optional displacement weights (null means unit weights) must stay below M
+  // even when a whole row merges into one cluster, or cells look fixed.
+  if (node_weights) {
+    T total = 0;
+    for (int i = 0; i < num_row_nodes; ++i)
+      if (row_nodes[i] < num_movable_nodes)
+        total += node_weights[row_nodes[i]];
+    if (total > 0)
+      M = std::max(M, T(std::pow(10, std::ceil(std::log10(20 * total)))));
+  }
   // dreamplacePrint(kDEBUG, "M = %g\n", M);
   bool ret_flag = true;
 
@@ -261,7 +271,7 @@ bool abacusPlaceRowCPU(const T* init_x, const T* node_size_x,
     cluster.end_row_node_id = i;
     cluster.e =
         (node_id < num_movable_nodes && node_size_y[node_id] <= row_height)
-            ? 1.0 /*node_weights[node_id]*/
+            ? (node_weights ? node_weights[node_id] : T(1))
             : M;
     cluster.q = cluster.e * init_x[node_id];
     cluster.w = node_size_x[node_id];

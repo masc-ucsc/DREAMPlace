@@ -111,10 +111,12 @@ at::Tensor abacus_legalization_forward(
 
 template <typename T>
 int abacusLegalizationLauncher(LegalizationDB<T> db) {
+  // The Python flow's node_weights are pin counts (zero for pinless cells);
+  // Abacus keeps its historical unit displacement weights here.
   abacusLegalizationCPU(db.init_x, db.init_y, db.node_size_x, db.node_size_y,
-                        db.node_weights, db.x, db.y, db.xl, db.yl, db.xh, db.yh,
-                        db.site_width, db.row_height, 1, db.num_bins_y,
-                        db.num_nodes, db.num_movable_nodes);
+                        static_cast<const T *>(nullptr), db.x, db.y, db.xl,
+                        db.yl, db.xh, db.yh, db.site_width, db.row_height, 1,
+                        db.num_bins_y, db.num_nodes, db.num_movable_nodes);
 
   return 0;
 }

@@ -954,7 +954,7 @@ void moving_terminals() {
 // an out-of-range double into a negative row index inside is_legal().
 void far_fixed_nodes() {
   for (const double far : {1e12, -1e12, 3e9}) {
-    for (const auto [far_x, far_y] :
+    for (const auto &[far_x, far_y] :
          {std::pair{far, far}, std::pair{far, 5.}, std::pair{5., far}}) {
       Design d;
       d.layout = {0, 0, 40, 20, 1, 1};
@@ -1105,6 +1105,42 @@ void timing_spreading() {
   }
 }
 } // namespace
+void abacus_weights() {
+  // Null weights are unit weights, and large opt-in weights must not reach the
+  // fixed-cluster sentinel M (that aborted inside the row solver).
+  const std::vector<double> init_x = {0.2, 0.4, 0.6, 0.8};
+  const std::vector<double> size_x = {1, 1, 1, 1}, size_y = {1, 1, 1, 1};
+  const auto row = [&](const double *weights) {
+    std::vector<double> x = {0, 1, 2, 3};
+    std::vector<int> nodes = {0, 1, 2, 3};
+    std::vector<DreamPlace::AbacusCluster<double>> clusters(4);
+    check(DreamPlace::abacusPlaceRowCPU(
+              init_x.data(), size_x.data(), size_y.data(), weights, x.data(),
+              1.0, 1.0, 0.0, 10.0, 4, 4, nodes.data(), clusters.data(), 4),
+          "abacus row failed");
+    return x;
+  };
+  const std::vector<double> ones(4, 1), large(4, 1e6);
+  const auto unit = row(nullptr);
+  check(unit == row(ones.data()), "null abacus weights differ from unit");
+  const auto heavy = row(large.data());
+  for (int i = 0; i < 4; ++i)
+    near(heavy[i], unit[i], 1e-9, "uniform abacus weights moved the optimum");
+}
+void after_macro_legalize_writeback() {
+  auto d = design();
+  Options o;
+  o.bins_x = o.bins_y = 8;
+  o.max_iterations = 40;
+  int calls = 0;
+  o.after_macro_legalize = [&](Design &snapshot) {
+    snapshot.node_legalize_weights.assign(snapshot.node_x.size(), 2);
+    ++calls;
+  };
+  check(place(d, o).legal && calls == 1, "after_macro_legalize placement");
+  check(d.node_legalize_weights == std::vector<double>(d.node_x.size(), 2),
+        "after_macro_legalize edits were dropped");
+}
 int main() {
   try {
     spectral();
@@ -1131,6 +1167,8 @@ int main() {
     relocated_macro_obstacles();
     halos();
     failures_and_empty();
+    abacus_weights();
+    after_macro_legalize_writeback();
   } catch (const std::exception &e) {
     std::cerr << "FAIL: " << e.what() << '\n';
     return 1;

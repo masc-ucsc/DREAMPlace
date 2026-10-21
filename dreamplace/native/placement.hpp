@@ -74,6 +74,12 @@ struct Design {
   std::vector<double> node_blocked_capacity_h, node_blocked_capacity_v;
   int num_movable = 0;
   std::vector<double> node_x, node_y, node_size_x, node_size_y;
+  // Optional timing displacement costs; empty preserves the legacy solver.
+  std::vector<double> node_legalize_weights;
+  // Defer characterized constant sources until functional users own their
+  // sites.
+  std::vector<std::uint8_t> node_legalize_last;
+  std::vector<double> node_legalize_anchor_x, node_legalize_anchor_y;
   // Optional per-node clearance on each side, in layout units. Empty means
   // zero. Rounded up to whole sites/rows in private occupancy envelopes;
   // physical dimensions and pin offsets are never changed.
@@ -277,6 +283,10 @@ struct Options {
   bool detailed_place = true;
   int detailed_iterations =
       2; // iteration cap per existing detailed-placement kernel
+  // Runs on the selected final GP snapshot, before any legalization.
+  std::function<void(Design &)> before_legalize;
+  // Refine legal macro origins before standard-cell rows are packed.
+  std::function<void(Design &)> after_macro_legalize;
   PlacementObserver observer;
   int observer_interval = 20; // GP steps between snapshots, when enabled
 };
@@ -526,7 +536,8 @@ density_force(const Design &d, int bx, int by, int threads,
               const std::vector<double> &ratio, const std::vector<double> &fx,
               const std::vector<double> &fy);
 void legalize(Design &d, int bx, int by, const AlignmentSnap *snap = nullptr,
-              AlignmentReport *report = nullptr);
+              AlignmentReport *report = nullptr,
+              const std::function<void(Design &)> &after_macro_legalize = {});
 void detailed_place(Design &d, int bx, int by, int threads,
                     bool preserve_macros = false, int iterations = 2,
                     std::vector<DetailedSample> *history = nullptr);

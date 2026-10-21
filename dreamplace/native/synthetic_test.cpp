@@ -127,7 +127,8 @@ void topology(const syn::Graph& g, int expected_nodes, int expected_nets) {
 void grid_seed(const syn::Graph& g) {
   auto e = from_hhds(*g.body, g.layout, syn::geometry(g));
   check(e.design.num_movable == static_cast<int>(e.cells.size()) &&
-            e.terminals.size() == (g.spec.side_io ? 2 * g.spec.height : 0),
+            e.terminals.size() ==
+                static_cast<size_t>(g.spec.side_io ? 2 * g.spec.height : 0),
         "mesh grid seeds must remain movable");
   std::map<std::pair<int, int>, syn::CellState> states;
   for (auto node : e.cells) {
@@ -147,8 +148,10 @@ void grid_seed(const syn::Graph& g) {
 }
 void side_anchors(const syn::Graph& g) {
   auto e = from_hhds(*g.body, g.layout, syn::geometry(g));
-  check(e.terminals.size() == 2 * g.spec.height && g.body->get_io()->get_input_pin_decls().size() == g.spec.height &&
-            g.body->get_io()->get_output_pin_decls().size() == g.spec.height,
+  const auto height = static_cast<size_t>(g.spec.height);
+  check(e.terminals.size() == 2 * height &&
+            g.body->get_io()->get_input_pin_decls().size() == height &&
+            g.body->get_io()->get_output_pin_decls().size() == height,
         "mesh needs exactly one input/output pair per row");
   std::set<std::pair<bool, int>> seen;
   for (size_t i = 0; i < e.terminals.size(); ++i) {

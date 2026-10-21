@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <random>
 #include <set>
@@ -234,6 +235,10 @@ Design padded_design(const Design &source) {
     }
     d.node_x[i] -= x;
     d.node_y[i] -= y;
+    if (!d.node_legalize_anchor_x.empty()) {
+      d.node_legalize_anchor_x[i] -= x;
+      d.node_legalize_anchor_y[i] -= y;
+    }
     d.node_pad_x[i] = x;
     d.node_pad_y[i] = y;
     d.node_size_x[i] += 2 * x;
@@ -330,6 +335,19 @@ void Design::validate() const {
               node_size_x.size() == node_x.size() &&
               node_size_y.size() == node_x.size(),
           "node array size mismatch");
+  require(node_legalize_weights.empty() ||
+              node_legalize_weights.size() == node_x.size(),
+          "legalization weight array size mismatch");
+  require(node_legalize_last.empty() ||
+              node_legalize_last.size() == node_x.size(),
+          "legalization deferred array size mismatch");
+  require((node_legalize_anchor_x.empty() && node_legalize_anchor_y.empty()) ||
+              (node_legalize_anchor_x.size() == node_x.size() &&
+               node_legalize_anchor_y.size() == node_x.size()),
+          "legalization anchor array size mismatch");
+  for (double weight : node_legalize_weights)
+    require(finite(weight) && weight >= 1,
+            "invalid legalization displacement weight");
   require((node_halo_x.empty() || node_halo_x.size() == node_x.size()) &&
               (node_halo_y.empty() || node_halo_y.size() == node_x.size()),
           "halo array size mismatch");
@@ -548,10 +566,11 @@ bool is_legal(const Design &d, std::string *reason) {
     if (!w || !h) {
       continue;
     }
-    if (i < d.num_movable &&
-        (x < l.xl - eps || y < l.yl - eps || x + w > l.xh + eps ||
-         y + h > l.yh + eps || !aligned((x - l.xl) / l.site_width) ||
-         !aligned((y - l.yl) / l.row_height))) {
+    if (i < d.num_movable && (x < l.xl - eps || y < l.yl - eps ||
+                              x + w > l.xh + eps || y + h > l.yh + eps ||
+                              ((d.node_macro.empty() || !d.node_macro[i]) &&
+                               (!aligned((x - l.xl) / l.site_width) ||
+                                !aligned((y - l.yl) / l.row_height))))) {
       if (reason) {
         *reason = "bounds or grid: node " + std::to_string(i) +
                   " x=" + std::to_string(x) + " y=" + std::to_string(y) +
@@ -572,8 +591,38 @@ bool is_legal(const Design &d, std::string *reason) {
       rows[r].push_back({x, x + w, i});
     }
   }
+  const bool movable_macros =
+      !d.node_macro.empty() &&
+      std::any_of(d.node_macro.begin(), d.node_macro.begin() + d.num_movable,
+                  [](auto macro) { return macro != 0; });
   for (auto &row : rows) {
     std::sort(row.begin(), row.end(), [](auto a, auto b) { return a.x < b.x; });
+    if (movable_macros) {
+      // Off-row macro rectangles can share a bucket without sharing physical Y.
+      // Keep the usual fixed/fixed exemption, but check exact Y intersections.
+      std::multimap<double, int> active, movable;
+      for (const auto v : row) {
+        while (!active.empty() && active.begin()->first <= v.x + eps)
+          active.erase(active.begin());
+        while (!movable.empty() && movable.begin()->first <= v.x + eps)
+          movable.erase(movable.begin());
+        const auto &candidates = v.id < d.num_movable ? active : movable;
+        for (const auto &[end, other] : candidates) {
+          (void)end;
+          if (d.node_y[other] < d.node_y[v.id] + d.node_size_y[v.id] - eps &&
+              d.node_y[v.id] < d.node_y[other] + d.node_size_y[other] - eps) {
+            if (reason)
+              *reason = "overlap: node " + std::to_string(other) + "; node " +
+                        std::to_string(v.id);
+            return false;
+          }
+        }
+        active.emplace(v.end, v.id);
+        if (v.id < d.num_movable)
+          movable.emplace(v.end, v.id);
+      }
+      continue;
+    }
     double end_all = -std::numeric_limits<double>::infinity(),
            end_movable = end_all;
     int end_all_node = -1, end_movable_node = -1;
@@ -749,6 +798,10 @@ Result place(Design &design, const Options &options, GpState *state) {
             halo(halo_model.node_halo_y, i, design.layout.row_height);
         physical.node_x[i] += hx;
         physical.node_y[i] += hy;
+        if (!physical.node_legalize_anchor_x.empty()) {
+          physical.node_legalize_anchor_x[i] += hx;
+          physical.node_legalize_anchor_y[i] += hy;
+        }
         physical.node_size_x[i] -= 2 * hx;
         physical.node_size_y[i] -= 2 * hy;
         for (int k = physical.flat_node2pin_start[i];
@@ -812,6 +865,24 @@ Result place(Design &design, const Options &options, GpState *state) {
         return update;
       };
     }
+    if (o.before_legalize) {
+      control.before_legalize = [&](Design &snapshot) {
+        auto physical = unpad(snapshot);
+        o.before_legalize(physical);
+        physical.validate();
+        halo_model = std::move(physical);
+        snapshot = padded_design(halo_model);
+      };
+    }
+    if (o.after_macro_legalize) {
+      control.after_macro_legalize = [&](Design &snapshot) {
+        auto physical = unpad(snapshot);
+        o.after_macro_legalize(physical);
+        physical.validate();
+        halo_model = std::move(physical);
+        snapshot = padded_design(halo_model);
+      };
+    }
     if (o.terminal_update && o.terminal_interval > 0) {
       control.terminal_update = [&](const Design &snapshot, int iteration) {
         return o.terminal_update(unpad(snapshot), iteration);
@@ -825,7 +896,8 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
     const auto result = place(padded, control, state);
     if ((o.checkpoint && o.checkpoint_interval > 0) ||
-        (o.terminal_update && o.terminal_interval > 0)) {
+        (o.terminal_update && o.terminal_interval > 0) || o.before_legalize ||
+        o.after_macro_legalize) {
       design = unpad(padded);
       return result;
     }
@@ -1227,7 +1299,7 @@ Result place(Design &design, const Options &options, GpState *state) {
                   : d.node_size_y[i];
       ox[i] = (d.node_size_x[i] - sx[i]) / 2;
       oy[i] = (d.node_size_y[i] - sy[i]) / 2;
-      ratio[i] = sx[i] * sy[i]
+      ratio[i] = sx[i] * sy[i] != 0
                      ? d.node_size_x[i] * d.node_size_y[i] / (sx[i] * sy[i])
                      : 0;
       if (!active(i) || (o.scale_macro_density && i < original &&
@@ -2297,9 +2369,10 @@ Result place(Design &design, const Options &options, GpState *state) {
                              active(i) && !sharp(i) ? std::sqrt(2.) * dy : 0.);
             ox[i] = (d.node_size_x[i] - sx[i]) / 2;
             oy[i] = (d.node_size_y[i] - sy[i]) / 2;
-            ratio[i] = sx[i] * sy[i] ? d.node_size_x[i] * d.node_size_y[i] *
-                                           inflation[i] / (sx[i] * sy[i])
-                                     : 0;
+            ratio[i] = sx[i] * sy[i] != 0
+                           ? d.node_size_x[i] * d.node_size_y[i] *
+                                 inflation[i] / (sx[i] * sy[i])
+                           : 0;
             // Fixed obstacles keep target_density, as in the no-checkpoint
             // path; only scaled movable macros follow the compensation.
             if (!active(i)) {
@@ -2643,6 +2716,10 @@ Result place(Design &design, const Options &options, GpState *state) {
       (!o.macro_align_weight ||
        (warm ? state->iteration : 0) + r.iterations > o.macro_align_full);
   if (o.legalize && d.num_movable) {
+    if (o.before_legalize) {
+      o.before_legalize(d);
+      d.validate();
+    }
     if (o.macro_snap) {
       const auto before = d;
       const auto snap =
@@ -2652,23 +2729,27 @@ Result place(Design &design, const Options &options, GpState *state) {
               : detail::macro_align_snap(d, o.macro_snap_tolerance,
                                          o.macro_snap_weight);
       AlignmentReport times;
-      detail::legalize(d, aux_x, aux_y, &snap, &times);
+      detail::legalize(d, aux_x, aux_y, &snap, &times, o.after_macro_legalize);
       r.alignment = detail::macro_alignment_report(before, d, snap);
       r.alignment.macro_legalization_seconds = times.macro_legalization_seconds;
       r.alignment.cell_legalization_seconds = times.cell_legalization_seconds;
     } else {
-      detail::legalize(d, aux_x, aux_y, nullptr, &r.alignment);
+      detail::legalize(d, aux_x, aux_y, nullptr, &r.alignment,
+                       o.after_macro_legalize);
     }
-    if (!is_legal(d) || !detail::kernel_is_legal(d)) {
+    std::string legality_reason;
+    if (!is_legal(d, &legality_reason) || !detail::kernel_is_legal(d)) {
       throw std::runtime_error("DREAMPlace legalization failed: insufficient "
-                               "row space or unsupported geometry");
+                               "row space or unsupported geometry: " +
+                               legality_reason);
     }
     if (o.observer) {
       o.observer(d, PlacementStage::legalization, r.iterations);
     }
     if (o.detailed_place && !d.net_weights.empty()) {
       const auto detail_start = std::chrono::steady_clock::now();
-      detail::detailed_place(d, aux_x, aux_y, o.num_threads, o.macro_snap,
+      detail::detailed_place(d, aux_x, aux_y, o.num_threads,
+                             o.macro_snap || bool(o.after_macro_legalize),
                              o.detailed_iterations, &r.detailed_history);
       r.detailed_placement_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() -
@@ -2692,7 +2773,8 @@ Result place(Design &design, const Options &options, GpState *state) {
   if (state && next.signature) {
     *state = std::move(next);
   }
-  if (o.checkpoint && o.checkpoint_interval > 0) {
+  if ((o.checkpoint && o.checkpoint_interval > 0) || o.before_legalize ||
+      o.after_macro_legalize) {
     design = std::move(d);
     return r;
   }

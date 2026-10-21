@@ -78,8 +78,11 @@ void readLUT(const char *powv, const char *post) {
 #else
   fprt = nullptr;
 #endif
-  const std::unique_ptr<FILE, decltype(&fclose)> powv_file(fpwv, fclose);
-  const std::unique_ptr<FILE, decltype(&fclose)> post_file(fprt, fclose);
+  struct FileCloser {
+    void operator()(FILE *f) const { fclose(f); }
+  };
+  const std::unique_ptr<FILE, FileCloser> powv_file(fpwv);
+  const std::unique_ptr<FILE, FileCloser> post_file(fprt);
   // Keep partial allocations private until both tables have loaded. A failed
   // read can then be retried without leaking solutions or retaining aliases.
   std::vector<std::unique_ptr<csoln, decltype(&std::free)>> allocations;
@@ -383,7 +386,7 @@ DType flutes_wl_MD(int d, DType* xs, DType* ys, int* s, int acc) {
   //  float score[2*MAXD], penalty[MAXD];
   //  DType distx[MAXD], disty[MAXD];
   float pnlty, dx, dy;
-  DType ll, minl, extral;
+  DType ll, minl, extral = 0;
   int i, r, p, maxbp, nbp, bp, ub, lb, n1, n2, ms, newacc;
   int mins, maxs, minsi, maxsi;
   DType xydiff;
@@ -930,7 +933,8 @@ Tree flutes_MD(int d, DType* xs, DType* ys, int* s, int acc) {
   //  DType distx[MAXD], disty[MAXD];
   float pnlty, dx, dy;
   DType ll, minl, coord1, coord2;
-  int i, r, p, maxbp, bestbp, bp, nbp, ub, lb, n1, n2, nn1, nn2, ms, newacc;
+  int i, r, p, maxbp, bestbp = 0, bp, nbp, ub, lb, n1, n2, nn1 = 0, nn2 = 0, ms,
+                      newacc;
   Tree t, t1, t2, bestt1, bestt2;
   int mins, maxs, minsi, maxsi;
   DType xydiff;
@@ -1275,7 +1279,7 @@ Tree dmergetree(Tree t1, Tree t2) {
 
 Tree hmergetree(Tree t1, Tree t2, int* s) {
   int i, prev, curr, next, extra, offset1, offset2;
-  int p, ii, n1, n2, nn1, nn2;
+  int p, ii = 0, n1, n2, nn1 = 0, nn2 = 0;
   DType coord1, coord2;
   Tree t;
 

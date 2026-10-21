@@ -20,7 +20,9 @@ struct AtomicAdd {
 
   template <typename V>
   inline void operator()(type* dst, V v) const {
+#ifdef _OPENMP
 #pragma omp atomic
+#endif
     *dst += v;
   }
 };
@@ -39,7 +41,9 @@ struct AtomicAdd<T, true> {
   template <typename V>
   inline void operator()(type* dst, V v) const {
     type sv = v * scale_factor;
+#ifdef _OPENMP
 #pragma omp atomic
+#endif
     *dst += sv;
   }
 };
@@ -47,7 +51,9 @@ struct AtomicAdd<T, true> {
 /// @brief Perform a += b * scale_factor
 template <typename T, typename V, typename W>
 void scaleAdd(T* dst, const V* src, W scale_factor, int n, int num_threads) {
+#ifdef _OPENMP
 #pragma omp parallel for num_threads(num_threads)
+#endif
   for (int i = 0; i < n; ++i) {
     dst[i] += src[i] * scale_factor;
   }

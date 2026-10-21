@@ -31,7 +31,7 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 
 git_repository(
     name = "hhds",
-    commit = "a632b5b1c144b19654241e05e91216ae5c6eeb6c",
+    commit = "c5b23e807677e6e8c855f840b72f6b5f6b8b3192",
     remote = "https://github.com/masc-ucsc/hhds.git",
 )
 
