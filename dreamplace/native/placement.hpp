@@ -152,7 +152,7 @@ struct RoutePolicy {
   int probe_iterations = 100;
 };
 // Optimizer-only absolute center targets. No physical nodes/pins/nets are
-// added.
+// added. Targets exist only within one macro GP solve, never in GpState.
 struct MacroPull {
   int node = -1;
   double x = 0, y = 0, weight = 0;

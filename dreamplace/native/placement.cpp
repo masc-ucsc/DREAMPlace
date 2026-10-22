@@ -1449,9 +1449,10 @@ Result place(Design &design, const Options &options, GpState *state) {
     // placement while waiting for the minimum iteration window. Preserve that
     // placement for a static solve, without changing continuation/checkpoint
     // state or any of the classic density path.
-    const bool keep_feasible = o.density_upper_bound && !state &&
-                               !o.checkpoint && !centroids &&
-                               !o.macro_align_weight && !macro_routing;
+    const bool keep_feasible =
+        o.density_upper_bound && !state && !o.checkpoint && !centroids &&
+        !o.macro_align_weight && !macro_routing &&
+        !(o.macro_pull_update && o.macro_pull_interval > 0);
     double best_feasible_hpwl = std::numeric_limits<double>::infinity();
     std::vector<MacroPull> macro_pulls;
     std::vector<double> best_feasible_x, best_feasible_y;
@@ -2253,6 +2254,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         bool objective_changed = update.replacement.has_value();
         if (update.replacement) {
           macro_pulls.clear();
+          macro_pull_changed = -1;
           require(update.net_weights.empty() && update.node_size_x.empty() &&
                       update.node_size_y.empty() &&
                       update.pin_offset_x.empty() &&

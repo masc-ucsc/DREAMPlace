@@ -1199,6 +1199,20 @@ void virtual_macro_pulls() {
   place(right, o);
   check(right.node_x[0] > left.node_x[0],
         "virtual pull failed to attract macro toward endpoint");
+  // Wire-only best-feasible rollback must not discard a soft macro objective.
+  auto guided = o;
+  guided.max_iterations = 80;
+  guided.min_iterations = 100;
+  guided.stop_overflow = 1;
+  guided.density_upper_bound = true;
+  auto guided_design = before;
+  // Wire-indifferent nets make the first feasible snapshot look equally good
+  // even while a separate macro pull is still settling.
+  guided_design.net_weights.assign(guided_design.flat_net2pin_start.size() - 1,
+                                   0);
+  const auto guided_result = place(guided_design, guided);
+  check(guided_result.selected_iteration == guided_result.iterations,
+        "wire-only rollback discarded a macro-guided placement");
   // A deliberately overfilled layout never meets the zero-overflow gate.
   auto dense = before;
   for (int i = 0; i < dense.num_movable; ++i) {
