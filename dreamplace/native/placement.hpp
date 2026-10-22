@@ -295,6 +295,10 @@ struct Options {
   bool density_upper_bound = false;
   bool add_fillers = true;
   bool legalize = true;
+  // Legalize only hard macros; leave movable standard cells at GP coordinates.
+  // Requires legalize=true and detailed_place=false. Result::legal still
+  // describes the complete design, including the provisional standard cells.
+  bool macro_only_legalize = false;
   bool detailed_place = true;
   int detailed_iterations =
       2; // iteration cap per existing detailed-placement kernel
@@ -451,6 +455,7 @@ Result place(Design &design, const Options &options = {},
              GpState *state = nullptr);
 double hpwl(const Design &design);
 bool is_legal(const Design &design, std::string *reason = nullptr);
+bool macros_are_legal(const Design &design, std::string *reason = nullptr);
 
 // Reusable per-instance configuration. The caller owns Design (and any HHDS
 // mapping); every call creates fresh solver scratch state and updates only the
@@ -554,7 +559,8 @@ density_force(const Design &d, int bx, int by, int threads,
               const std::vector<double> &fy);
 void legalize(Design &d, int bx, int by, const AlignmentSnap *snap = nullptr,
               AlignmentReport *report = nullptr,
-              const std::function<void(Design &)> &after_macro_legalize = {});
+              const std::function<void(Design &)> &after_macro_legalize = {},
+              bool macro_only = false);
 void detailed_place(Design &d, int bx, int by, int threads,
                     bool preserve_macros = false, int iterations = 2,
                     std::vector<DetailedSample> *history = nullptr);

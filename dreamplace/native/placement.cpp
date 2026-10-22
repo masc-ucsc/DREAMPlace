@@ -154,6 +154,8 @@ void options_check(const Options &o) {
           "detailed placement iterations must be 1..100");
   require(!o.detailed_place || o.legalize,
           "detailed placement requires legalization");
+  require(!o.macro_only_legalize || (o.legalize && !o.detailed_place),
+          "macro-only legalization requires legalization without cell detail");
   require(finite(o.filler_width) && o.filler_width >= 0 &&
               finite(o.order_weight) && o.order_weight >= 0 &&
               finite(o.order_growth) && o.order_growth > 0 &&
@@ -545,6 +547,35 @@ double hpwl(const Design &d) {
     wl += d.net_weights[n] * (xmax - xmin + ymax - ymin);
   }
   return wl;
+}
+
+bool macros_are_legal(const Design &d, std::string *reason) {
+  d.validate();
+  Design macros;
+  macros.layout = d.layout;
+  // Retain all fixed obstacles. Movable cells are provisional and must neither
+  // obstruct the macros nor require row/site legality during macro planning.
+  const auto append = [&](int i) {
+    macros.node_x.push_back(d.node_x[i]);
+    macros.node_y.push_back(d.node_y[i]);
+    macros.node_size_x.push_back(d.node_size_x[i]);
+    macros.node_size_y.push_back(d.node_size_y[i]);
+    macros.node_macro.push_back(d.node_macro.empty() ? 0 : d.node_macro[i]);
+    if (!d.node_halo_x.empty())
+      macros.node_halo_x.push_back(d.node_halo_x[i]);
+    if (!d.node_halo_y.empty())
+      macros.node_halo_y.push_back(d.node_halo_y[i]);
+    if (!d.node_orientation.empty())
+      macros.node_orientation.push_back(d.node_orientation[i]);
+  };
+  for (int i = 0; i < d.num_movable; ++i)
+    if (!d.node_macro.empty() && d.node_macro[i])
+      append(i);
+  macros.num_movable = macros.node_x.size();
+  for (int i = d.num_movable; i < count(d.node_x.size()); ++i)
+    append(i);
+  macros.build_maps();
+  return is_legal(macros, reason);
 }
 
 bool is_legal(const Design &d, std::string *reason) {
@@ -2800,16 +2831,21 @@ Result place(Design &design, const Options &options, GpState *state) {
               : detail::macro_align_snap(d, o.macro_snap_tolerance,
                                          o.macro_snap_weight);
       AlignmentReport times;
-      detail::legalize(d, aux_x, aux_y, &snap, &times, o.after_macro_legalize);
+      detail::legalize(d, aux_x, aux_y, &snap, &times, o.after_macro_legalize,
+                       o.macro_only_legalize);
       r.alignment = detail::macro_alignment_report(before, d, snap);
       r.alignment.macro_legalization_seconds = times.macro_legalization_seconds;
       r.alignment.cell_legalization_seconds = times.cell_legalization_seconds;
     } else {
       detail::legalize(d, aux_x, aux_y, nullptr, &r.alignment,
-                       o.after_macro_legalize);
+                       o.after_macro_legalize, o.macro_only_legalize);
     }
     std::string legality_reason;
-    if (!is_legal(d, &legality_reason) || !detail::kernel_is_legal(d)) {
+    const bool legal = o.macro_only_legalize
+                           ? macros_are_legal(d, &legality_reason)
+                           : is_legal(d, &legality_reason) &&
+                                 detail::kernel_is_legal(d);
+    if (!legal) {
       throw std::runtime_error("DREAMPlace legalization failed: insufficient "
                                "row space or unsupported geometry: " +
                                legality_reason);

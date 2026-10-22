@@ -304,7 +304,8 @@ double protected_displacement(const Design &d) {
 
 void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
               AlignmentReport *report,
-              const std::function<void(Design &)> &after_macro_legalize) {
+              const std::function<void(Design &)> &after_macro_legalize,
+              bool macro_only) {
   auto ix = d.node_x, iy = d.node_y;
   if (snap)
     for (const auto &group : snap->groups) {
@@ -333,6 +334,18 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
   db.y = d.node_y.data();
   db.node_size_x = d.node_size_x.data();
   db.node_size_y = d.node_size_y.data();
+  std::vector<double> macro_sizes_x, macro_sizes_y;
+  if (macro_only) {
+    macro_sizes_x = d.node_size_x;
+    macro_sizes_y = d.node_size_y;
+    for (int i = 0; i < d.num_movable; ++i)
+      if (d.node_macro.empty() || !d.node_macro[i])
+        macro_sizes_x[i] = macro_sizes_y[i] = 0;
+    // The legacy height classifier also recognizes tall standard cells.
+    // Explicit macro-only mode must leave those cells untouched as well.
+    db.node_size_x = macro_sizes_x.data();
+    db.node_size_y = macro_sizes_y.data();
+  }
   db.node_weights = weights.data();
   db.node2fence_region_map = regions.data();
   db.xl = l.xl;
@@ -349,7 +362,7 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
   db.num_sites_y = std::round((l.yh - l.yl) / l.row_height);
   db.num_nodes = ix.size();
   db.num_movable_nodes = d.num_movable;
-  if ((snap || after_macro_legalize) && !d.node_macro.empty())
+  if ((snap || after_macro_legalize || macro_only) && !d.node_macro.empty())
     db.node_macro_mask = d.node_macro.data();
   const auto macro_start = std::chrono::steady_clock::now();
   if (!macroLegalizationLauncher(db, snap ? &snap->constraints : nullptr))
@@ -369,6 +382,8 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
   if (report)
     report->macro_legalization_seconds =
         std::chrono::duration<double>(cell_start - macro_start).count();
+  if (macro_only)
+    return;
   // Greedy's fixed-obstacle bins and row blanks are built from init_x/y.
   // Macros have just moved: reserve their legalized footprints, while keeping
   // the original standard-cell anchors for the displacement objective.

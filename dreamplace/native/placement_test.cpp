@@ -1144,6 +1144,63 @@ void after_macro_legalize_writeback() {
   check(d.node_legalize_weights == std::vector<double>(d.node_x.size(), 2),
         "after_macro_legalize edits were dropped");
 }
+void macro_only_legalization() {
+  for (bool halos : {false, true}) {
+    Design d;
+    d.layout = {0, 0, 120, 80, 1, 10};
+    d.num_movable = 4;
+    d.node_x = {40, 40, 40.25, 40.25, 90};
+    d.node_y = {20, 20, 20.5, 20.5, 0};
+    d.node_size_x = {20, 20, 2, 2, 10};
+    d.node_size_y = {20, 20, 10, 30, 80};
+    d.node_macro = {1, 1, 0, 0, 1};
+    if (halos) {
+      d.node_halo_x = {2, 2, 0, 0, 0};
+      d.node_halo_y = {10, 10, 0, 0, 0};
+    }
+    d.build_maps();
+    const auto original = d;
+    Options o;
+    o.max_iterations = 0;
+    o.bins_x = o.bins_y = 4;
+    o.add_fillers = o.detailed_place = false;
+    o.macro_snap = halos;
+    o.macro_only_legalize = true;
+    bool before = false, after = false, observed = false;
+    o.before_legalize = [&](Design &snapshot) {
+      check(!macros_are_legal(snapshot), "macro fixture must overlap");
+      before = true;
+    };
+    o.after_macro_legalize = [&](Design &) { after = true; };
+    o.observer = [&](const Design &, PlacementStage stage, int) {
+      check(stage != PlacementStage::detailed_placement,
+            "macro-only mode performed cell detail");
+      observed |= stage == PlacementStage::legalization;
+    };
+    const auto result = place(d, o);
+    check(before && after && observed && macros_are_legal(d),
+          "macro-only legalization must retain macro checks and callbacks");
+    check(!result.legal && !is_legal(d),
+          "provisional cells must not be reported fully legal");
+    check(result.alignment.cell_legalization_seconds == 0 &&
+              result.detailed_history.empty(),
+          "macro-only mode ran cell legalization or detail");
+    for (size_t i = 2; i < d.node_x.size(); ++i)
+      check(d.node_x[i] == original.node_x[i] &&
+                d.node_y[i] == original.node_y[i],
+            "macro-only legalization moved a cell or fixed obstacle");
+    o.macro_only_legalize = false;
+    o.before_legalize = {};
+    o.after_macro_legalize = {};
+    o.observer = {};
+    check(place(d, o).legal && is_legal(d),
+          "full legalization must subsequently legalize the cells");
+    o.macro_only_legalize = o.detailed_place = true;
+    rejects([&] { place(d, o); });
+    o.legalize = o.detailed_place = false;
+    rejects([&] { place(d, o); });
+  }
+}
 void virtual_macro_pulls() {
   auto d = design();
   d.node_macro.assign(d.node_x.size(), 0);
@@ -1300,6 +1357,7 @@ int main() {
     failures_and_empty();
     abacus_weights();
     after_macro_legalize_writeback();
+    macro_only_legalization();
   } catch (const std::exception &e) {
     std::cerr << "FAIL: " << e.what() << '\n';
     return 1;
