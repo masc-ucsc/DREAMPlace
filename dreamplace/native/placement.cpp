@@ -121,9 +121,11 @@ void options_check(const Options &o) {
           finite(o.macro_density_pull_range) &&
           o.macro_density_pull_range > 0 && o.macro_density_pull_range <= 32,
       "invalid macro density pull controls");
-  require(o.filler_max_count >= 0 && o.filler_max_count <= 1000000 &&
-              finite(o.filler_area_fraction) && o.filler_area_fraction > 0 &&
-              o.filler_area_fraction <= 1,
+  require(o.filler_max_count >= 0 && o.filler_max_count <= 100000000 &&
+              finite(o.filler_cell_scale) && o.filler_cell_scale > 0 &&
+              finite(o.filler_bin_fraction) && o.filler_bin_fraction > 0 &&
+              o.filler_bin_fraction <= 1 && finite(o.filler_area_fraction) &&
+              o.filler_area_fraction > 0 && o.filler_area_fraction <= 1,
           "invalid virtual filler budget");
   require(o.num_threads > 0 && o.num_threads <= 128,
           "thread count must be 1..128");
@@ -147,6 +149,9 @@ void options_check(const Options &o) {
   require(finite(o.wirelength_gamma_end) && o.wirelength_gamma_end > 0 &&
               o.wirelength_gamma_end <= 1,
           "wirelength gamma ratio must be in (0,1]");
+  require(finite(o.wirelength_gamma_start) && o.wirelength_gamma_start > 0 &&
+              o.wirelength_gamma_start <= 1,
+          "wirelength initial gamma ratio must be in (0,1]");
   require(finite(o.fixed_macro_overlap_weight) &&
               o.fixed_macro_overlap_weight >= 0,
           "invalid fixed-macro overlap weight");
@@ -525,6 +530,15 @@ void Design::validate() const {
   }
 }
 
+double density_overflow(const Design &d, int bx, int by, double density,
+                        bool scale_macro) {
+  d.validate();
+  require(bx > 0 && by > 0 && bx <= 4096 && by <= 4096,
+          "invalid density metric bins");
+  require(finite(density) && density > 0 && density <= 1,
+          "invalid density metric target");
+  return overflow(d, bx, by, density, scale_macro);
+}
 double hpwl(const Design &d) {
   d.validate();
   double wl = 0;
@@ -961,7 +975,9 @@ Result place(Design &design, const Options &options, GpState *state) {
   salt(o.bins_x);
   salt(o.bins_y);
   salt(o.add_fillers);
-  if (o.add_fillers && (o.filler_max_count || o.filler_area_fraction != 1)) {
+  if (o.add_fillers) {
+    salt(std::bit_cast<std::uint64_t>(o.filler_cell_scale));
+    salt(std::bit_cast<std::uint64_t>(o.filler_bin_fraction));
     salt(o.filler_max_count);
     salt(std::bit_cast<std::uint64_t>(o.filler_area_fraction));
   }
@@ -1000,6 +1016,10 @@ Result place(Design &design, const Options &options, GpState *state) {
   }
   if (o.wirelength_gamma_end != 0.05) {
     salt(std::bit_cast<std::uint64_t>(o.wirelength_gamma_end));
+  }
+  if (o.wirelength_gamma_start != 1) {
+    salt(0x67616d6d61737461ULL);
+    salt(std::bit_cast<std::uint64_t>(o.wirelength_gamma_start));
   }
   salt(o.seed);
   for (double v :
@@ -1211,10 +1231,10 @@ Result place(Design &design, const Options &options, GpState *state) {
       double fw = o.filler_width > 0 ? o.filler_width
                                      : area / d.num_movable / l.row_height;
       double fh = l.row_height;
-      if (o.filler_max_count > 0 && o.filler_width == 0) {
+      if (o.filler_width == 0) {
         // Use the central 90% of real standard-cell dimensions, independently
         // on each axis. SRAM area must not turn virtual particles into long
-        // row-height strips. The uncapped legacy path retains its old sizing.
+        // row-height strips, including with no count guard.
         std::vector<double> widths, heights;
         for (int i = 0; i < d.num_movable; ++i) {
           if ((d.node_macro.empty() || !d.node_macro[i]) &&
@@ -1230,16 +1250,19 @@ Result place(Design &design, const Options &options, GpState *state) {
                  (v.size() - 2 * trim);
         };
         if (!widths.empty()) {
-          fw = trimmed_mean(widths);
-          fh = trimmed_mean(heights);
+          fw = o.filler_cell_scale * trimmed_mean(widths);
+          fh = o.filler_cell_scale * trimmed_mean(heights);
         }
       }
-      fw = std::clamp(fw, l.site_width, width);
-      if (o.filler_max_count > 0) {
-        fh = std::min(height, std::max(fh, l.row_height));
-      }
+      fw = std::clamp(
+          fw, l.site_width,
+          std::max(l.site_width, std::min(width, dx * o.filler_bin_fraction)));
+      fh = std::clamp(
+          fh, l.row_height,
+          std::max(l.row_height, std::min(height, dy * o.filler_bin_fraction)));
       if (o.filler_max_count > 0 &&
           target_area > fw * fh * o.filler_max_count) {
+        r.filler_count_limited = true;
         const double scale =
             std::sqrt(target_area / (fw * fh * o.filler_max_count));
         fw = std::min(width, fw * scale);
@@ -1254,11 +1277,14 @@ Result place(Design &design, const Options &options, GpState *state) {
       if (o.filler_max_count > 0) {
         desired = std::min(desired, double(o.filler_max_count));
       }
-      require(desired <= 1000000,
-              "too many fillers; reduce core whitespace or disable fillers");
+      require(desired <= double(std::numeric_limits<int>::max() - original),
+              "filler index capacity exceeded; configure filler size or an "
+              "explicit count guard");
       int fillers = desired;
       r.filler_count = fillers;
       r.filler_area = fillers * fw * fh;
+      r.filler_size_x = fw;
+      r.filler_size_y = fh;
       for (int i = 0; i < fillers; ++i) {
         d.node_x.push_back(l.xl + unit(rng) * (width - fw));
         d.node_y.push_back(l.yl + unit(rng) * (height - fh));
@@ -1482,6 +1508,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     // state or any of the classic density path.
     const bool keep_feasible =
         o.density_upper_bound && !state && !o.checkpoint && !centroids &&
+        !(o.order_weight > 0 && !design.order_edges.empty()) &&
         !o.macro_align_weight && !macro_routing &&
         !(o.macro_pull_update && o.macro_pull_interval > 0);
     double best_feasible_hpwl = std::numeric_limits<double>::infinity();
@@ -1569,6 +1596,13 @@ Result place(Design &design, const Options &options, GpState *state) {
       double gamma = std::max(l.site_width,
                               4 * std::max(dx, dy) *
                                   std::pow(o.wirelength_gamma_end, progress));
+      if (o.wirelength_gamma_start != 1) {
+        gamma = std::max(
+            l.site_width,
+            4 * std::max(dx, dy) * o.wirelength_gamma_start *
+                std::pow(o.wirelength_gamma_end / o.wirelength_gamma_start,
+                         progress));
+      }
       double nt = (1 + std::sqrt(1 + 4 * t * t)) / 2, momentum = (t - 1) / nt;
       for (int i = 0; i < n; ++i) {
         if (active(i)) {

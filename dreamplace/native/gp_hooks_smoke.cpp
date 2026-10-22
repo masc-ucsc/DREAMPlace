@@ -55,6 +55,29 @@ int main() {
     }
     check(bad && state.x == history.x && state.iteration == history.iteration);
     split = old;
+    // A late refinement can hold final smoothing without reheating. Split
+    // continuation is identical, and changing its smoothing invalidates state.
+    auto settled = fixture(), settled_split = settled;
+    auto smoothing_options = o;
+    smoothing_options.wirelength_gamma_start = .05;
+    smoothing_options.wirelength_gamma_end = .05;
+    smoothing_options.max_iterations = 40;
+    place(settled, smoothing_options);
+    smoothing_options.max_iterations = 20;
+    GpState settle_state;
+    place(settled_split, smoothing_options, &settle_state);
+    place(settled_split, smoothing_options, &settle_state);
+    check(settled.node_x == settled_split.node_x &&
+          settled.node_y == settled_split.node_y);
+    smoothing_options.wirelength_gamma_start = .1;
+    bool changed_start = false;
+    try {
+      place(settled_split, smoothing_options, &settle_state);
+    } catch (const std::invalid_argument &) {
+      changed_start = true;
+    }
+    check(changed_start);
+    check(std::abs(density_overflow(settled, 8, 8, .8)) < 1e-9);
     auto soft = fixture();
     Options soft_options;
     soft_options.max_iterations = 20;
@@ -543,6 +566,32 @@ int main() {
       u.replacement = std::move(next);
       return u;
     };
+    // An uncapped density budget scales with physical area, beyond 65k
+    // particles.
+    {
+      auto sparse = fixture();
+      sparse.layout.xh = sparse.layout.yh = 1000;
+      Options resolution;
+      resolution.add_fillers = true;
+      resolution.filler_max_count = 0;
+      resolution.bins_x = resolution.bins_y = 16;
+      resolution.target_density = .5;
+      resolution.max_iterations = resolution.min_iterations = 1;
+      resolution.legalize = resolution.detailed_place = false;
+      resolution.routability = false;
+      const auto small = place(sparse, resolution);
+      check(small.filler_count > 65536 && !small.filler_count_limited);
+      check(small.filler_size_x <= 1000. / 16 * .25 &&
+            small.filler_size_y <= 1000. / 16 * .25);
+      sparse.layout.xh = 2000;
+      const auto large = place(sparse, resolution);
+      check(large.filler_count > small.filler_count * 1.9);
+      resolution.filler_max_count = 64;
+      const auto guarded = place(sparse, resolution);
+      check(guarded.filler_count <= 64 && guarded.filler_count_limited);
+      check(std::abs(guarded.filler_area - large.filler_area) <=
+            small.filler_size_x * small.filler_size_y * 2);
+    }
     auto with_virtual = topology;
     auto virtual_options = cp;
     virtual_options.add_fillers = true;

@@ -223,6 +223,9 @@ struct Options {
       true; // false replays the earlier R4 charge model
   std::function<void(const GpSample &)> progress_observer;
   double wirelength_gamma_end = 0.05; // final/initial smoothing ratio
+  // Start a bounded refinement at the existing final smoothing scale. One
+  // preserves the original GP schedule exactly; no public host default changes.
+  double wirelength_gamma_start = 1;
   double fixed_macro_overlap_weight =
       0; // exact cell/fixed-macro edge penalty; opt-in
   double macro_overlap_weight = 0,
@@ -276,10 +279,13 @@ struct Options {
   double max_step = 0.5; // fraction of a bin
   // Optional H2D hooks. Zero/default controls preserve the original GP.
   double filler_width = 0;
-  // Optional virtual-particle budget. Zero retains the legacy size/count rule.
+  // Optional particle count guard. Zero derives count from area and resolution.
   // A positive cap enlarges both dimensions, never the physical design.
   int filler_max_count = 0;
   double filler_area_fraction = 1; // fraction of whitespace density charge
+  double filler_cell_scale = 1;    // central-90%-mean standard-cell dimensions
+  double filler_bin_fraction =
+      .25; // maximum footprint fraction per density-bin axis
   // Soft centroid cohesion, inverse coordinate units. Lambda ramps linearly
   // from zero to this value over schedule_iterations (or max_iterations).
   // Zero disables it exactly; no boxes or changes to legalization.
@@ -410,6 +416,8 @@ struct Result {
   bool route_probed = false;
   int filler_count = 0;
   double filler_area = 0;
+  double filler_size_x = 0, filler_size_y = 0;
+  bool filler_count_limited = false;
   double macro_alignment_seconds = 0;
   double global_placement_seconds = 0, detailed_placement_seconds = 0;
   std::vector<GpSample> history;
@@ -454,6 +462,10 @@ struct GpState {
 Result place(Design &design, const Options &options = {},
              GpState *state = nullptr);
 double hpwl(const Design &design);
+// Exact physical overflow excluding fillers; fixed area reduces bin capacity.
+double density_overflow(const Design &, int bins_x, int bins_y,
+                        double target_density,
+                        bool scale_macro_density = false);
 bool is_legal(const Design &design, std::string *reason = nullptr);
 bool macros_are_legal(const Design &design, std::string *reason = nullptr);
 
