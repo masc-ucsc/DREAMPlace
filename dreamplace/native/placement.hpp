@@ -162,6 +162,9 @@ struct Options {
   // vector clears them. A replacement atomically validates and restarts
   // momentum.
   int macro_pull_interval = 0;
+  bool macro_pull_after_density = false;
+  int macro_pull_settle_iterations =
+      0; // minimum GP steps after an anchor change, within the iteration cap
   std::function<std::optional<std::vector<MacroPull>>(const Design &, int)>
       macro_pull_update;
   // Cheap terminal-only updates, independent of density-gated STA checkpoints.

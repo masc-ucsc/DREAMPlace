@@ -1199,6 +1199,56 @@ void virtual_macro_pulls() {
   place(right, o);
   check(right.node_x[0] > left.node_x[0],
         "virtual pull failed to attract macro toward endpoint");
+  // A deliberately overfilled layout never meets the zero-overflow gate.
+  auto dense = before;
+  for (int i = 0; i < dense.num_movable; ++i) {
+    dense.node_size_x[i] = 20;
+    dense.node_size_y[i] = 5;
+  }
+  calls = 0;
+  o.macro_pull_after_density = true;
+  o.stop_overflow = 0;
+  o.target_density = .01;
+  o.macro_pull_update = [&](const Design &,
+                            int) -> std::optional<std::vector<MacroPull>> {
+    ++calls;
+    return std::nullopt;
+  };
+  place(dense, o);
+  check(calls == 0, "macro pull ignored native density gate");
+  o.target_density = .7;
+  o.stop_overflow = 1;
+  auto ready = before;
+  place(ready, o);
+  check(calls > 0, "density-ready macro callback did not run");
+  o.macro_pull_after_density = false;
+  o.max_iterations = 60;
+  o.min_iterations = 1;
+  o.macro_pull_settle_iterations = 20;
+  o.macro_pull_update =
+      [](const Design &,
+         int iteration) -> std::optional<std::vector<MacroPull>> {
+    if (iteration == 20)
+      return std::vector<MacroPull>{{0, 48, 25, .5}};
+    return std::nullopt;
+  };
+  auto settling = before;
+  const auto settled = place(settling, o);
+  check(settled.iterations >= 40,
+        "GP stopped before frozen anchor settling steps");
+  o.post_density_factor = 1;
+  o.max_iterations = 80;
+  o.macro_pull_update =
+      [](const Design &,
+         int iteration) -> std::optional<std::vector<MacroPull>> {
+    if (iteration == 40)
+      return std::vector<MacroPull>{{0, 48, 25, .5}};
+    return std::nullopt;
+  };
+  auto deadline = before;
+  const auto continued = place(deadline, o);
+  check(continued.iterations >= 60,
+        "continuation deadline cut short a new macro pull");
   auto bad = before;
   o.macro_pull_update = [](const Design &, int) {
     return std::optional<std::vector<MacroPull>>{{{6, 30, 25, .5}}};

@@ -130,6 +130,8 @@ void options_check(const Options &o) {
   require(finite(o.target_density) && o.target_density > 0 &&
               o.target_density <= 1,
           "density must be in (0,1]");
+  require(o.macro_pull_settle_iterations >= 0,
+          "negative macro pull settling budget");
   require(finite(o.stop_overflow) && o.stop_overflow >= 0 &&
               o.stop_overflow <= 1,
           "invalid overflow threshold");
@@ -1331,6 +1333,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     bool density_initialized = warm ? state->density_initialized : false;
     const int offset = warm ? state->iteration : 0;
     double previous_overflow = warm ? state->previous_overflow : -1;
+    int macro_pull_changed = -1;
     double previous_hpwl = warm ? state->previous_hpwl : r.initial_hpwl;
     double route_overflow = 0, inflated_ratio = 1;
     RouteModel active_route =
@@ -2180,7 +2183,12 @@ Result place(Design &design, const Options &options, GpState *state) {
         Design snapshot = model;
         std::copy_n(x.begin(), original, snapshot.node_x.begin());
         std::copy_n(y.begin(), original, snapshot.node_y.begin());
-        auto replacement = o.macro_pull_update(snapshot, global_iter + 1);
+        std::optional<std::vector<MacroPull>> replacement;
+        if (!o.macro_pull_after_density ||
+            overflow(snapshot, o.bins_x, o.bins_y, o.target_density,
+                     o.scale_macro_density) <= o.stop_overflow) {
+          replacement = o.macro_pull_update(snapshot, global_iter + 1);
+        }
         if (replacement) {
           std::vector<bool> seen(original);
           for (const auto &pull : *replacement) {
@@ -2193,6 +2201,7 @@ Result place(Design &design, const Options &options, GpState *state) {
             seen[pull.node] = true;
           }
           macro_pulls = std::move(*replacement);
+          macro_pull_changed = global_iter + 1;
           t = 1;
           prev_x = x;
           prev_y = y;
@@ -2570,8 +2579,12 @@ Result place(Design &design, const Options &options, GpState *state) {
         const bool geometry_feasible =
             settled && (!centroids || global_iter + 1 >= o.centroid_ramp) &&
             (!separate_circles || r.centroid.circles_converged);
+        const bool macro_pulls_ready =
+            macro_pull_changed < 0 || global_iter + 1 - macro_pull_changed >=
+                                          o.macro_pull_settle_iterations;
         const bool geometry_ready =
             geometry_feasible && global_iter + 1 > last_checkpoint &&
+            macro_pulls_ready &&
             (!density_gated_checkpoints || checkpoint_invoked);
         if (o.post_density_factor) {
           const int iteration = global_iter + 1;
@@ -2653,7 +2666,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           r.converged = true;
           break;
         }
-        if (r.continuation_limit) {
+        if (r.continuation_limit && macro_pulls_ready) {
           break;
         }
         if (separate_circles && global_iter + 1 >= o.centroid_ramp &&
