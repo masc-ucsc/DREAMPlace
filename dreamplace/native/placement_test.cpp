@@ -15,8 +15,8 @@
 #include "utility/src/detailed_place_db.h"
 #include "utility/src/utils.h"
 
-#include "independent_set_matching/src/bin2node_3d_map.h"
 #include "abacus_legalize/src/abacus_legalize_cpu.h"
+#include "independent_set_matching/src/bin2node_3d_map.h"
 
 namespace DreamPlace {
 template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int);
@@ -617,8 +617,7 @@ template <typename T> void zero_area_fixed_terminals() {
   const T h[] = {T(1), T(0), T(1), T(1), T(0)};
   std::vector<std::vector<int>> bins(2);
   DreamPlace::distributeMovableAndFixedCells2BinsCPU(
-      x, y, w, h, T(20), T(1), T(0), T(0), T(20), T(2), T(1),
-      1, 2, 5, 1, bins);
+      x, y, w, h, T(20), T(1), T(0), T(0), T(20), T(2), T(1), 1, 2, 5, 1, bins);
   check(bins[0] == std::vector<int>({0, 2}) && bins[1].empty(),
         "zero-area fixed terminals must not become Abacus row obstacles");
   DreamPlace::sortNodesInRow(x, y, w, h, 1, bins[0]);
@@ -633,7 +632,8 @@ template <typename T> void zero_area_fixed_terminals() {
   std::vector<std::vector<int>> rows(2);
   db.make_row2node_map(x, y, rows, 1);
   check(rows[0] == std::vector<int>({0, 2}) && rows[1].empty(),
-        "zero-area fixed terminals must not truncate detailed-placement row space");
+        "zero-area fixed terminals must not truncate detailed-placement row "
+        "space");
 }
 void fractional_io_detailed_placement() {
   auto d = design();
@@ -643,7 +643,8 @@ void fractional_io_detailed_placement() {
   o.max_iterations = 0;
   o.add_fillers = false;
   const auto result = place(d, o);
-  check(result.legal && is_legal(d), "fractional IO terminal broke detailed placement");
+  check(result.legal && is_legal(d),
+        "fractional IO terminal broke detailed placement");
   near(d.node_x.back(), 35.5, 0, "detailed placement moved fixed IO x");
   near(d.node_y.back(), 25.5, 0, "detailed placement moved fixed IO y");
 }
@@ -1029,7 +1030,8 @@ void timing_spreading() {
   const double critical_move = seed.node_x[0] - protected_cells.node_x[0];
   const double slack_move = protected_cells.node_x[1] - seed.node_x[1];
   check(critical_move > 0 && critical_move < .5 * slack_move,
-        "critical cell must receive less local spreading than its slack neighbor");
+        "critical cell must receive less local spreading than its slack "
+        "neighbor");
   check(protected_result.timing_spread_cells == 1 &&
             protected_result.timing_spread_min_mobility == .2,
         "timing spreading census");
@@ -1093,7 +1095,8 @@ void timing_spreading() {
   check(state.inflation[0] > 1 && state.inflation[1] > 1,
         "routing spreading fixture did not create congestion");
   check(seed.node_x[0] - routed.node_x[0] > 0 &&
-            seed.node_x[0] - routed.node_x[0] < routed.node_x[1] - seed.node_x[1],
+            seed.node_x[0] - routed.node_x[0] <
+                routed.node_x[1] - seed.node_x[1],
         "routing receiver protection must favor the slack cell");
   auto changed = o;
   changed.timing_spread_weight = .5;
@@ -1141,8 +1144,72 @@ void after_macro_legalize_writeback() {
   check(d.node_legalize_weights == std::vector<double>(d.node_x.size(), 2),
         "after_macro_legalize edits were dropped");
 }
+void virtual_macro_pulls() {
+  auto d = design();
+  d.node_macro.assign(d.node_x.size(), 0);
+  d.node_macro[0] = 1;
+  const auto before = d;
+  Options o;
+  o.max_iterations = 30;
+  o.min_iterations = 100;
+  o.legalize = o.detailed_place = o.add_fillers = false;
+  o.bins_x = o.bins_y = 8;
+  o.macro_pull_interval = 1;
+  int calls = 0;
+  o.macro_pull_update =
+      [&](const Design &snapshot,
+          int iteration) -> std::optional<std::vector<MacroPull>> {
+    check(snapshot.pin2node == before.pin2node &&
+              snapshot.net_mask == before.net_mask,
+          "virtual pulls changed physical connectivity");
+    ++calls;
+    if (iteration == 5 || iteration == 15)
+      return std::vector<MacroPull>{{0, iteration == 5 ? 45. : 15., 25., .5}};
+    if (iteration == 25)
+      return std::vector<MacroPull>{};
+    return std::nullopt;
+  };
+  place(d, o);
+  check(calls == 30,
+        "virtual pulls require independent safe iteration boundaries");
+  check(d.node_x.size() == before.node_x.size() &&
+            d.pin2node == before.pin2node &&
+            d.flat_net2pin == before.flat_net2pin &&
+            d.net_weights == before.net_weights,
+        "virtual pull leaked nodes or edges");
+  for (size_t i = d.num_movable; i < d.node_x.size(); ++i) {
+    near(d.node_x[i], before.node_x[i], 0, "virtual pull moved fixed node");
+  }
+  auto left = before, right = before;
+  o.macro_pull_update =
+      [](const Design &,
+         int iteration) -> std::optional<std::vector<MacroPull>> {
+    if (iteration == 1)
+      return std::vector<MacroPull>{{0, 12, 25, 1}};
+    return std::nullopt;
+  };
+  place(left, o);
+  o.macro_pull_update =
+      [](const Design &,
+         int iteration) -> std::optional<std::vector<MacroPull>> {
+    if (iteration == 1)
+      return std::vector<MacroPull>{{0, 48, 25, 1}};
+    return std::nullopt;
+  };
+  place(right, o);
+  check(right.node_x[0] > left.node_x[0],
+        "virtual pull failed to attract macro toward endpoint");
+  auto bad = before;
+  o.macro_pull_update = [](const Design &, int) {
+    return std::optional<std::vector<MacroPull>>{{{6, 30, 25, .5}}};
+  };
+  rejects([&] { place(bad, o); });
+  check(bad.node_x == before.node_x,
+        "invalid pull partially committed placement");
+}
 int main() {
   try {
+    virtual_macro_pulls();
     spectral();
     power2_grid();
     timing_spreading();

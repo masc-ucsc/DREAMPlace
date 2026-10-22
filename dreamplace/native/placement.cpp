@@ -198,6 +198,7 @@ void options_check(const Options &o) {
                        o.macro_snap_options.max_displacement}) {
     require(finite(value) && value >= 0, "invalid macro regularity control");
   }
+  require(o.macro_pull_interval >= 0, "invalid virtual macro pull interval");
   require(finite(o.cohesion_weight) && o.cohesion_weight >= 0,
           "invalid cohesion weight");
   require(o.terminal_interval >= 0, "negative terminal update interval");
@@ -822,6 +823,11 @@ Result place(Design &design, const Options &options, GpState *state) {
       physical.cohesion_groups = halo_model.cohesion_groups;
       return physical;
     };
+    if (o.macro_pull_update && o.macro_pull_interval > 0) {
+      control.macro_pull_update = [&](const Design &snapshot, int iteration) {
+        return o.macro_pull_update(unpad(snapshot), iteration);
+      };
+    }
     if (o.checkpoint && o.checkpoint_interval > 0) {
       if (o.observer) {
         control.observer = [&](const Design &snapshot, PlacementStage stage,
@@ -1265,8 +1271,8 @@ Result place(Design &design, const Options &options, GpState *state) {
           continue;
         }
         double weight = 1;
-        for (int k = d.flat_node2pin_start[i];
-             k < d.flat_node2pin_start[i + 1]; ++k) {
+        for (int k = d.flat_node2pin_start[i]; k < d.flat_node2pin_start[i + 1];
+             ++k) {
           const int net = d.pin2net[d.flat_node2pin[k]];
           if (d.net_mask[net]) {
             weight = std::max(weight, d.net_weights[net]);
@@ -1444,6 +1450,7 @@ Result place(Design &design, const Options &options, GpState *state) {
                                !o.checkpoint && !centroids &&
                                !o.macro_align_weight && !macro_routing;
     double best_feasible_hpwl = std::numeric_limits<double>::infinity();
+    std::vector<MacroPull> macro_pulls;
     std::vector<double> best_feasible_x, best_feasible_y;
     int best_feasible_iteration = 0;
     bool restart = false;
@@ -1731,12 +1738,13 @@ Result place(Design &design, const Options &options, GpState *state) {
           wg.x[i] += cell_scale * lg.x[i];
           wg.y[i] += cell_scale * lg.y[i];
           if (!spread_mobility.empty()) {
-            applied_force += cell_scale * (std::abs(lg.x[i]) + std::abs(lg.y[i]));
+            applied_force +=
+                cell_scale * (std::abs(lg.x[i]) + std::abs(lg.y[i]));
           }
         }
-        r.local_density_force = std::max(
-            r.local_density_force, spread_mobility.empty() ? scale * force
-                                                         : applied_force);
+        r.local_density_force =
+            std::max(r.local_density_force,
+                     spread_mobility.empty() ? scale * force : applied_force);
         r.local_density_seconds += std::chrono::duration<double>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count();
@@ -1791,6 +1799,22 @@ Result place(Design &design, const Options &options, GpState *state) {
               o.centroid_weight * std::sqrt(base / norm);
           r.centroid.attraction_calibration_iteration = global_iter;
         }
+      }
+      // Same ordinary-force reference as other soft macro objectives. Keep
+      // endpoint distance magnitude below one macro dimension, cap distant
+      // pulls.
+      for (const auto &pull : macro_pulls) {
+        const int i = pull.node;
+        const double dx = d.node_x[i] + d.node_size_x[i] / 2 - pull.x;
+        const double dy = d.node_y[i] + d.node_size_y[i] / 2 - pull.y;
+        const double radius = std::max(
+            {d.node_size_x[i], d.node_size_y[i], std::hypot(dx, dy), 1e-12});
+        const double scale =
+            pull.weight *
+            std::max(1., ordinary_macro_force /
+                             std::max<size_t>(1, macro_pulls.size()));
+        wg.x[i] += scale * dx / radius;
+        wg.y[i] += scale * dy / radius;
       }
       if (local_density && o.macro_density_pull_weight > 0) {
         const auto begin = std::chrono::steady_clock::now();
@@ -2151,6 +2175,37 @@ Result place(Design &design, const Options &options, GpState *state) {
           best_feasible_hpwl = std::numeric_limits<double>::infinity();
         }
       }
+      if (o.macro_pull_update && o.macro_pull_interval > 0 &&
+          (global_iter + 1) % o.macro_pull_interval == 0) {
+        Design snapshot = model;
+        std::copy_n(x.begin(), original, snapshot.node_x.begin());
+        std::copy_n(y.begin(), original, snapshot.node_y.begin());
+        auto replacement = o.macro_pull_update(snapshot, global_iter + 1);
+        if (replacement) {
+          std::vector<bool> seen(original);
+          for (const auto &pull : *replacement) {
+            require(pull.node >= 0 && pull.node < d.num_movable &&
+                        !d.node_macro.empty() && d.node_macro[pull.node] &&
+                        !seen[pull.node] && finite(pull.x) && finite(pull.y) &&
+                        finite(pull.weight) && pull.weight >= 0 &&
+                        pull.weight <= 1,
+                    "invalid virtual macro pull");
+            seen[pull.node] = true;
+          }
+          macro_pulls = std::move(*replacement);
+          t = 1;
+          prev_x = x;
+          prev_y = y;
+          restart = true;
+          convergence.previous_hpwl = -1;
+          convergence.previous_inflation = -1;
+          convergence.stable_samples = 0;
+          previous_hpwl = -1;
+          best_feasible_x.clear();
+          best_feasible_y.clear();
+          best_feasible_hpwl = std::numeric_limits<double>::infinity();
+        }
+      }
       const bool forced_checkpoint =
           density_gated_checkpoints &&
           (iter + 1 == o.max_iterations ||
@@ -2188,6 +2243,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         bool objective_changed = update.replacement.has_value();
         if (update.replacement) {
+          macro_pulls.clear();
           require(update.net_weights.empty() && update.node_size_x.empty() &&
                       update.node_size_y.empty() &&
                       update.pin_offset_x.empty() &&

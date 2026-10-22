@@ -151,7 +151,19 @@ struct RoutePolicy {
   bool probe = false;
   int probe_iterations = 100;
 };
+// Optimizer-only absolute center targets. No physical nodes/pins/nets are
+// added.
+struct MacroPull {
+  int node = -1;
+  double x = 0, y = 0, weight = 0;
+};
 struct Options {
+  // Safe GP boundary independent of timing. nullopt retains targets; an empty
+  // vector clears them. A replacement atomically validates and restarts
+  // momentum.
+  int macro_pull_interval = 0;
+  std::function<std::optional<std::vector<MacroPull>>(const Design &, int)>
+      macro_pull_update;
   // Cheap terminal-only updates, independent of density-gated STA checkpoints.
   // Only fixed zero-area terminals may move; callbacks see physical geometry.
   int terminal_interval = 0;
