@@ -482,12 +482,14 @@ Gradient cohesion(const Design &design, double lambda);
 // Paths/masters are supplied by the caller; identity uses relative macro leaf
 // structure, with minimum_copies qualifying siblings under one immediate
 // hierarchy parent. Count siblings before collapsing unary wrappers; keep the
-// deepest eligible scope for any identical macro set. No connectivity proof
+// deepest eligible scope for any identical macro set. A scope needs more than
+// minimum_macros movable macros. No connectivity proof
 // or template reuse is required for cohesion.
 std::vector<CentroidGroup>
 centroid_candidates(const Design &, const std::vector<std::string> &paths,
                     const std::vector<std::string> &masters,
-                    double minimum_equivalent_cells, int minimum_copies = 4);
+                    double minimum_equivalent_cells, int minimum_copies = 4,
+                    int minimum_macros = 2);
 Gradient centroid_attraction(const Design &, double lambda);
 Gradient centroid_parent_attraction(const Design &, double lambda,
                                     double density, double outside,

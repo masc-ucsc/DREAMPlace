@@ -493,9 +493,10 @@ double centroid_cell_area(const Design &d) {
 std::vector<CentroidGroup>
 centroid_candidates(const Design &d, const std::vector<std::string> &paths,
                     const std::vector<std::string> &masters, double minimum,
-                    int minimum_copies) {
+                    int minimum_copies, int minimum_macros) {
   if (paths.size() != d.node_x.size() || masters.size() != paths.size() ||
-      !std::isfinite(minimum) || minimum < 0 || minimum_copies < 2)
+      !std::isfinite(minimum) || minimum < 0 || minimum_copies < 2 ||
+      minimum_macros < 0)
     throw std::invalid_argument(
         "invalid centroid candidate metadata/threshold");
   struct Prefix {
@@ -544,7 +545,8 @@ centroid_candidates(const Design &d, const std::vector<std::string> &paths,
   std::map<std::string, std::map<std::string, std::vector<std::string>>>
       families;
   for (const auto &[path, v] : prefixes) {
-    if (v.macros.size() <= 2 || v.area / unit <= minimum)
+    if (v.macros.size() <= static_cast<size_t>(minimum_macros) ||
+        v.area / unit <= minimum)
       continue;
     std::vector<std::string> leaves;
     for (int n : v.macros) {

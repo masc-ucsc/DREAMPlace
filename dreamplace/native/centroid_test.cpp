@@ -66,13 +66,14 @@ Design fixture() {
 }
 void candidate_copy_checks() {
   auto discover = [](const std::vector<int> &copies, int minimum = 4,
-                     bool wrapper = false) {
+                     bool wrapper = false, int macro_count = 3,
+                     int minimum_macros = 2) {
     Design d;
     d.layout = {0, 0, 1000, 1000, 1, 1};
     std::vector<std::string> paths, masters;
     for (size_t parent = 0; parent < copies.size(); ++parent)
       for (int copy = 0; copy < copies[parent]; ++copy)
-        for (int macro = 0; macro < 3; ++macro) {
+        for (int macro = 0; macro < macro_count; ++macro) {
           paths.push_back("top.p" + std::to_string(parent) + ".u" +
                           std::to_string(copy) + (wrapper ? ".wrapper" : "") +
                           ".m" + std::to_string(macro));
@@ -92,10 +93,23 @@ void candidate_copy_checks() {
     d.node_macro.push_back(0);
     paths.push_back("unit");
     masters.push_back("and");
-    if (minimum == 4)
-      return detail::centroid_candidates(d, paths, masters, 299);
-    return detail::centroid_candidates(d, paths, masters, 299, minimum);
+    if (minimum == 4 && minimum_macros == 2)
+      return detail::centroid_candidates(d, paths, masters,
+                                         macro_count * 100 - 1);
+    return detail::centroid_candidates(d, paths, masters, macro_count * 100 - 1,
+                                       minimum, minimum_macros);
   };
+  check(discover({4}, 4, false, 1).empty(),
+        "default admits one-macro candidates");
+  check(discover({4}, 4, false, 1, 0).size() == 4,
+        "zero minimum rejects repeated one-macro candidates");
+  check(discover({4}, 4, false, 2).empty(),
+        "default admits two-macro candidates");
+  check(discover({4}, 4, false, 2, 1).size() == 4,
+        "one-macro minimum rejects two-macro candidates");
+  check(discover({4}, 4, false, 3, 3).empty(),
+        "macro count threshold is not strict");
+  rejects([&] { discover({4}, 4, false, 3, -1); });
   check(discover({3}).empty(), "default admits fewer than four siblings");
   auto four = discover({4});
   check(four.size() == 4, "four siblings under one parent rejected");
