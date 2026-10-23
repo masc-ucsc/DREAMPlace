@@ -18,8 +18,14 @@ Gradient cohesion(const Design &d, double lambda) {
       const double a = group.areas.empty() ? d.node_size_x[i] * d.node_size_y[i]
                                            : group.areas[k];
       area += a;
-      cx += a * (d.node_x[i] + d.node_size_x[i] / 2 - d.layout.xl);
-      cy += a * (d.node_y[i] + d.node_size_y[i] / 2 - d.layout.yl);
+      double x = d.node_x[i] + d.node_size_x[i] / 2 - d.layout.xl;
+      double y = d.node_y[i] + d.node_size_y[i] / 2 - d.layout.yl;
+      if (!group.offsets.empty()) {
+        x += group.offsets[k].first;
+        y += group.offsets[k].second;
+      }
+      cx += a * x;
+      cy += a * y;
     }
     cx /= area;
     cy /= area;
@@ -27,8 +33,12 @@ Gradient cohesion(const Design &d, double lambda) {
       const int i = group.nodes[k];
       const double a = group.areas.empty() ? d.node_size_x[i] * d.node_size_y[i]
                                            : group.areas[k];
-      const double dx = d.node_x[i] + d.node_size_x[i] / 2 - d.layout.xl - cx;
-      const double dy = d.node_y[i] + d.node_size_y[i] / 2 - d.layout.yl - cy;
+      double dx = d.node_x[i] + d.node_size_x[i] / 2 - d.layout.xl - cx;
+      double dy = d.node_y[i] + d.node_size_y[i] / 2 - d.layout.yl - cy;
+      if (!group.offsets.empty()) {
+        dx += group.offsets[k].first;
+        dy += group.offsets[k].second;
+      }
       const double weight = lambda * group.weight * (a / area);
       out.value += weight * (dx * dx + dy * dy);
       out.x[i] += 2 * weight * dx;

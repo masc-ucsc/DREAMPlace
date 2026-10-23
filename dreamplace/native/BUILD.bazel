@@ -14,6 +14,8 @@ cc_library(
         "density_map.cpp",
         "kernels.cpp",
         "local_density.cpp",
+        "magnet.cpp",
+        "magnet_flow.cpp",
         "orientation.cpp",
         "placement.cpp",
         "rudy.cpp",
@@ -21,16 +23,19 @@ cc_library(
         "rudy_macro.cpp",
         "rudy_obstacles.cpp",
         "repulsion.cpp",
+        "rigid.cpp",
         "spectral.cpp",
     ],
     hdrs = [
         "constraints.hpp",
         "local_density.hpp",
+        "magnet.hpp",
         "floorplan.hpp",
         "orientation.hpp",
         "placement.hpp",
         "rudy.hpp",
         "rudy_tree.hpp",
+        "rigid.hpp",
         "spectral.hpp",
     ],
     copts = select({
@@ -116,6 +121,14 @@ cc_test(
 )
 
 cc_test(
+    name = "magnet_flow_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["magnet_flow_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
     name = "hhds_test",
     size = "small",
     timeout = "short",
@@ -129,6 +142,28 @@ cc_test(
     timeout = "short",
     srcs = ["macro_lp_test.cpp"],
     deps = ["//dreamplace/ops:native_kernels"],
+)
+
+cc_test(
+    name = "magnet_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["magnet_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_binary(
+    name = "magnet_bench",
+    srcs = ["magnet_bench.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "rigid_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["rigid_test.cpp"],
+    deps = [":placer"],
 )
 
 cc_test(
@@ -185,6 +220,11 @@ filegroup(
         "rudy_macro.cpp",
         "rudy_obstacles.cpp",
         "repulsion.cpp",
+        "rigid.cpp",
+        "rigid.hpp",
+        "magnet.cpp",
+        "magnet_flow.cpp",
+        "magnet.hpp",
         "rudy.hpp",
         "rudy_tree.hpp",
         "spectral.cpp",

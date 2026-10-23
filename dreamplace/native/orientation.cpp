@@ -40,6 +40,9 @@ void apply_orientation(Design &d, int node, Orientation orientation) {
     throw std::invalid_argument("terminal cannot be flipped");
   const auto old =
       d.node_orientation.empty() ? Orientation::N : d.node_orientation[node];
+  if (!d.node_orientation_fixed.empty() && d.node_orientation_fixed[node] &&
+      orientation != old)
+    throw std::invalid_argument("rigid group orientation is frozen");
   const auto delta = compose(orientation, old);
   const int begin = d.flat_node2pin_start[node],
             end = d.flat_node2pin_start[node + 1];

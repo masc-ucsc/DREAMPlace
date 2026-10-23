@@ -6,6 +6,18 @@
 #include <limits>
 #include <stdexcept>
 namespace DreamPlace::native::detail {
+double macro_cell_screening_length(const Design &d, double reach) {
+  double side = 0;
+  for (size_t i = 0; i < d.node_x.size(); ++i) {
+    if (i < d.node_macro.size() && d.node_macro[i]) {
+      const double px = d.node_pad_x.empty() ? 0 : d.node_pad_x[i];
+      const double py = d.node_pad_y.empty() ? 0 : d.node_pad_y[i];
+      side = std::max({side, d.node_size_x[i] - 2 * px,
+                       d.node_size_y[i] - 2 * py});
+    }
+  }
+  return reach * side;
+}
 LocalDensity::LocalDensity(const Design &d, int bins, double range,
                            double target, int num_threads)
     : bins_(bins), physical_nodes_(d.node_x.size()),

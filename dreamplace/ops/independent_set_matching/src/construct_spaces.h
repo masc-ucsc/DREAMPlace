@@ -30,8 +30,8 @@ void construct_spaces(
     for (unsigned int j = 0; j < row2node_map[i].size(); ++j) {
       auto const& row2nodes = row2node_map[i];
       int node_id = row2nodes[j];
-      auto& space = host_spaces[node_id];
       if (node_id < db.num_movable_nodes) {
+        auto &space = host_spaces[node_id];
         auto left_bound = db.xl;
         if (j) {
           left_bound = host_x[node_id];

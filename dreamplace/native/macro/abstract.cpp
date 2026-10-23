@@ -1,5 +1,6 @@
 // BSD-3-Clause. See LICENSE.
 #include "dreamplace/native/macro/abstract.hpp"
+#include "dreamplace/native/rigid.hpp"
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -149,9 +150,10 @@ Abstracted abstract_design(const Design &src, std::span<const NodeInfo> info,
   for (const auto &g : t.groups)
     for (const auto &m : g.members)
       membership[names.at(m.name)] = {&g, &m};
-  for (int pin = 0; pin < int(src.pin2node.size()); ++pin) {
-    int node = src.pin2node[pin];
-    d.pin2node[pin] = a.source_to_node[node];
+  std::vector<RigidPinFrame> frames(info.size());
+  for (int node = 0; node < int(info.size()); ++node) {
+    auto &frame = frames[node];
+    frame.node = a.source_to_node[node];
     auto it = membership.find(node);
     if (it != membership.end()) {
       const auto &[g, m] = it->second;
@@ -160,14 +162,12 @@ Abstracted abstract_design(const Design &src, std::span<const NodeInfo> info,
       Orientation old = src.node_orientation.empty()
                             ? Orientation::N
                             : src.node_orientation[node];
-      auto offset =
-          orient_pin(src.pin_offset_x[pin], src.pin_offset_y[pin],
-                     src.node_size_x[node], src.node_size_y[node],
-                     compose(old, compose(g->orientation, m->orientation)));
-      d.pin_offset_x[pin] = xy.first - g->x + offset.first;
-      d.pin_offset_y[pin] = xy.second - g->y + offset.second;
+      frame.x = xy.first - g->x;
+      frame.y = xy.second - g->y;
+      frame.transform = compose(old, compose(g->orientation, m->orientation));
     }
   }
+  rebind_rigid_pins(src, d, frames);
   for (int net = 0; net < int(d.net_weights.size()); ++net) {
     int first = -1;
     bool one = true;

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -23,12 +24,17 @@ struct Layout {
 // Owning flat-array boundary. Coordinates/sizes/offsets use one caller-chosen
 // unit, normally DBU. Order: movable, fixed, zero-area IO terminals. Fillers
 // are internal to global placement and never exposed in the result.
-// Disjoint color/region groups. Empty areas use physical width*height.
+// Disjoint physical color/region groups. Explicit rigid offsets below permit
+// logical member aliases after contraction. Empty areas use width*height.
 // Optional areas preserve physical weighting when occupancy is halo padded.
 struct CohesionGroup {
   std::vector<int> nodes;
   double weight = 1;
   std::vector<double> areas;
+  // Optional logical-member centers relative to the owning rectangle center.
+  // Rigid contraction can put several logical members on the same node while
+  // preserving their original cohesion energy and force by superposition.
+  std::vector<std::pair<double, double>> offsets;
 };
 // Candidate colors may overlap across groups. Explicit nodes may carry a
 // color, but cannot also be covered by a color listed in that same group.
@@ -45,6 +51,11 @@ struct CentroidGroup {
   // Negative uses member area. Otherwise this is an independent space budget;
   // it changes circle radii only, never centroid moments or density charge.
   double repulsion_area = -1;
+  // Optional logical samples on explicit nodes after a rigid contraction.
+  // Repeated physical nodes are permitted only with these explicit weights
+  // and center offsets, so different hierarchy anchors retain their moments.
+  std::vector<double> areas;
+  std::vector<std::pair<double, double>> offsets;
 };
 struct CentroidSample {
   double x = 0, y = 0, radius = 0;
@@ -91,6 +102,12 @@ struct Design {
   // Empty means N. Pin offsets already reflect this orientation; GP never
   // transforms them implicitly. set_orientation() updates both together.
   std::vector<Orientation> node_orientation;
+  // Rigid meta-macros cannot be flipped independently of their member pins.
+  // Empty preserves the ordinary orientation API.
+  std::vector<std::uint8_t> node_orientation_fixed;
+  // Diagnostic identities only. Expanded member macros retain the group id;
+  // no downstream physical constraint is implied by this field.
+  std::vector<std::uint64_t> node_group_id;
   std::vector<PositionBox>
       node_boxes; // optional, one physical-origin box per node
   std::vector<RelativeOrder> order_edges;
@@ -152,12 +169,49 @@ struct RoutePolicy {
   int probe_iterations = 100;
 };
 // Optimizer-only absolute center targets. No physical nodes/pins/nets are
-// added. Targets exist only within one macro GP solve, never in GpState.
+// added. Targets survive magnet-round restarts within one macro stage, but
+// never enter GpState or the final cell-placement handoff.
 struct MacroPull {
   int node = -1;
   double x = 0, y = 0, weight = 0;
 };
+struct MagnetOptions {
+  bool enabled = false;
+  // Let ordinary GP finish, then merge immediately before the macro snap/LP.
+  bool before_snap = false;
+  double settle_displacement = .05;
+  // One-shot global motion gate before the per-object settling checks.
+  double start_displacement = .10;
+  double max_gap = 1., density_fraction = .25;
+  int settle_window = 10;
+  int max_per_round = 0, max_rounds = 0;
+  void validate() const;
+};
+struct MagnetReport;
+struct MagnetMacroFrame;
+namespace detail {
+class MagnetRuntime;
+}
 struct Options {
+  MagnetOptions magnet;
+  // Host feasibility check before selecting a rigid macro merge. Members use
+  // original input-node identities and physical poses relative to the proposed
+  // group origin. An empty result accepts; otherwise report the rejection.
+  // Called serially, only after geometry, density and motion checks pass.
+  std::function<std::string(const std::vector<MagnetMacroFrame> &)>
+      macro_merge_check;
+  // Private round continuation: a real node contraction starts a fresh solver
+  // at current coordinates while preserving the global event/force schedule.
+  std::shared_ptr<detail::MagnetRuntime> magnet_runtime;
+  // Read-only per-GP-step macro telemetry, independent of optimization and
+  // convergence. Coordinates may include temporary fillers; node IDs are real.
+  std::function<void(const Design &, const std::vector<double> &,
+                     const std::vector<double> &, int)>
+      macro_motion_observer;
+  // Physical-member-weighted center-step sum in layout units. Invalid steps
+  // rebase across merges/snap, rather than counting their packing jumps.
+  std::function<void(int, double, bool)> macro_step_observer;
+  int iteration_offset = 0;
   // Safe GP boundary independent of timing. nullopt retains targets; an empty
   // vector clears them. A replacement atomically validates and restarts
   // momentum.
@@ -196,6 +250,7 @@ struct Options {
   int auxiliary_bins = 0;
   double local_density_weight = 0, local_density_range = 4,
          local_density_jitter = .01;
+  double local_density_target = -1; // -1 inherits the global target density
   int local_density_bins = 512;
   // Opt-in protection from extra routing/local spreading, using the largest
   // incident active net weight w >= 1: mobility = 1-a+a/w. Hosts supply timing
@@ -203,9 +258,11 @@ struct Options {
   // and the unit-area response in the inflated footprint. Macro forces and
   // wirelength attraction remain unchanged.
   double timing_spread_weight = 0; // a in [0,1]; 0 preserves the original flow
-  // Extra local standard-cell pressure on movable macros. The host enables
-  // it only during FP/macro GP; fixed macros never receive force.
+  // Extra standard-cell pressure on movable macros; host enables macro GP
+  // only. Reach is a screening length in largest physical macro side lengths,
+  // independent of short-range cell-to-cell spreading.
   double macro_cell_density_weight = 0;
+  double macro_cell_density_reach = 2;
   // Independent weak, local cell-density slope on macro receivers. Weight
   // is relative to ordinary macro force and capped by centroid reference
   // force when anchored. Range is in local-density bin pitches.
@@ -283,7 +340,11 @@ struct Options {
   // A positive cap enlarges both dimensions, never the physical design.
   int filler_max_count = 0;
   double filler_area_fraction = 1; // fraction of whitespace density charge
-  double filler_cell_scale = 1;    // central-90%-mean standard-cell dimensions
+  bool filler_cell_space =
+      false; // budget: (1-target_density) * non-macro space
+  double filler_macro_fraction =
+      0; // opt-in: smallest physical macro axes, before halos
+  double filler_cell_scale = 1; // central-90%-mean standard-cell dimensions
   double filler_bin_fraction =
       .25; // maximum footprint fraction per density-bin axis
   // Soft centroid cohesion, inverse coordinate units. Lambda ramps linearly
@@ -371,6 +432,9 @@ struct GpSample {
   bool route_sampled = false, route_probe = false;
   int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
   double route_rudy_seconds = 0, route_rsmt_seconds = 0;
+  int magnet_round = 0, magnet_groups = 0;
+  double macro_move_max = 0, macro_move_rms = 0;
+  int last_instability_iteration = 0;
 };
 struct CentroidReport {
   bool started = false, completed = false;
@@ -399,6 +463,8 @@ struct GpCheckpointSample {
   bool invoked = false, forced = false;
 };
 struct Result {
+  std::shared_ptr<MagnetReport> magnet;
+  double magnet_seconds = 0;
   // Populated only with checkpoint_after_density; includes skipped intervals.
   std::vector<GpCheckpointSample> checkpoint_history;
   int density_iteration = 0, continuation_deadline = 0;
@@ -425,6 +491,8 @@ struct Result {
   int iterations = 0, selected_iteration = 0;
   double local_density_seconds = 0, local_density_force = 0;
   double macro_cell_density_seconds = 0, macro_cell_density_force = 0;
+  double macro_cell_density_screening_length = 0;
+  double macro_cell_density_coefficient = 0;
   double macro_density_pull_seconds = 0, macro_density_pull_force = 0;
   double macro_density_pull_anchor_ratio = 0;
   double local_density_grid_seconds = 0;
@@ -495,11 +563,25 @@ struct Gradient {
   double value = 0;
   std::vector<double> x, y;
 };
+// Raw gradients compensate the GP preconditioner so equal target offsets
+// produce equal pull-induced center steps across physical macro sizes.
+struct MacroPullForce {
+  int node;
+  double x, y;
+};
+std::vector<MacroPullForce> macro_pull_forces(const Design &,
+                                              const std::vector<MacroPull> &,
+                                              const Gradient &wire,
+                                              const Gradient &density,
+                                              double density_weight);
 std::vector<AlignmentPair>
 macro_align_pairs(const Design &, bool nearest = false,
                   const std::vector<int> *classes = nullptr);
-std::vector<AlignmentPair> macro_grid_align_pairs(const Design &,
-                                                  bool nearest = false);
+std::vector<AlignmentPair>
+macro_grid_align_pairs(const Design &, bool nearest = false,
+                       const std::vector<int> *classes = nullptr,
+                       bool padded_extents = false,
+                       bool overlapping_pairs = false);
 double macro_align_ramp(const Options &, int iteration);
 Gradient macro_alignment(const Design &, const std::vector<AlignmentPair> &,
                          double lambda_x, double lambda_y, double sigma,

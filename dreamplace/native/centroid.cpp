@@ -40,6 +40,16 @@ Moment node(const Design &d, int n) {
           1,
           int(!d.node_macro.empty() && d.node_macro[n])};
 }
+Moment member(const Design &d, const CentroidGroup &g, size_t k) {
+  auto point = node(d, g.nodes[k]);
+  if (!g.areas.empty())
+    point.area = g.areas[k];
+  if (!g.offsets.empty()) {
+    point.x += g.offsets[k].first;
+    point.y += g.offsets[k].second;
+  }
+  return point;
+}
 std::vector<Moment> color_moments(const Design &d) {
   std::vector<Moment> result(d.centroid_color_names.size());
   for (size_t n = 0; n < d.node_centroid_color.size(); ++n)
@@ -52,8 +62,8 @@ Moment group_moment(const Design &d, const CentroidGroup &g,
   Moment result;
   for (int c : g.colors)
     result.merge(colors[c]);
-  for (int n : g.nodes)
-    result.merge(node(d, n));
+  for (size_t k = 0; k < g.nodes.size(); ++k)
+    result.merge(member(d, g, k));
   return result;
 }
 // Chain rule from a gradient with respect to each group's moving centroid back
@@ -69,9 +79,11 @@ void scatter_group_gradient(const Design &d, const std::vector<double> &gx,
       cx[c] += x;
       cy[c] += y;
     }
-    for (int n : g.nodes) {
-      out.x[n] += d.centroid_node_area[n] * x;
-      out.y[n] += d.centroid_node_area[n] * y;
+    for (size_t j = 0; j < g.nodes.size(); ++j) {
+      const int n = g.nodes[j];
+      const auto p = member(d, g, j);
+      out.x[n] += p.area * x;
+      out.y[n] += p.area * y;
     }
   }
   for (size_t n = 0; n < d.node_centroid_color.size(); ++n) {
@@ -120,8 +132,9 @@ Gradient centroid_attraction(const Design &d, double lambda) {
       tx[c] += scale * m.x;
       ty[c] += scale * m.y;
     }
-    for (int n : g.nodes) {
-      const auto p = node(d, n);
+    for (size_t j = 0; j < g.nodes.size(); ++j) {
+      const int n = g.nodes[j];
+      const auto p = member(d, g, j);
       out.x[n] += 2 * scale * p.area * (p.x - m.x);
       out.y[n] += 2 * scale * p.area * (p.y - m.y);
     }
@@ -164,13 +177,15 @@ struct AttractionGroups {
     }
   }
   template <class F> void members(const Design &d, F f) const {
-    for (size_t k = 0; k < d.centroid_groups.size(); ++k)
-      for (int n : d.centroid_groups[k].nodes)
-        f(n, k);
+    for (size_t k = 0; k < d.centroid_groups.size(); ++k) {
+      const auto &g = d.centroid_groups[k];
+      for (size_t j = 0; j < g.nodes.size(); ++j)
+        f(g.nodes[j], k, member(d, g, j));
+    }
     for (size_t n = 0; n < d.node_centroid_color.size(); ++n)
       if (d.node_centroid_color[n] >= 0)
         for (size_t k : colors[d.node_centroid_color[n]])
-          f(n, k);
+          f(n, k, node(d, n));
   }
 };
 } // namespace
@@ -178,9 +193,8 @@ std::vector<double> centroid_attraction_reference(const Design &d,
                                                   double density) {
   const AttractionGroups groups(d, density);
   std::vector<double> out(d.node_x.size());
-  groups.members(d, [&](size_t n, size_t k) {
-    out[n] +=
-        2 * d.centroid_node_area[n] / groups.moments[k].area * groups.radii[k];
+  groups.members(d, [&](size_t n, size_t k, const Moment &p) {
+    out[n] += 2 * p.area / groups.moments[k].area * groups.radii[k];
   });
   return out;
 }
@@ -201,11 +215,10 @@ Gradient centroid_circle_attraction(const Design &d, double lambda,
     return out;
   std::vector<double> sum_x(groups.moments.size()),
       sum_y(groups.moments.size());
-  groups.members(d, [&](size_t n, size_t k) {
+  groups.members(d, [&](size_t n, size_t k, const Moment &p) {
     if (macros_only && (n >= size_t(d.num_movable) || d.node_macro.empty() ||
                         !d.node_macro[n]))
       return;
-    const auto p = node(d, n);
     const auto &m = groups.moments[k];
     const double dx = p.x - m.x, dy = p.y - m.y;
     const double distance = std::hypot(dx, dy);
@@ -224,8 +237,8 @@ Gradient centroid_circle_attraction(const Design &d, double lambda,
     // The centroid moves with its members. Differentiating it removes the
     // group's resultant force, so the shape spring never pins its translation.
     // Unlike the quadratic law, these terms do not cancel on their own.
-    groups.members(d, [&](size_t n, size_t k) {
-      const double weight = d.centroid_node_area[n] / groups.moments[k].area;
+    groups.members(d, [&](size_t n, size_t k, const Moment &p) {
+      const double weight = p.area / groups.moments[k].area;
       out.x[n] -= weight * sum_x[k];
       out.y[n] -= weight * sum_y[k];
     });
@@ -372,26 +385,7 @@ Gradient centroid_repulsion(const Design &d, double lambda, double density) {
   }
   // Chain rule for c_g = sum(a_i p_i)/A_g. Shared colors receive the sum
   // of all their candidate contributions; no ownership or cell-pair force.
-  std::vector<double> cx(colors.size()), cy(colors.size());
-  for (size_t k = 0; k < moments.size(); ++k) {
-    const double x = gx[k] / moments[k].area, y = gy[k] / moments[k].area;
-    const auto &g = d.centroid_groups[k];
-    for (int c : g.colors) {
-      cx[c] += x;
-      cy[c] += y;
-    }
-    for (int n : g.nodes) {
-      out.x[n] += d.centroid_node_area[n] * x;
-      out.y[n] += d.centroid_node_area[n] * y;
-    }
-  }
-  for (size_t n = 0; n < d.node_centroid_color.size(); ++n) {
-    const int c = d.node_centroid_color[n];
-    if (c >= 0) {
-      out.x[n] += d.centroid_node_area[n] * cx[c];
-      out.y[n] += d.centroid_node_area[n] * cy[c];
-    }
-  }
+  scatter_group_gradient(d, gx, gy, moments, out);
   return out;
 }
 std::pair<double, double> centroid_force_reference(const Design &d,
@@ -418,12 +412,17 @@ std::pair<double, double> centroid_force_reference(const Design &d,
       gx += cx[c];
       gy += cy[c];
     }
-    for (int n : g.nodes) {
+    for (size_t k = 0; k < g.nodes.size(); ++k) {
+      const int n = g.nodes[k];
       if (n >= d.num_movable)
         continue;
       const auto [fx, fy] = force(n);
-      gx += fx;
-      gy += fy;
+      // A rigid node's physical force is apportioned among its logical
+      // anchor members by area instead of counted once for each alias.
+      const double fraction =
+          g.areas.empty() ? 1 : g.areas[k] / d.centroid_node_area[n];
+      gx += fraction * fx;
+      gy += fraction * fy;
     }
     x += std::abs(gx);
     y += std::abs(gy);

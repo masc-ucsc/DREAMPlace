@@ -29,6 +29,43 @@ Design fixture() {
 }
 int main() {
   try {
+    // Relative virtual pulls must track ordinary wire forces without needing
+    // the unrelated local-density pull objective. Global net-weight units
+    // should not change this one-macro two-step trajectory.
+    const auto anchored = [](double net_weight) {
+      Design d;
+      d.layout = {0, 0, 100, 100, 1, 1};
+      d.num_movable = 1;
+      d.node_x = {40, 90};
+      d.node_y = {40, 45};
+      d.node_size_x = d.node_size_y = {10, 0};
+      d.node_macro = {1, 0};
+      d.pin2node = {0, 1};
+      d.pin_offset_x = d.pin_offset_y = {5, 0};
+      d.flat_net2pin = {0, 1};
+      d.flat_net2pin_start = {0, 2};
+      d.net_weights = {net_weight};
+      d.build_maps();
+      Options o;
+      o.max_iterations = 2;
+      o.bins_x = o.bins_y = 8;
+      o.initial_density_weight = 1e-30;
+      o.add_fillers = o.legalize = o.detailed_place = false;
+      o.macro_pull_interval = 1;
+      o.macro_pull_update =
+          [](const Design &,
+             int iteration) -> std::optional<std::vector<MacroPull>> {
+        if (iteration == 1)
+          return std::vector<MacroPull>{{0, 30, 80, 1}};
+        return std::nullopt;
+      };
+      place(d, o);
+      return std::pair{d.node_x[0], d.node_y[0]};
+    };
+    const auto light = anchored(100), heavy = anchored(10000);
+    check(std::abs(light.first - heavy.first) < 1e-7);
+    check(std::abs(light.second - heavy.second) < 1e-7);
+    check(light.second > 45); // the anchor actually pulls upward
     auto full = fixture(), split = full;
     Options o;
     o.max_iterations = 40;
@@ -710,6 +747,38 @@ int main() {
     };
     place(resized_halo, centroid_cp);
     check(centroid_areas > 0 && resized_halo.node_size_x[0] == 3);
+    // Read-only center-step telemetry must preserve the ordinary GP trajectory.
+    auto plain_motion = fixture(), measured_motion = plain_motion;
+    plain_motion.node_macro = measured_motion.node_macro = {1, 0, 0, 0, 0};
+    Options motion_options;
+    motion_options.max_iterations = motion_options.min_iterations = 12;
+    motion_options.bins_x = motion_options.bins_y = 8;
+    motion_options.add_fillers = motion_options.legalize =
+        motion_options.detailed_place = false;
+    place(plain_motion, motion_options);
+    std::vector<double> measured, expected;
+    int previous_iteration = -1;
+    double previous_x = 0, previous_y = 0;
+    motion_options.macro_step_observer = [&](int iteration, double sum,
+                                             bool valid) {
+      check(valid == (iteration != 0));
+      measured.push_back(sum);
+    };
+    motion_options.macro_motion_observer =
+        [&](const Design &, const std::vector<double> &x,
+            const std::vector<double> &y, int iteration) {
+          expected.push_back(
+              previous_iteration < 0
+                  ? 0
+                  : std::hypot(x[0] - previous_x, y[0] - previous_y));
+          previous_x = x[0];
+          previous_y = y[0];
+          previous_iteration = iteration;
+        };
+    place(measured_motion, motion_options);
+    check(measured.size() == 13 && measured == expected);
+    check(plain_motion.node_x == measured_motion.node_x &&
+          plain_motion.node_y == measured_motion.node_y);
     // Without a GP loop only the overflow test decides convergence.
     auto legal_only = fixture();
     Options legal_options;

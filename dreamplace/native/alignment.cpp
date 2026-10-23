@@ -73,26 +73,40 @@ macro_align_pairs(const Design &d, bool nearest,
 // Strip bins are only a broad-phase index, not snap coordinates. Search all
 // intersecting center bins, including neighboring bins at strip boundaries;
 // exact physical projection tests determine whether a force is applicable.
-std::vector<AlignmentPair> macro_grid_align_pairs(const Design &d,
-                                                  bool nearest) {
+std::vector<AlignmentPair>
+macro_grid_align_pairs(const Design &d, bool nearest,
+                       const std::vector<int> *class_override,
+                       bool padded_extents, bool overlapping_pairs) {
   struct Box {
     int node;
     double x, y, w, h;
   };
   std::map<int, std::vector<Box>> classes;
+  const auto &node_class =
+      class_override ? *class_override : d.node_align_class;
   double pitch_x = std::numeric_limits<double>::infinity(), pitch_y = pitch_x;
   for (int i = 0; i < d.num_movable; ++i) {
-    if (d.node_align_class.empty() || d.node_align_class[i] < 0 ||
-        d.node_macro.empty() || !d.node_macro[i])
+    if (node_class.empty() || node_class[i] < 0 || d.node_macro.empty() ||
+        !d.node_macro[i])
       continue;
     const double px = d.node_pad_x.empty() ? 0 : d.node_pad_x[i];
     const double py = d.node_pad_y.empty() ? 0 : d.node_pad_y[i];
-    const double w = d.node_size_x[i] - 2 * px, h = d.node_size_y[i] - 2 * py;
+    const auto halo = [&](const std::vector<double> &values, double pitch) {
+      return values.empty() ? 0 : std::ceil(values[i] / pitch - 1e-9) * pitch;
+    };
+    const double hx = padded_extents && d.node_pad_x.empty()
+                          ? halo(d.node_halo_x, d.layout.site_width)
+                          : 0;
+    const double hy = padded_extents && d.node_pad_y.empty()
+                          ? halo(d.node_halo_y, d.layout.row_height)
+                          : 0;
+    const double w = d.node_size_x[i] - (padded_extents ? 0 : 2 * px) + 2 * hx;
+    const double h = d.node_size_y[i] - (padded_extents ? 0 : 2 * py) + 2 * hy;
     if (w <= 0 || h <= 0)
       continue;
-    classes[d.node_align_class[i]].push_back(
-        {i, d.node_x[i] + d.node_size_x[i] / 2,
-         d.node_y[i] + d.node_size_y[i] / 2, w, h});
+    classes[node_class[i]].push_back({i, d.node_x[i] + d.node_size_x[i] / 2,
+                                      d.node_y[i] + d.node_size_y[i] / 2, w,
+                                      h});
     pitch_x = std::min(pitch_x, w);
     pitch_y = std::min(pitch_y, h);
   }
@@ -126,7 +140,7 @@ std::vector<AlignmentPair> macro_grid_align_pairs(const Design &d,
               continue;
             const bool ox = std::abs(a.x - b.x) < (a.w + b.w) / 2;
             const bool oy = std::abs(a.y - b.y) < (a.h + b.h) / 2;
-            if (ox != oy && (x ? ox : oy))
+            if ((overlapping_pairs || ox != oy) && (x ? ox : oy))
               pairs.push_back({a.node, b.node, x ? Axis::x : Axis::y});
           }
         }

@@ -14,6 +14,7 @@
 #include <string>
 
 #include "dreamplace/native/local_density.hpp"
+#include "dreamplace/native/magnet.hpp"
 #include "dreamplace/native/rudy.hpp"
 #include "dreamplace/native/spectral.hpp"
 
@@ -30,6 +31,14 @@ int count(size_t n) {
   require(n <= static_cast<size_t>(std::numeric_limits<int>::max()),
           "array exceeds 32-bit kernel indices");
   return static_cast<int>(n);
+}
+double placement_preconditioner(const Design &d, int i, double density_weight) {
+  const double degree =
+      i < int(d.flat_node2pin_start.size()) - 1
+          ? d.flat_node2pin_start[i + 1] - d.flat_node2pin_start[i]
+          : 0;
+  return std::max(1., degree +
+                          density_weight * d.node_size_x[i] * d.node_size_y[i]);
 }
 void csr_check(const std::vector<int> &flat, const std::vector<int> &start,
                int objects, int pins, const std::vector<int> &inverse) {
@@ -109,12 +118,18 @@ void options_check(const Options &o) {
               (o.auxiliary_bins == 0 ||
                (o.auxiliary_bins >= 2 && o.auxiliary_bins <= 1024)),
           "invalid local density controls");
+  require(finite(o.local_density_target) &&
+              (o.local_density_target == -1 ||
+               (o.local_density_target >= 0 && o.local_density_target <= 1)),
+          "local density target must be -1 (inherit) or in [0,1]");
   require(finite(o.timing_spread_weight) && o.timing_spread_weight >= 0 &&
               o.timing_spread_weight <= 1,
           "timing spreading weight must be in [0,1]");
   require(finite(o.macro_cell_density_weight) &&
               o.macro_cell_density_weight >= 0,
           "invalid macro cell density weight");
+  require(finite(o.macro_cell_density_reach) && o.macro_cell_density_reach > 0,
+          "invalid macro cell density reach");
   require(
       finite(o.macro_density_pull_weight) && o.macro_density_pull_weight >= 0 &&
           o.macro_density_pull_weight <= 1 &&
@@ -122,6 +137,9 @@ void options_check(const Options &o) {
           o.macro_density_pull_range > 0 && o.macro_density_pull_range <= 32,
       "invalid macro density pull controls");
   require(o.filler_max_count >= 0 && o.filler_max_count <= 100000000 &&
+              finite(o.filler_macro_fraction) && o.filler_macro_fraction >= 0 &&
+              o.filler_macro_fraction <= 1 &&
+              !(o.filler_macro_fraction > 0 && o.filler_width > 0) &&
               finite(o.filler_cell_scale) && o.filler_cell_scale > 0 &&
               finite(o.filler_bin_fraction) && o.filler_bin_fraction > 0 &&
               o.filler_bin_fraction <= 1 && finite(o.filler_area_fraction) &&
@@ -278,6 +296,76 @@ Design padded_design(const Design &source) {
 }
 } // namespace
 
+namespace detail {
+std::vector<MacroPullForce>
+macro_pull_forces(const Design &d, const std::vector<MacroPull> &pulls,
+                  const Gradient &wire, const Gradient &density,
+                  double density_weight) {
+  std::vector<MacroPullForce> result;
+  if (pulls.empty())
+    return result;
+  result.reserve(pulls.size());
+  double reference = 0, minimum_reference = 0, length = 0;
+  for (const auto &pull : pulls) {
+    const int i = pull.node;
+    const double pre = placement_preconditioner(d, i, density_weight);
+    reference += (std::abs(wire.x[i] + density_weight * density.x[i]) +
+                  std::abs(wire.y[i] + density_weight * density.y[i])) /
+                 pre;
+    minimum_reference += 1 / pre;
+    length += std::max(d.node_size_x[i], d.node_size_y[i]);
+  }
+  reference = std::max(reference, minimum_reference) / pulls.size();
+  length = std::max(1e-12, length / pulls.size());
+  for (const auto &pull : pulls) {
+    const int i = pull.node;
+    const double dx = d.node_x[i] + d.node_size_x[i] / 2 - pull.x;
+    const double dy = d.node_y[i] + d.node_size_y[i] / 2 - pull.y;
+    // Shared length and identical far-target cap: no per-macro size in the
+    // displacement factor. Multiplying by pre cancels the optimizer's division.
+    const double scale = pull.weight * reference *
+                         placement_preconditioner(d, i, density_weight) /
+                         std::max(length, std::hypot(dx, dy));
+    result.push_back({i, scale * dx, scale * dy});
+  }
+  return result;
+}
+Design unpad_snapshot(const Design &snapshot, const Design &reference) {
+  if (snapshot.node_pad_x.empty())
+    return snapshot;
+  require(snapshot.node_x.size() == reference.node_x.size() &&
+              snapshot.node_pad_x.size() == snapshot.node_x.size() &&
+              snapshot.node_pad_y.size() == snapshot.node_x.size(),
+          "physical snapshot reference size mismatch");
+  Design physical = snapshot;
+  for (int i = 0; i < count(physical.node_x.size()); ++i) {
+    const double hx = snapshot.node_pad_x[i], hy = snapshot.node_pad_y[i];
+    physical.node_x[i] += hx;
+    physical.node_y[i] += hy;
+    if (!physical.node_legalize_anchor_x.empty()) {
+      physical.node_legalize_anchor_x[i] += hx;
+      physical.node_legalize_anchor_y[i] += hy;
+    }
+    physical.node_size_x[i] -= 2 * hx;
+    physical.node_size_y[i] -= 2 * hy;
+    for (int k = physical.flat_node2pin_start[i];
+         k < physical.flat_node2pin_start[i + 1]; ++k) {
+      const int pin = physical.flat_node2pin[k];
+      physical.pin_offset_x[pin] -= hx;
+      physical.pin_offset_y[pin] -= hy;
+    }
+  }
+  physical.node_halo_x = reference.node_halo_x;
+  physical.node_halo_y = reference.node_halo_y;
+  physical.node_pad_x.clear();
+  physical.node_pad_y.clear();
+  physical.node_boxes = reference.node_boxes;
+  physical.order_edges = reference.order_edges;
+  physical.cohesion_groups = reference.cohesion_groups;
+  return physical;
+}
+} // namespace detail
+
 void Design::build_maps() {
   int nodes = count(node_x.size()), pins = count(pin2node.size());
   require(!flat_net2pin_start.empty(), "missing net CSR");
@@ -366,6 +454,14 @@ void Design::validate() const {
           "pad array size mismatch");
   require(node_orientation.empty() || node_orientation.size() == node_x.size(),
           "orientation array size mismatch");
+  require(node_orientation_fixed.empty() ||
+              (node_orientation_fixed.size() == node_x.size() &&
+               std::all_of(node_orientation_fixed.begin(),
+                           node_orientation_fixed.end(),
+                           [](auto v) { return v <= 1; })),
+          "invalid frozen orientation mask");
+  require(node_group_id.empty() || node_group_id.size() == node_x.size(),
+          "group identity array size mismatch");
   require(node_boxes.empty() || node_boxes.size() == node_x.size(),
           "position box size mismatch");
   for (const auto *capacity :
@@ -473,14 +569,29 @@ void Design::validate() const {
               "invalid centroid repulsion area");
       require(!group.nodes.empty() || !group.colors.empty(),
               "empty centroid group");
+      require(
+          (group.areas.empty() || group.areas.size() == group.nodes.size()) &&
+              (group.offsets.empty() ||
+               group.offsets.size() == group.nodes.size()),
+          "centroid logical member metadata size mismatch");
       std::set<int> nodes, colors;
-      for (int n : group.nodes) {
-        require(n >= 0 && n < static_cast<int>(node_x.size()) &&
-                    nodes.insert(n).second &&
-                    std::find(group.colors.begin(), group.colors.end(),
-                              node_centroid_color[n]) == group.colors.end() &&
-                    centroid_node_area[n] > 0,
-                "invalid or duplicate explicit centroid member");
+      for (size_t k = 0; k < group.nodes.size(); ++k) {
+        const int n = group.nodes[k];
+        const bool unique = nodes.insert(n).second;
+        require(
+            n >= 0 && n < static_cast<int>(node_x.size()) &&
+                (unique || (!group.areas.empty() && !group.offsets.empty())) &&
+                std::find(group.colors.begin(), group.colors.end(),
+                          node_centroid_color[n]) == group.colors.end() &&
+                centroid_node_area[n] > 0,
+            "invalid or duplicate explicit centroid member");
+        if (!group.areas.empty())
+          require(finite(group.areas[k]) && group.areas[k] > 0,
+                  "invalid centroid logical member area");
+        if (!group.offsets.empty())
+          require(finite(group.offsets[k].first) &&
+                      finite(group.offsets[k].second),
+                  "nonfinite centroid logical member offset");
       }
       for (int c : group.colors) {
         require(c >= 0 && c < static_cast<int>(centroid_color_names.size()) &&
@@ -494,10 +605,16 @@ void Design::validate() const {
             "invalid cohesion group weight");
     require(group.areas.empty() || group.areas.size() == group.nodes.size(),
             "cohesion area size mismatch");
+    require(group.offsets.empty() || group.offsets.size() == group.nodes.size(),
+            "cohesion offset size mismatch");
     for (size_t k = 0; k < group.nodes.size(); ++k) {
       int i = group.nodes[k];
-      require(i >= 0 && i < n && !grouped[i],
+      require(i >= 0 && i < n && (!grouped[i] || !group.offsets.empty()),
               "invalid or overlapping cohesion membership");
+      if (!group.offsets.empty())
+        require(finite(group.offsets[k].first) &&
+                    finite(group.offsets[k].second),
+                "invalid cohesion member offset");
       grouped[i] = true;
       double a = group.areas.empty() ? node_size_x[i] * node_size_y[i]
                                      : group.areas[k];
@@ -758,6 +875,13 @@ Result place(Design &design, const Options &options, GpState *state) {
     o.bins_y = bins.second;
   }
   options_check(o);
+  o.magnet.validate();
+  if (o.magnet.enabled) {
+    require(!state && !o.magnet_runtime,
+            "macro magnet requires one solve without external continuation");
+    require(o.legalize, "macro magnet requires placement with legalization");
+    return detail::magnet_place(design, o);
+  }
   const int aux_x = o.auxiliary_bins ? o.auxiliary_bins : o.bins_x;
   const int aux_y = o.auxiliary_bins ? o.auxiliary_bins : o.bins_y;
   require(
@@ -838,37 +962,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
     Design halo_model = design;
     const auto unpad = [&](const Design &snapshot) {
-      Design physical = snapshot;
-      for (int i = 0; i < count(physical.node_x.size()); ++i) {
-        const double hx =
-            halo(halo_model.node_halo_x, i, design.layout.site_width);
-        const double hy =
-            halo(halo_model.node_halo_y, i, design.layout.row_height);
-        physical.node_x[i] += hx;
-        physical.node_y[i] += hy;
-        if (!physical.node_legalize_anchor_x.empty()) {
-          physical.node_legalize_anchor_x[i] += hx;
-          physical.node_legalize_anchor_y[i] += hy;
-        }
-        physical.node_size_x[i] -= 2 * hx;
-        physical.node_size_y[i] -= 2 * hy;
-        for (int k = physical.flat_node2pin_start[i];
-             k < physical.flat_node2pin_start[i + 1]; ++k) {
-          const int pin = physical.flat_node2pin[k];
-          physical.pin_offset_x[pin] -= hx;
-          physical.pin_offset_y[pin] -= hy;
-        }
-      }
-      physical.node_halo_x = halo_model.node_halo_x;
-      physical.node_halo_y = halo_model.node_halo_y;
-      physical.node_pad_x.clear();
-      physical.node_pad_y.clear();
-      // padded_design also shifted these and GP rewrites cohesion areas; the
-      // unpadded model is the exact source of truth.
-      physical.node_boxes = halo_model.node_boxes;
-      physical.order_edges = halo_model.order_edges;
-      physical.cohesion_groups = halo_model.cohesion_groups;
-      return physical;
+      return detail::unpad_snapshot(snapshot, halo_model);
     };
     if (o.macro_pull_update && o.macro_pull_interval > 0) {
       control.macro_pull_update = [&](const Design &snapshot, int iteration) {
@@ -976,10 +1070,14 @@ Result place(Design &design, const Options &options, GpState *state) {
   salt(o.bins_y);
   salt(o.add_fillers);
   if (o.add_fillers) {
+    if (o.filler_macro_fraction > 0)
+      salt(std::bit_cast<std::uint64_t>(o.filler_macro_fraction));
     salt(std::bit_cast<std::uint64_t>(o.filler_cell_scale));
     salt(std::bit_cast<std::uint64_t>(o.filler_bin_fraction));
     salt(o.filler_max_count);
     salt(std::bit_cast<std::uint64_t>(o.filler_area_fraction));
+    if (o.filler_cell_space)
+      salt(0x63656c6c73706163ULL);
   }
   if (o.dynamic_bins || o.local_density_weight || o.macro_cell_density_weight ||
       o.macro_density_pull_weight || o.auxiliary_bins) {
@@ -993,7 +1091,13 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
   }
   if (o.macro_cell_density_weight) {
+    salt(0x6d6163726f726563ULL); // long-range, stage-calibrated cell pressure
     salt(std::bit_cast<std::uint64_t>(o.macro_cell_density_weight));
+    salt(std::bit_cast<std::uint64_t>(o.macro_cell_density_reach));
+  }
+  if (o.local_density_weight > 0 && o.local_density_target >= 0) {
+    salt(0x6c6f63616c746774ULL);
+    salt(std::bit_cast<std::uint64_t>(o.local_density_target));
   }
   if (o.timing_spread_weight) {
     salt(0x74696d6573707264ULL);
@@ -1034,6 +1138,11 @@ Result place(Design &design, const Options &options, GpState *state) {
   for (double v : design.node_size_y) {
     salt(std::bit_cast<std::uint64_t>(v));
   }
+  if (!design.node_orientation_fixed.empty()) {
+    salt(0x7269676964666978ULL);
+    for (auto fixed : design.node_orientation_fixed)
+      salt(fixed);
+  }
   for (int v : design.pin2node) {
     salt(v);
   }
@@ -1053,6 +1162,13 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
       for (double a : group.areas) {
         salt(std::bit_cast<std::uint64_t>(a));
+      }
+      if (!group.offsets.empty()) {
+        salt(0x72696769646f6666ULL);
+        for (auto [x, y] : group.offsets) {
+          salt(std::bit_cast<std::uint64_t>(x));
+          salt(std::bit_cast<std::uint64_t>(y));
+        }
       }
     }
   }
@@ -1150,7 +1266,8 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
   }
   if (o.observer) {
-    o.observer(d, PlacementStage::initial, warm ? state->iteration : 0);
+    o.observer(d, PlacementStage::initial,
+               warm ? state->iteration : o.iteration_offset);
   }
   const auto &l = d.layout;
   const double width = l.xh - l.xl, height = l.yh - l.yl;
@@ -1174,6 +1291,26 @@ Result place(Design &design, const Options &options, GpState *state) {
       fixed_area += w * h;
     }
   }
+  // Reserve physical macro bodies, not their halos or their current overlap
+  // union: these bodies must eventually fit even when initial poses overlap.
+  double cell_space = width * height;
+  if (o.filler_cell_space) {
+    for (int i = 0; i < original; ++i) {
+      if (!d.node_macro.empty() && d.node_macro[i]) {
+        const double px = d.node_pad_x.empty() ? 0 : d.node_pad_x[i];
+        const double py = d.node_pad_y.empty() ? 0 : d.node_pad_y[i];
+        cell_space -= std::max(0., d.node_size_x[i] - 2 * px) *
+                      std::max(0., d.node_size_y[i] - 2 * py);
+      } else if (i >= d.num_movable) {
+        cell_space -=
+            std::max(0., std::min(l.xh, d.node_x[i] + d.node_size_x[i]) -
+                             std::max(l.xl, d.node_x[i])) *
+            std::max(0., std::min(l.yh, d.node_y[i] + d.node_size_y[i]) -
+                             std::max(l.yl, d.node_y[i]));
+      }
+    }
+    cell_space = std::max(0., cell_space);
+  }
   const auto gp_start = std::chrono::steady_clock::now();
   if (d.num_movable && o.max_iterations) {
     auto active = [&](int i) { return i < d.num_movable || i >= original; };
@@ -1195,8 +1332,8 @@ Result place(Design &design, const Options &options, GpState *state) {
                      std::min(l.yh - d.node_size_y[i], box.yh));
     };
     for (int i = 0; i < d.num_movable; ++i) {
-      if (!warm && o.macro_jitter > 0 && !d.node_macro.empty() &&
-          d.node_macro[i]) {
+      if (!warm && !o.iteration_offset && o.macro_jitter > 0 &&
+          !d.node_macro.empty() && d.node_macro[i]) {
         // Index-local RNG avoids changing fillers or other nodes when a mask
         // changes.
         std::mt19937 local(o.seed ^ (0x9e3779b9U * (unsigned(i) + 1)));
@@ -1228,10 +1365,31 @@ Result place(Design &design, const Options &options, GpState *state) {
                                 ? (1 - o.target_density) * macro_area
                                 : 0)) *
           o.filler_area_fraction;
+      if (o.filler_cell_space) {
+        target_area =
+            (1 - o.target_density) * cell_space * o.filler_area_fraction;
+      }
       double fw = o.filler_width > 0 ? o.filler_width
                                      : area / d.num_movable / l.row_height;
       double fh = l.row_height;
-      if (o.filler_width == 0) {
+      if (o.filler_macro_fraction > 0) {
+        double smallest_area = std::numeric_limits<double>::infinity();
+        for (size_t i = 0; i < d.node_x.size(); ++i) {
+          if (d.node_macro.empty() || !d.node_macro[i])
+            continue;
+          const double w = d.node_size_x[i] -
+                           (d.node_pad_x.empty() ? 0 : 2 * d.node_pad_x[i]);
+          const double h = d.node_size_y[i] -
+                           (d.node_pad_y.empty() ? 0 : 2 * d.node_pad_y[i]);
+          if (w > 0 && h > 0 && w * h < smallest_area) {
+            smallest_area = w * h;
+            fw = o.filler_macro_fraction * w;
+            fh = o.filler_macro_fraction * h;
+          }
+        }
+        require(finite(smallest_area),
+                "macro-sized fillers require a physical macro");
+      } else if (o.filler_width == 0) {
         // Use the central 90% of real standard-cell dimensions, independently
         // on each axis. SRAM area must not turn virtual particles into long
         // row-height strips, including with no count guard.
@@ -1254,12 +1412,16 @@ Result place(Design &design, const Options &options, GpState *state) {
           fh = o.filler_cell_scale * trimmed_mean(heights);
         }
       }
-      fw = std::clamp(
-          fw, l.site_width,
-          std::max(l.site_width, std::min(width, dx * o.filler_bin_fraction)));
-      fh = std::clamp(
-          fh, l.row_height,
-          std::max(l.row_height, std::min(height, dy * o.filler_bin_fraction)));
+      // Macro-stage particles intentionally bypass the cell-resolution bin
+      // cap. Their entire footprint remains private density charge.
+      const double max_fw = o.filler_macro_fraction > 0
+                                ? width
+                                : std::min(width, dx * o.filler_bin_fraction);
+      const double max_fh = o.filler_macro_fraction > 0
+                                ? height
+                                : std::min(height, dy * o.filler_bin_fraction);
+      fw = std::clamp(fw, l.site_width, std::max(l.site_width, max_fw));
+      fh = std::clamp(fh, l.row_height, std::max(l.row_height, max_fh));
       if (o.filler_max_count > 0 &&
           target_area > fw * fh * o.filler_max_count) {
         r.filler_count_limited = true;
@@ -1272,6 +1434,18 @@ Result place(Design &design, const Options &options, GpState *state) {
                       std::max(fw, target_area / (fh * o.filler_max_count)));
         fh = std::min(height,
                       std::max(fh, target_area / (fw * o.filler_max_count)));
+      }
+      if (o.magnet_runtime) {
+        // Contraction preserves padded macro area, but changes node count.
+        // Keep the first solve's particle geometry rather than changing its
+        // charge/discretization just because two nodes became one.
+        if (o.magnet_runtime->filler_width > 0) {
+          fw = o.magnet_runtime->filler_width;
+          fh = o.magnet_runtime->filler_height;
+        } else {
+          o.magnet_runtime->filler_width = fw;
+          o.magnet_runtime->filler_height = fh;
+        }
       }
       double desired = std::floor(target_area / (fw * fh));
       if (o.filler_max_count > 0) {
@@ -1375,38 +1549,70 @@ Result place(Design &design, const Options &options, GpState *state) {
     PoissonSolver solver(o.bins_x, o.bins_y, width, height, o.dynamic_bins, 0,
                          o.num_threads);
     std::unique_ptr<detail::LocalDensity> local_density;
+    const double local_target = o.local_density_target < 0
+                                    ? o.target_density
+                                    : o.local_density_target;
+    std::unique_ptr<detail::LocalDensity> macro_cell_density;
+    double macro_cell_scale = -1;
+    const auto rebuild_macro_cell_density = [&] {
+      if (o.macro_cell_density_weight <= 0)
+        return;
+      const double reach = detail::macro_cell_screening_length(
+          model, o.macro_cell_density_reach);
+      r.macro_cell_density_screening_length = reach;
+      const double pitch = std::sqrt(width * height) / o.local_density_bins;
+      macro_cell_density = std::make_unique<detail::LocalDensity>(
+          model, o.local_density_bins, std::max(reach / pitch, 1e-12),
+          o.target_density, o.num_threads);
+      macro_cell_scale = -1;
+    };
+    rebuild_macro_cell_density();
 
     if (o.local_density_weight > 0 || o.macro_cell_density_weight > 0 ||
         o.macro_density_pull_weight > 0) {
       require(!state, "local spreading continuation is not supported yet");
       local_density = std::make_unique<detail::LocalDensity>(
-          model, o.local_density_bins, o.local_density_range, o.target_density,
+          model, o.local_density_bins, o.local_density_range, local_target,
           o.num_threads);
     }
     std::vector<double> map, phi, fx, fy;
     auto x = d.node_x, y = d.node_y, prev_x = x, prev_y = y;
     std::vector<double> old_gx(n), old_gy(n), old_ex(n), old_ey(n);
     double density_weight = o.initial_density_weight, t = 1, alpha = 0;
-    bool density_initialized = warm ? state->density_initialized : false;
-    const int offset = warm ? state->iteration : 0;
+    bool density_initialized =
+        warm ? state->density_initialized
+             : (o.magnet_runtime && o.magnet_runtime->density_initialized);
+    const int offset = warm ? state->iteration : o.iteration_offset;
     double previous_overflow = warm ? state->previous_overflow : -1;
-    int macro_pull_changed = -1;
+    int macro_pull_changed =
+        o.magnet_runtime ? o.magnet_runtime->macro_pull_changed : -1;
     double previous_hpwl = warm ? state->previous_hpwl : r.initial_hpwl;
     double route_overflow = 0, inflated_ratio = 1;
+    const auto *rigid_route = o.magnet_runtime && o.magnet_runtime->routing
+                                  ? &*o.magnet_runtime->routing
+                                  : nullptr;
     RouteModel active_route =
-        warm ? state->route_model
-             : (o.route.model == RouteModel::rsmt ? RouteModel::rsmt
-                                                  : RouteModel::rudy);
+        warm          ? state->route_model
+        : rigid_route ? rigid_route->model
+                      : (o.route.model == RouteModel::rsmt ? RouteModel::rsmt
+                                                           : RouteModel::rudy);
     if (!o.routability) {
       active_route = RouteModel::off;
     }
     int route_hold = warm ? state->route_hold : 0;
-    int probe_deadline = warm ? state->route_probe_deadline : 0;
+    int probe_deadline = warm          ? state->route_probe_deadline
+                         : rigid_route ? rigid_route->probe_deadline
+                                       : 0;
     if (warm) {
       r.route_switch_iteration = state->route_switch_iteration;
       r.route_switch_rudy = state->route_switch_rudy;
       r.route_switch_rsmt = state->route_switch_rsmt;
       r.route_probed = state->route_probed;
+    } else if (rigid_route) {
+      r.route_switch_iteration = rigid_route->switch_iteration;
+      r.route_switch_rudy = rigid_route->switch_rudy;
+      r.route_switch_rsmt = rigid_route->switch_rsmt;
+      r.route_probed = rigid_route->probed;
     }
     double route_sample_seconds = 0, route_peak_utilization = 0;
     bool route_sampled = false;
@@ -1507,20 +1713,32 @@ Result place(Design &design, const Options &options, GpState *state) {
     // placement for a static solve, without changing continuation/checkpoint
     // state or any of the classic density path.
     const bool keep_feasible =
-        o.density_upper_bound && !state && !o.checkpoint && !centroids &&
-        !(o.order_weight > 0 && !design.order_edges.empty()) &&
+        o.density_upper_bound && !state && !o.magnet_runtime && !o.checkpoint &&
+        !centroids && !(o.order_weight > 0 && !design.order_edges.empty()) &&
         !o.macro_align_weight && !macro_routing &&
         !(o.macro_pull_update && o.macro_pull_interval > 0);
     double best_feasible_hpwl = std::numeric_limits<double>::infinity();
-    std::vector<MacroPull> macro_pulls;
+    std::vector<MacroPull> macro_pulls = o.magnet_runtime
+                                             ? o.magnet_runtime->macro_pulls
+                                             : std::vector<MacroPull>{};
     std::vector<double> best_feasible_x, best_feasible_y;
     int best_feasible_iteration = 0;
     bool restart = false;
     int last_checkpoint = -1;
-    bool checkpoint_invoked = false;
+    bool checkpoint_invoked =
+        o.magnet_runtime && o.magnet_runtime->checkpoint_invoked;
     const bool density_gated_checkpoints =
         o.checkpoint_after_density && o.checkpoint && o.checkpoint_interval > 0;
-    auto convergence = warm ? state->convergence : GpConvergence{};
+    auto convergence = warm ? state->convergence
+                            : (o.magnet_runtime && o.magnet_runtime->convergence
+                                   ? *o.magnet_runtime->convergence
+                                   : GpConvergence{});
+    if (!warm && o.magnet_runtime) {
+      // Current poses seed a cold solver after contraction/snap. Objective
+      // samples from the previous geometry cannot establish convergence.
+      convergence.previous_hpwl = convergence.previous_inflation = -1;
+      convergence.stable_samples = 0;
+    }
     std::vector<AlignmentPair> align_pairs =
         warm ? state->align_pairs : std::vector<AlignmentPair>{};
     double align_residual = 0, align_ramp = 0, align_force_peak = 0;
@@ -1586,6 +1804,18 @@ Result place(Design &design, const Options &options, GpState *state) {
         old_ey[i] += dy;
       }
     }
+    // Telemetry has its own lifetime and never enables magnet force/stopping
+    // rules. Rigid placement uses its existing shared runtime instead.
+    std::optional<detail::MagnetRuntime> step_recorder;
+    if (o.macro_step_observer && !o.magnet_runtime)
+      step_recorder.emplace(o);
+    if (step_recorder)
+      step_recorder->observe(model, x, y, offset);
+    if (o.magnet_runtime) {
+      o.magnet_runtime->observe(model, x, y, offset);
+    }
+    if (o.macro_motion_observer)
+      o.macro_motion_observer(model, x, y, offset);
     for (int iter = 0; iter < o.max_iterations; ++iter) {
       const int global_iter = offset + iter;
       double progress = std::min(
@@ -1696,8 +1926,11 @@ Result place(Design &design, const Options &options, GpState *state) {
             area * inflated_ratio -
             (o.scale_macro_density ? (1 - target) * macro_area : 0);
         const double budget =
-            std::max(0., target * (width * height - fixed_area) - real_charge) *
-            o.filler_area_fraction;
+            o.filler_cell_space
+                ? (1 - o.target_density) * cell_space * o.filler_area_fraction
+                : std::max(0., target * (width * height - fixed_area) -
+                                   real_charge) *
+                      o.filler_area_fraction;
         filler_scale = filler_area ? budget / filler_area : 0;
         for (int i = original; i < n; ++i) {
           ratio[i] = filler_scale * d.node_size_x[i] * d.node_size_y[i] /
@@ -1755,6 +1988,10 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
       }
       std::vector<double> cell_density;
+      // Calibrate against ordinary, already preconditioned motion before
+      // adding independent local-density/routing/alignment objectives.
+      const auto macro_pull_forces =
+          detail::macro_pull_forces(d, macro_pulls, wg, dg, density_weight);
       double ordinary_macro_force = 0;
       if (local_density) {
         const auto begin = std::chrono::steady_clock::now();
@@ -1763,7 +2000,7 @@ Result place(Design &design, const Options &options, GpState *state) {
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           begin)
                 .count();
-        if (o.macro_density_pull_weight > 0) {
+        if (o.macro_density_pull_weight > 0 || o.macro_cell_density_weight > 0) {
           for (int i = 0; i < d.num_movable; ++i) {
             if (!d.node_macro.empty() && d.node_macro[i]) {
               ordinary_macro_force +=
@@ -1795,7 +2032,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         const double pitch = std::sqrt(width * height) / o.local_density_bins;
         const double reference =
-            cell_area * o.target_density * pitch / (2 * std::acos(-1.));
+            cell_area * local_target * pitch / (2 * std::acos(-1.));
         const double scale =
             o.local_density_weight * base / std::max({reference, force, 1e-12});
         double applied_force = 0;
@@ -1818,14 +2055,12 @@ Result place(Design &design, const Options &options, GpState *state) {
                                        std::chrono::steady_clock::now() - begin)
                                        .count();
       }
-      if (local_density && o.macro_cell_density_weight > 0) {
+      if (macro_cell_density) {
         const auto begin = std::chrono::steady_clock::now();
-        const auto mg = local_density->gradient(d, true, cell_density);
-        double base = 0, force = 0, macro_area = 0;
+        const auto mg = macro_cell_density->gradient(d, true, cell_density);
+        double force = 0, macro_area = 0;
         for (int i = 0; i < d.num_movable; ++i) {
           if (!d.node_macro.empty() && d.node_macro[i]) {
-            base += std::abs(wg.x[i] + density_weight * dg.x[i]) +
-                    std::abs(wg.y[i] + density_weight * dg.y[i]);
             force += std::abs(mg.x[i]) + std::abs(mg.y[i]);
             macro_area += d.node_size_x[i] * d.node_size_y[i];
           }
@@ -1833,8 +2068,16 @@ Result place(Design &design, const Options &options, GpState *state) {
         const double pitch = std::sqrt(width * height) / o.local_density_bins;
         const double reference =
             macro_area * o.target_density * pitch / (2 * std::acos(-1.));
-        const double scale = o.macro_cell_density_weight * base /
+        // Calibrate once per netlist, before other optional forces. Freezing
+        // the coefficient lets weak cell contributions accumulate linearly;
+        // renormalizing by the current field would cap away that accumulation.
+        // A physical floor avoids amplifying an initially tiny sparse field.
+        if (macro_cell_scale < 0 && ordinary_macro_force > 0) {
+          macro_cell_scale = o.macro_cell_density_weight * ordinary_macro_force /
                              std::max({reference, force, 1e-12});
+          r.macro_cell_density_coefficient = macro_cell_scale;
+        }
+        const double scale = std::max(0., macro_cell_scale);
         r.macro_cell_density_force =
             std::max(r.macro_cell_density_force, scale * force);
         for (int i = 0; i < d.num_movable; ++i) {
@@ -1869,21 +2112,9 @@ Result place(Design &design, const Options &options, GpState *state) {
           r.centroid.attraction_calibration_iteration = global_iter;
         }
       }
-      // Same ordinary-force reference as other soft macro objectives. Keep
-      // endpoint distance magnitude below one macro dimension, cap distant
-      // pulls.
-      for (const auto &pull : macro_pulls) {
-        const int i = pull.node;
-        const double dx = d.node_x[i] + d.node_size_x[i] / 2 - pull.x;
-        const double dy = d.node_y[i] + d.node_size_y[i] / 2 - pull.y;
-        const double radius = std::max(
-            {d.node_size_x[i], d.node_size_y[i], std::hypot(dx, dy), 1e-12});
-        const double scale =
-            pull.weight *
-            std::max(1., ordinary_macro_force /
-                             std::max<size_t>(1, macro_pulls.size()));
-        wg.x[i] += scale * dx / radius;
-        wg.y[i] += scale * dy / radius;
+      for (const auto &force : macro_pull_forces) {
+        wg.x[force.node] += force.x;
+        wg.y[force.node] += force.y;
       }
       if (local_density && o.macro_density_pull_weight > 0) {
         const auto begin = std::chrono::steady_clock::now();
@@ -2162,11 +2393,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       std::vector<double> gx(n), gy(n);
       for (int i = 0; i < n; ++i) {
         if (active(i)) {
-          double degree = i < original ? d.flat_node2pin_start[i + 1] -
-                                             d.flat_node2pin_start[i]
-                                       : 0;
-          double pre = std::max(1., degree + density_weight * d.node_size_x[i] *
-                                                 d.node_size_y[i]);
+          const double pre = placement_preconditioner(d, i, density_weight);
           double cell_density_weight = density_weight;
           if (o.routability && !spread_mobility.empty() && inflation[i] > 1) {
             // Keep the full inflated source in the field so neighbors still
@@ -2199,14 +2426,25 @@ Result place(Design &design, const Options &options, GpState *state) {
       old_gy = gy;
       prev_x = x;
       prev_y = y;
+      double macro_momentum_work = 0;
       for (int i = 0; i < n; ++i) {
         if (active(i)) {
           x[i] = d.node_x[i] - alpha * gx[i];
           y[i] = d.node_y[i] - alpha * gy[i];
           project(i, x[i], y[i]);
+          if (o.magnet_runtime && i < original && !d.node_macro.empty() &&
+              d.node_macro[i]) {
+            macro_momentum_work +=
+                gx[i] * (x[i] - prev_x[i]) + gy[i] * (y[i] - prev_y[i]);
+          }
         }
       }
-      t = nt;
+      // Adaptive gradient restart: channel pressure changes with the macro
+      // geometry and routing map. Retaining near-unit Nesterov momentum when
+      // its proposed macro displacement goes uphill causes repeated channel
+      // overshoot. Drop extrapolation on the next step without removing any
+      // routing force or changing the step/curvature estimate.
+      t = o.magnet_runtime && macro_momentum_work > 0 ? 1 : nt;
       r.iterations = iter + 1;
       if (o.terminal_update && o.terminal_interval > 0 &&
           (global_iter + 1) % o.terminal_interval == 0) {
@@ -2230,6 +2468,9 @@ Result place(Design &design, const Options &options, GpState *state) {
           y[pin.node] = d.node_y[pin.node] = model.node_y[pin.node] = pin.y;
         }
         if (changed) {
+          if (o.magnet_runtime) {
+            o.magnet_runtime->event(global_iter + 1, MagnetEvent::terminal);
+          }
           t = 1;
           prev_x = x;
           prev_y = y;
@@ -2267,6 +2508,9 @@ Result place(Design &design, const Options &options, GpState *state) {
             seen[pull.node] = true;
           }
           macro_pulls = std::move(*replacement);
+          if (o.magnet_runtime) {
+            o.magnet_runtime->event(global_iter + 1, MagnetEvent::pull);
+          }
           macro_pull_changed = global_iter + 1;
           t = 1;
           prev_x = x;
@@ -2308,6 +2552,9 @@ Result place(Design &design, const Options &options, GpState *state) {
         if (invoke) {
           checkpoint_invoked = true;
           update = o.checkpoint(snapshot, global_iter + 1);
+          if (o.magnet_runtime) {
+            o.magnet_runtime->event(global_iter + 1, MagnetEvent::timing);
+          }
         }
         if (update.timing_violation) {
           require(finite(*update.timing_violation) &&
@@ -2534,8 +2781,9 @@ Result place(Design &design, const Options &options, GpState *state) {
           if (local_density) {
             local_density = std::make_unique<detail::LocalDensity>(
                 model, o.local_density_bins, o.local_density_range,
-                o.target_density, o.num_threads);
+                local_target, o.num_threads);
           }
+          rebuild_macro_cell_density();
           t = 1;
           prev_x = x;
           prev_y = y;
@@ -2550,6 +2798,13 @@ Result place(Design &design, const Options &options, GpState *state) {
           previous_hpwl = hpwl(model);
         }
       }
+      if (step_recorder)
+        step_recorder->observe(model, x, y, global_iter + 1);
+      if (o.magnet_runtime) {
+        o.magnet_runtime->observe(model, x, y, global_iter + 1);
+      }
+      if (o.macro_motion_observer)
+        o.macro_motion_observer(model, x, y, global_iter + 1);
       if (o.observer && r.iterations % o.observer_interval == 0) {
         Design physical = model;
         std::copy_n(x.begin(), original, physical.node_x.begin());
@@ -2725,15 +2980,24 @@ Result place(Design &design, const Options &options, GpState *state) {
           r.timing_satisfied = convergence.timing_satisfied;
         }
         route_history(r.history.back());
+        if (o.magnet_runtime) {
+          o.magnet_runtime->sample(physical, r.history.back());
+        }
         if (o.progress_observer) {
           o.progress_observer(r.history.back());
         }
-        if (geometry_ready && ((!o.post_density_factor && !probe_deadline) ||
-                               r.objective_converged)) {
+        if (o.magnet_runtime && !o.magnet_runtime->pending.empty()) {
+          break;
+        }
+        const bool magnet_ready =
+            !o.magnet_runtime || o.magnet_runtime->ready(global_iter + 1);
+        if (magnet_ready && geometry_ready &&
+            ((!o.post_density_factor && !probe_deadline) ||
+             r.objective_converged)) {
           r.converged = true;
           break;
         }
-        if (r.continuation_limit && macro_pulls_ready) {
+        if (r.continuation_limit && macro_pulls_ready && magnet_ready) {
           break;
         }
         if (separate_circles && global_iter + 1 >= o.centroid_ramp &&
@@ -2771,10 +3035,23 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
     }
     r.centroid.completed = r.centroid.started;
-    if (density_gated_checkpoints) {
+    if (o.magnet_runtime) {
+      o.magnet_runtime->density_initialized = density_initialized;
+      o.magnet_runtime->routing = detail::MagnetRuntime::RouteProgress{
+          active_route,        probe_deadline,      r.route_switch_iteration,
+          r.route_switch_rudy, r.route_switch_rsmt, r.route_probed};
+      o.magnet_runtime->convergence = convergence;
+      o.magnet_runtime->checkpoint_invoked = checkpoint_invoked;
+      o.magnet_runtime->macro_pulls = std::move(macro_pulls);
+      o.magnet_runtime->macro_pull_changed = macro_pull_changed;
+    }
+    if (density_gated_checkpoints || o.magnet_runtime) {
       // A forced cap need not coincide with a 20-iteration history sample.
       r.timing_observed = convergence.timing_observed;
       r.timing_satisfied = convergence.timing_satisfied;
+      r.density_iteration = convergence.density_iteration;
+      r.continuation_deadline =
+          probe_deadline ? probe_deadline : convergence.deadline;
       if (!convergence.timing_satisfied) {
         r.objective_converged = false;
       }
@@ -2823,7 +3100,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     d.build_maps();
     if (o.observer && (r.iterations % o.observer_interval != 0 ||
                        r.selected_iteration != offset + r.iterations)) {
-      o.observer(d, PlacementStage::global_placement, r.iterations);
+      o.observer(d, PlacementStage::global_placement, offset + r.iterations);
     }
   }
   r.global_placement_seconds =
@@ -2843,6 +3120,7 @@ Result place(Design &design, const Options &options, GpState *state) {
   r.converged =
       (!gp_ran || !o.checkpoint_after_density || !o.checkpoint ||
        !o.checkpoint_interval ||
+       (o.magnet_runtime && o.magnet_runtime->checkpoint_invoked) ||
        std::any_of(r.checkpoint_history.begin(), r.checkpoint_history.end(),
                    [](const auto &sample) { return sample.invoked; })) &&
       (!gp_ran || !o.post_density_factor || r.objective_converged) &&
@@ -2850,7 +3128,10 @@ Result place(Design &design, const Options &options, GpState *state) {
       (!separate_circles || r.centroid.circles_converged) &&
       (!align_centroids || r.iterations > o.centroid_align_full) &&
       (!o.macro_align_weight ||
-       (warm ? state->iteration : 0) + r.iterations > o.macro_align_full);
+       (warm ? state->iteration : o.iteration_offset) + r.iterations >
+           o.macro_align_full) &&
+      (!o.magnet_runtime ||
+       o.magnet_runtime->ready(o.iteration_offset + r.iterations));
   if (o.legalize && d.num_movable) {
     if (o.before_legalize) {
       o.before_legalize(d);
@@ -2875,17 +3156,18 @@ Result place(Design &design, const Options &options, GpState *state) {
                        o.after_macro_legalize, o.macro_only_legalize);
     }
     std::string legality_reason;
-    const bool legal = o.macro_only_legalize
-                           ? macros_are_legal(d, &legality_reason)
-                           : is_legal(d, &legality_reason) &&
-                                 detail::kernel_is_legal(d);
+    const bool legal =
+        o.macro_only_legalize
+            ? macros_are_legal(d, &legality_reason)
+            : is_legal(d, &legality_reason) && detail::kernel_is_legal(d);
     if (!legal) {
       throw std::runtime_error("DREAMPlace legalization failed: insufficient "
                                "row space or unsupported geometry: " +
                                legality_reason);
     }
     if (o.observer) {
-      o.observer(d, PlacementStage::legalization, r.iterations);
+      o.observer(d, PlacementStage::legalization,
+                 o.iteration_offset + r.iterations);
     }
     if (o.detailed_place && !d.net_weights.empty()) {
       const auto detail_start = std::chrono::steady_clock::now();
@@ -2897,7 +3179,8 @@ Result place(Design &design, const Options &options, GpState *state) {
                                         detail_start)
               .count();
       if (o.observer) {
-        o.observer(d, PlacementStage::detailed_placement, r.iterations);
+        o.observer(d, PlacementStage::detailed_placement,
+                   o.iteration_offset + r.iterations);
       }
     }
   }
@@ -2909,7 +3192,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
   }
   if (o.observer) {
-    o.observer(d, PlacementStage::finished, r.iterations);
+    o.observer(d, PlacementStage::finished, o.iteration_offset + r.iterations);
   }
   if (state && next.signature) {
     *state = std::move(next);

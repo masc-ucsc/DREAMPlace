@@ -3,6 +3,8 @@
 #include "dreamplace/native/placement.hpp"
 #include "dreamplace/native/spectral.hpp"
 namespace DreamPlace::native::detail {
+// Physical body dimensions exclude the private halo padding applied by place.
+double macro_cell_screening_length(const Design &d, double reach);
 // Screened Poisson particle-mesh field for real standard cells only. No nets,
 // artificial particles or physical footprint inflation. Macro receivers are
 // opt-in.

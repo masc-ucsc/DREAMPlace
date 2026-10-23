@@ -49,6 +49,26 @@ int main() {
   check(quiet.x[0] == 0 && quiet.y[1] == 0);
   auto active = detail::LocalDensity(d, 64, 4, .1).gradient(d);
   check(active.x[0] > 0 && active.x[1] < 0);
+  // An independent local threshold can activate spreading below the global
+  // target. Inheritance must retain the old trajectory exactly.
+  Options threshold;
+  threshold.add_fillers = threshold.legalize = threshold.detailed_place = false;
+  threshold.max_iterations = threshold.min_iterations = 1;
+  threshold.bins_x = threshold.bins_y = threshold.local_density_bins = 64;
+  threshold.target_density = .5;
+  threshold.local_density_weight = .75;
+  threshold.local_density_jitter = 0;
+  auto inherited_design = d, high_design = d, low_design = d;
+  const auto inherited_result = place(inherited_design, threshold);
+  threshold.local_density_target = .5;
+  const auto high_result = place(high_design, threshold);
+  threshold.local_density_target = .05;
+  const auto low_result = place(low_design, threshold);
+  check(inherited_design.node_x == high_design.node_x &&
+        inherited_design.node_y == high_design.node_y);
+  check(inherited_result.local_density_force == 0 &&
+        high_result.local_density_force == 0 &&
+        low_result.local_density_force > 0);
   auto macro = d;
   macro.node_macro = {1, 1};
   auto m = detail::LocalDensity(macro, 64, 4).gradient(macro);
@@ -87,6 +107,30 @@ int main() {
   const auto pd =
       detail::LocalDensity(distant, 128, 4, .5).gradient(distant, true);
   check(std::abs(pd.x[0]) < std::abs(pm.x[0]));
+  // A tiny amount of distant cell area must push a much larger memory.
+  // Two largest-memory side lengths give a broad field, independently of
+  // the short-range cell-to-cell solver. Sources accumulate without a
+  // density threshold or a requirement to match the SRAM's area.
+  const double long_reach = detail::macro_cell_screening_length(distant, 2);
+  check(long_reach == 64);
+  detail::LocalDensity broad(distant, 128, long_reach, .5);
+  const auto long_force = broad.gradient(distant, true);
+  check(long_force.x[0] > 2 * pd.x[0]);
+  auto twice_source = broad.cell_density(distant);
+  for (auto &v : twice_source)
+    v *= 2;
+  const auto twice_force = broad.gradient(distant, true, twice_source);
+  check(std::abs(twice_force.x[0] - 2 * long_force.x[0]) < 1e-8);
+  for (size_t i = 1; i < long_force.x.size(); ++i)
+    check(long_force.x[i] == 0 && long_force.y[i] == 0);
+  auto padded = distant;
+  padded.node_pad_x.assign(padded.node_x.size(), 0);
+  padded.node_pad_y.assign(padded.node_x.size(), 0);
+  padded.node_pad_x[0] = 3;
+  padded.node_pad_y[0] = 7;
+  padded.node_size_x[0] += 6;
+  padded.node_size_y[0] += 14;
+  check(detail::macro_cell_screening_length(padded, 2) == long_reach);
   auto no_cells = pressure;
   no_cells.node_macro.assign(no_cells.node_x.size(), 1);
   const auto pn =
@@ -168,6 +212,19 @@ int main() {
   const auto off = place(disabled, popt);
   check(baseline.node_x == disabled.node_x &&
         baseline.node_y == disabled.node_y && before.hpwl == off.hpwl);
+  auto pressure_a = pressure, pressure_b = pressure;
+  auto cell_pressure = popt;
+  cell_pressure.macro_cell_density_weight = .25;
+  const auto pressure_result = place(pressure_a, cell_pressure);
+  cell_pressure.local_density_range = 1;
+  const auto independent = place(pressure_b, cell_pressure);
+  check(pressure_a.node_x == pressure_b.node_x &&
+        pressure_a.node_y == pressure_b.node_y);
+  check(pressure_result.macro_cell_density_screening_length == 64 &&
+        pressure_result.macro_cell_density_coefficient > 0 &&
+        pressure_result.macro_cell_density_force > 0 &&
+        independent.macro_cell_density_force ==
+            pressure_result.macro_cell_density_force);
   popt.macro_density_pull_weight = .1;
   const auto on = place(pulling, popt);
   check(on.macro_density_pull_seconds > 0 && on.macro_density_pull_force > 0);

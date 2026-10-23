@@ -1328,8 +1328,118 @@ void virtual_macro_pulls() {
   check(bad.node_x == before.node_x,
         "invalid pull partially committed placement");
 }
+void size_neutral_macro_pull() {
+  Design d;
+  d.layout = {0, 0, 10000, 10000, 1, 1};
+  d.num_movable = 3;
+  d.node_x = {500, 3000, 6000};
+  d.node_y = {500, 3000, 6000};
+  d.node_size_x = {20, 200, 20};
+  d.node_size_y = {40, 400, 40};
+  d.node_macro = {1, 1, 1};
+  d.pin2node = {0, 1, 1, 1, 2};
+  d.pin_offset_x = d.pin_offset_y = {0, 0, 0, 0, 0};
+  d.flat_net2pin = {0, 1, 2, 3, 4};
+  d.flat_net2pin_start = {0, 5};
+  d.build_maps();
+  detail::Gradient wire, density;
+  wire.x = {3, 7, 5};
+  wire.y = {2, 8, 4};
+  density.x = {11, 1, 9};
+  density.y = {4, 8, 7};
+  for (const double density_weight : {0., .01, 100.}) {
+    for (const double distance : {0., 10., 1000.}) {
+      std::vector<MacroPull> pulls;
+      for (int i = 0; i < 3; ++i)
+        pulls.push_back({i, d.node_x[i] + d.node_size_x[i] / 2 + distance,
+                         d.node_y[i] + d.node_size_y[i] / 2 - distance / 2,
+                         .7});
+      const auto forces =
+          detail::macro_pull_forces(d, pulls, wire, density, density_weight);
+      check(forces.size() == 3, "missing macro pull force");
+      double first_x = 0, first_y = 0;
+      for (int i = 0; i < 3; ++i) {
+        const double pre = std::max(1., double(i == 1 ? 3 : 1) +
+                                            density_weight * d.node_size_x[i] *
+                                                d.node_size_y[i]);
+        const double x = forces[i].x / pre, y = forces[i].y / pre;
+        if (!i) {
+          first_x = x;
+          first_y = y;
+        }
+        near(x, first_x, 1e-12,
+             "macro width/area/pins changed pull center response");
+        near(y, first_y, 1e-12,
+             "macro height/area/pins changed pull center response");
+        check(distance == 0 ? x == 0 && y == 0 : x < 0 && y > 0,
+              "macro pull direction or zero-offset response incorrect");
+      }
+    }
+  }
+}
+void macro_sized_virtual_fillers() {
+  Design design;
+  design.layout = {0, 0, 1000, 1000, 1, 1};
+  design.num_movable = 3;
+  design.node_x = {100, 600, 400};
+  design.node_y = {100, 600, 400};
+  design.node_size_x = {80, 120, 2};
+  design.node_size_y = {160, 120, 1};
+  design.node_macro = {1, 1, 0};
+  design.node_halo_x = design.node_halo_y = {8, 8, 0};
+  design.build_maps();
+  Options options;
+  options.max_iterations = options.min_iterations = 1;
+  options.bins_x = options.bins_y = 64;
+  options.legalize = options.detailed_place = false;
+  options.add_fillers = true;
+  options.target_density = .5;
+  options.filler_max_count = 4096;
+  auto cell_sized = design;
+  const auto small = place(cell_sized, options);
+  options.filler_max_count = 0;
+  options.filler_macro_fraction = .125;
+  auto macro_sized = design;
+  const auto large = place(macro_sized, options);
+  near(large.filler_size_x, 10, 1e-12,
+       "macro filler width includes halo or wrong memory");
+  near(large.filler_size_y, 20, 1e-12,
+       "macro filler height clipped to cell bin resolution");
+  check(large.filler_count > 0 && large.filler_count < small.filler_count,
+        "large fillers did not reduce particle population");
+  check(std::abs(large.filler_area - small.filler_area) <=
+            large.filler_size_x * large.filler_size_y +
+                small.filler_size_x * small.filler_size_y,
+        "macro filler sizing changed the area budget");
+  check(macro_sized.node_x.size() == design.node_x.size() &&
+            macro_sized.node_size_x == design.node_size_x &&
+            macro_sized.node_size_y == design.node_size_y,
+        "macro-sized density particles escaped or deformed physical nodes");
+  options.filler_cell_space = true;
+  for (const double density : {.2, .5}) {
+    options.target_density = density;
+    for (const double fraction : {1., .75, .5}) {
+      options.filler_area_fraction = fraction;
+      auto input = design;
+      const auto budgeted = place(input, options);
+      const double expected =
+          (1 - density) * (1000000 - 80 * 160 - 120 * 120) * fraction;
+      check(budgeted.filler_area <= expected &&
+                expected - budgeted.filler_area < 200,
+            "cell-space filler complement, multiplier or halo exclusion "
+            "incorrect");
+      check(input.node_size_x == design.node_size_x &&
+                input.node_x.size() == design.node_x.size(),
+            "cell-space fillers escaped into physical placement");
+    }
+  }
+  options.filler_macro_fraction = 1.01;
+  rejects([&] { place(design, options); });
+}
 int main() {
   try {
+    size_neutral_macro_pull();
+    macro_sized_virtual_fillers();
     virtual_macro_pulls();
     spectral();
     power2_grid();
