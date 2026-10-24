@@ -676,6 +676,13 @@ blocked-pin/unroutable-net counts instead of a capacity floor.
 `RudyOptions::pin_access` estimates macro signal-pin demand against available
 tracks at bin edges. These estimates are not a detailed router or signoff model.
 
+For repeated net exclusions at fixed placement, `RudyMaskSnapshot` caches
+contributions and `RudyMaskCursor` retains the current demand map. Cursor
+`without(net)` evaluates a trial without changing state; `exclude(net)` commits
+the removal. Only affected bins replay their contributions, in original order,
+including blocked-pin max operations. Results match full snapshot replay without
+floating-point subtraction drift. Rebuild after geometry or netlist changes.
+
 `routability_macro_weight` (native default 0; LiveHD enables 1) adds direct
 pressure on movable macro edges. It requires `routability` and
 `improved_routability`. The range is `routability_macro_range` density bins

@@ -308,85 +308,89 @@ int main() {
     }
     // Cached contributions must replay exactly like a fresh measurement,
     // including blocked-pin max operations and macro access additions.
-    for (int bins : {1, 3, 6}) {
-      for (auto model : {RudyModel::bbox, RudyModel::rsmt}) {
-        for (bool access : {false, true}) {
-          auto sample = design();
-          sample.node_macro.assign(sample.node_x.size(), 0);
-          sample.node_macro[4] = 1;
-          sample.node_x[4] = 14;
-          sample.node_y[4] = 24;
-          sample.node_size_x[4] = 12;
-          sample.node_size_y[4] = 12;
-          RudyOptions options;
-          options.bins_x = options.bins_y = bins;
-          options.model = model;
-          options.degree = 3;
-          options.macro_blockages = true;
-          options.pin_access = access;
-          rejects([&] { RudyMaskSnapshot too_small(sample, options, 0); });
-          RudyMaskSnapshot snapshot(sample, options);
-          const auto captured_mask = sample.net_mask;
-          const auto captured = snapshot.measure(captured_mask);
-          // The snapshot owns contributions, not references to input vectors.
-          const auto saved_x = sample.node_x[0];
-          sample.node_x[0] += 1;
-          check(snapshot.measure(captured_mask).horizontal ==
-                captured.horizontal);
-          sample.node_x[0] = saved_x;
-          for (int bits = 0; bits < 8; ++bits) {
-            auto trial = sample;
-            for (int net = 0; net < 3; ++net)
-              trial.net_mask[net] = (bits >> net) & 1;
-            const auto actual = snapshot.measure(trial.net_mask);
-            const auto expected = rudy(trial, options);
-            check(actual.horizontal == expected.horizontal);
-            check(actual.vertical == expected.vertical);
-            check(actual.pin_utilization == expected.pin_utilization);
-            check(actual.blocked_fraction == expected.blocked_fraction);
-            check(actual.blocked_pins == expected.blocked_pins);
-            check(actual.unroutable_nets == expected.unroutable_nets);
-            check(actual.measured_nets == expected.measured_nets);
-            check(actual.degenerate_nets == expected.degenerate_nets);
-            check(actual.detour_wirelength == expected.detour_wirelength);
-            check(actual.overflow == expected.overflow);
-            check(actual.max_utilization == expected.max_utilization);
-          }
-          // Trial queries never mutate state; commits affect only later trials.
-          // Exercise both commit orders and all subset masks, including blocked
-          // pin max operations, not just additive wire demand.
-          for (int bits = 0; bits < 8; ++bits) {
-            for (bool reverse : {false, true}) {
-              RudyMaskCursor cursor(snapshot);
-              auto mask = captured_mask;
-              for (int i = 0; i < 3; ++i) {
-                const int n = reverse ? 2 - i : i;
-                if ((bits >> n) & 1)
-                  continue;
-                auto trial_mask = mask;
-                trial_mask[n] = 0;
-                same(cursor.without(n), snapshot.measure(trial_mask));
-                same(cursor.without(n), snapshot.measure(trial_mask));
-                cursor.exclude(n);
-                mask[n] = 0;
-                rejects([&] { cursor.exclude(n); });
-              }
-              for (int n = 0; n < 3; ++n) {
-                if (!mask[n])
-                  continue;
-                auto trial_mask = mask;
-                trial_mask[n] = 0;
-                same(cursor.without(n), snapshot.measure(trial_mask));
-              }
-              rejects([&] { cursor.without(3); });
-              rejects([&] { cursor.without(100); });
+    for (double scale : {0., .5, 1.}) {
+      for (int bins : {1, 3, 6}) {
+        for (auto model : {RudyModel::bbox, RudyModel::rsmt}) {
+          for (bool access : {false, true}) {
+            auto sample = design();
+            sample.node_macro.assign(sample.node_x.size(), 0);
+            sample.node_macro[4] = 1;
+            sample.node_x[4] = 14;
+            sample.node_y[4] = 24;
+            sample.node_size_x[4] = 12;
+            sample.node_size_y[4] = 12;
+            RudyOptions options;
+            options.bins_x = options.bins_y = bins;
+            options.model = model;
+            options.fixed_macro_scale = scale;
+            options.degree = 3;
+            options.macro_blockages = true;
+            options.pin_access = access;
+            rejects([&] { RudyMaskSnapshot too_small(sample, options, 0); });
+            RudyMaskSnapshot snapshot(sample, options);
+            const auto captured_mask = sample.net_mask;
+            const auto captured = snapshot.measure(captured_mask);
+            // The snapshot owns contributions, not references to input vectors.
+            const auto saved_x = sample.node_x[0];
+            sample.node_x[0] += 1;
+            check(snapshot.measure(captured_mask).horizontal ==
+                  captured.horizontal);
+            sample.node_x[0] = saved_x;
+            for (int bits = 0; bits < 8; ++bits) {
+              auto trial = sample;
+              for (int net = 0; net < 3; ++net)
+                trial.net_mask[net] = (bits >> net) & 1;
+              const auto actual = snapshot.measure(trial.net_mask);
+              const auto expected = rudy(trial, options);
+              check(actual.horizontal == expected.horizontal);
+              check(actual.vertical == expected.vertical);
+              check(actual.pin_utilization == expected.pin_utilization);
+              check(actual.blocked_fraction == expected.blocked_fraction);
+              check(actual.blocked_pins == expected.blocked_pins);
+              check(actual.unroutable_nets == expected.unroutable_nets);
+              check(actual.measured_nets == expected.measured_nets);
+              check(actual.degenerate_nets == expected.degenerate_nets);
+              check(actual.detour_wirelength == expected.detour_wirelength);
+              check(actual.overflow == expected.overflow);
+              check(actual.max_utilization == expected.max_utilization);
             }
+            // Trial queries never mutate state; commits affect only later
+            // trials. Exercise both commit orders and all subset masks,
+            // including blocked pin max operations, not just additive wire
+            // demand.
+            for (int bits = 0; bits < 8; ++bits) {
+              for (bool reverse : {false, true}) {
+                RudyMaskCursor cursor(snapshot);
+                auto mask = captured_mask;
+                for (int i = 0; i < 3; ++i) {
+                  const int n = reverse ? 2 - i : i;
+                  if ((bits >> n) & 1)
+                    continue;
+                  auto trial_mask = mask;
+                  trial_mask[n] = 0;
+                  same(cursor.without(n), snapshot.measure(trial_mask));
+                  same(cursor.without(n), snapshot.measure(trial_mask));
+                  cursor.exclude(n);
+                  mask[n] = 0;
+                  rejects([&] { cursor.exclude(n); });
+                }
+                for (int n = 0; n < 3; ++n) {
+                  if (!mask[n])
+                    continue;
+                  auto trial_mask = mask;
+                  trial_mask[n] = 0;
+                  same(cursor.without(n), snapshot.measure(trial_mask));
+                }
+                rejects([&] { cursor.without(3); });
+                rejects([&] { cursor.without(100); });
+              }
+            }
+            auto invalid = sample.net_mask;
+            invalid[3] = 1;
+            rejects([&] { snapshot.measure(invalid); });
+            invalid.pop_back();
+            rejects([&] { snapshot.measure(invalid); });
           }
-          auto invalid = sample.net_mask;
-          invalid[3] = 1;
-          rejects([&] { snapshot.measure(invalid); });
-          invalid.pop_back();
-          rejects([&] { snapshot.measure(invalid); });
         }
       }
     }
