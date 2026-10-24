@@ -69,6 +69,38 @@ int main() {
   check(inherited_result.local_density_force == 0 &&
         high_result.local_density_force == 0 &&
         low_result.local_density_force > 0);
+  // A transparent fixed macro must leave local capacity identical to a
+  // zero-area terminal, while opaque capacity remains blocked.
+  auto obstacle = d;
+  obstacle.node_x.push_back(26);
+  obstacle.node_y.push_back(26);
+  obstacle.node_size_x.push_back(14);
+  obstacle.node_size_y.push_back(14);
+  obstacle.node_macro.push_back(1);
+  obstacle.build_maps();
+  auto terminals = obstacle;
+  terminals.node_size_x.back() = terminals.node_size_y.back() = 0;
+  detail::LocalDensity obstacle_field(obstacle, 64, 4, .1);
+  const auto visible = obstacle_field.gradient(obstacle);
+  const auto transparent = obstacle_field.gradient(obstacle, false, {}, true);
+  const auto zero_body =
+      detail::LocalDensity(terminals, 64, 4, .1).gradient(terminals);
+  check(transparent.x == zero_body.x && transparent.y == zero_body.y);
+  check(visible.x != transparent.x || visible.y != transparent.y);
+  check(transparent.x.back() == 0 && transparent.y.back() == 0);
+  // A half-sized obstacle must be the same field as an explicitly centered
+  // half-sized rectangle, not a half-charge full-sized rectangle.
+  auto half = obstacle;
+  half.node_x.back() += 3.5;
+  half.node_y.back() += 3.5;
+  half.node_size_x.back() *= .5;
+  half.node_size_y.back() *= .5;
+  const auto grown = obstacle_field.gradient(obstacle, false, {}, false, .5);
+  const auto actual_half = obstacle_field.gradient(half);
+  check(grown.x == actual_half.x && grown.y == actual_half.y);
+  const auto overlap_grown = detail::fixed_macro_overlap(obstacle, 8, 8, 1, .5);
+  const auto overlap_half = detail::fixed_macro_overlap(half, 8, 8, 1);
+  check(overlap_grown.x == overlap_half.x && overlap_grown.y == overlap_half.y);
   auto macro = d;
   macro.node_macro = {1, 1};
   auto m = detail::LocalDensity(macro, 64, 4).gradient(macro);
@@ -282,5 +314,31 @@ int main() {
     return sum / v.num_movable;
   };
   check(radius(spread) > radius(packed) + .5);
+  // The independent target inherits exactly by default and a lower target
+  // must increase local pressure on the same connected cloud.
+  auto inherited = cloud;
+  copt.local_density_target = copt.target_density;
+  place(inherited, copt);
+  check(inherited.node_x == spread.node_x && inherited.node_y == spread.node_y);
+  auto looser = cloud;
+  copt.local_density_target = .05;
+  place(looser, copt);
+  check(radius(looser) > radius(spread));
+  auto combined = obstacle;
+  Options trans;
+  trans.bins_x = trans.bins_y = trans.local_density_bins = 64;
+  trans.max_iterations = trans.min_iterations = 40;
+  trans.local_density_weight = 2;
+  trans.local_density_target = .05;
+  trans.local_density_jitter = 0;
+  trans.macro_transparency.always = true;
+  trans.add_fillers = trans.legalize = trans.detailed_place = false;
+  const auto combined_result = place(combined, trans);
+  trans.macro_transparency.always = false;
+  auto counterpart = terminals;
+  const auto counterpart_result = place(counterpart, trans);
+  check(combined.node_x == counterpart.node_x &&
+        combined.node_y == counterpart.node_y);
+  check(combined_result.overflow == counterpart_result.overflow);
   std::cout << "local density checks passed\n";
 }

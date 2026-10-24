@@ -51,6 +51,7 @@ void select_nodes(Design &out, const Design &in,
   select(out.node_size_x, in.node_size_x, prototype);
   select(out.node_size_y, in.node_size_y, prototype);
   select(out.node_macro, in.node_macro, prototype);
+  select(out.node_placement_mask, in.node_placement_mask, prototype);
   select(out.node_align_class, in.node_align_class, prototype);
   select(out.node_snap_class, in.node_snap_class, prototype);
   select(out.node_blocked_capacity_h, in.node_blocked_capacity_h, prototype);

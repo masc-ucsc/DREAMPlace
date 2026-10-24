@@ -24,6 +24,9 @@ void detail::validate_rudy(const Design &d, const RudyOptions &o) {
   if (o.degree < 2 || o.degree > 1000 || o.accuracy < 1 || o.accuracy > 10)
     throw std::invalid_argument(
         "invalid FLUTE degree (2..1000) or accuracy (1..10)");
+  if (!std::isfinite(o.fixed_macro_scale) || o.fixed_macro_scale < 0 ||
+      o.fixed_macro_scale > 1)
+    throw std::invalid_argument("invalid fixed macro exclusion scale");
   const auto &l = d.layout;
   const double dx = (l.xh - l.xl) / o.bins_x, dy = (l.yh - l.yl) / o.bins_y;
   if (!std::isfinite(dx * dy * o.horizontal_capacity) ||

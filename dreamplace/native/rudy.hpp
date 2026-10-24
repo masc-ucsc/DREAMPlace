@@ -15,6 +15,8 @@ struct RudyOptions {
   int degree = 40, accuracy = 3;
   // Caller loads FLUTE tables once. Required for degree >= 4 tree nets.
   std::function<void()> initialize;
+  double fixed_macro_scale =
+      1; // centered exclusion footprint; physical pins unchanged
 };
 struct RudyResult {
   // X-major bin index = x*bins_y+y. Directional utilization is demand
@@ -24,7 +26,8 @@ struct RudyResult {
   std::vector<double> horizontal, vertical, pin_utilization;
   double overflow = 0, max_utilization = 0;
   int measured_nets = 0, degenerate_nets = 0;
-  // Enhanced mode: exact footprint union, no routing capacity inside macros.
+  // Enhanced mode: exact physical macro footprint union. Placement-only
+  // masks and macro halos remain routing space.
   std::vector<double> blocked_fraction;
   int unroutable_nets = 0, blocked_pins = 0;
   double detour_wirelength = 0;

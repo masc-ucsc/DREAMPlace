@@ -23,7 +23,7 @@ MacroRoutingPressure macro_routing_pressure(const Design &d, int bx, int by,
   };
   std::vector<Box> macros;
   for (int i = 0; i < int(d.node_macro.size()); ++i) {
-    if (!d.node_macro[i])
+    if (!d.node_macro[i] || d.placement_mask(i) != PlacementMask::none)
       continue;
     const double px = d.node_pad_x.empty() ? 0 : d.node_pad_x[i];
     const double py = d.node_pad_y.empty() ? 0 : d.node_pad_y[i];

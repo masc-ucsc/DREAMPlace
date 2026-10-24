@@ -120,15 +120,19 @@ static RudyResult obstacle_rudy_impl(const Design &d, const RudyOptions &o,
                                         l.xl + (x + 1) * dx,
                                         l.yl + (y + 1) * dy});
   for (int i = 0; i < int(d.node_macro.size()); ++i) {
-    if (!d.node_macro[i])
+    if (!d.node_macro[i] || d.placement_mask(i) != PlacementMask::none)
       continue;
     // GP occupancy envelopes include halos; those halos are routing whitespace,
     // not SRAM body. Recover the physical footprint in the native padded solve.
     const double px = d.node_pad_x.empty() ? 0 : d.node_pad_x[i];
     const double py = d.node_pad_y.empty() ? 0 : d.node_pad_y[i];
-    Rect b = intersect(core, {d.node_x[i] + px, d.node_y[i] + py,
-                              d.node_x[i] + d.node_size_x[i] - px,
-                              d.node_y[i] + d.node_size_y[i] - py});
+    const double scale = i >= d.num_movable ? o.fixed_macro_scale : 1;
+    const double inset_x = (d.node_size_x[i] - 2 * px) * (1 - scale) / 2;
+    const double inset_y = (d.node_size_y[i] - 2 * py) * (1 - scale) / 2;
+    Rect b =
+        intersect(core, {d.node_x[i] + px + inset_x, d.node_y[i] + py + inset_y,
+                         d.node_x[i] + d.node_size_x[i] - px - inset_x,
+                         d.node_y[i] + d.node_size_y[i] - py - inset_y});
     if (b.area() <= 0)
       continue;
     macro[i] = int(obstacles.size());

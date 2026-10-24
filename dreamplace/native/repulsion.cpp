@@ -149,12 +149,13 @@ Gradient macro_overlap(const Design &d, double weight) {
 // A bounded force toward the closest feasible escape from an exact fixed
 // macro footprint. The Huber loss has distance units, matching HPWL. Its force
 // is capped so a cell deep in a macro cannot destabilize the global step.
-Gradient fixed_macro_overlap(const Design &d, int bx, int by, double weight) {
+Gradient fixed_macro_overlap(const Design &d, int bx, int by, double weight,
+                             double exclusion_scale) {
   Gradient g;
   const int n = d.node_x.size();
   g.x.resize(n);
   g.y.resize(n);
-  if (weight == 0 || d.node_macro.empty())
+  if (weight == 0 || exclusion_scale == 0 || d.node_macro.empty())
     return g;
   const auto &l = d.layout;
   const double dx = (l.xh - l.xl) / bx, dy = (l.yh - l.yl) / by;
@@ -177,10 +178,14 @@ Gradient fixed_macro_overlap(const Design &d, int bx, int by, double weight) {
       continue;
     // Query each cell by its lower-left point. Expansion by the maximum cell
     // extent makes every potentially intersecting obstacle reachable once.
-    const int x0 = bin(d.node_x[j] - max_w, l.xl, dx, bx);
-    const int x1 = bin(d.node_x[j] + d.node_size_x[j], l.xl, dx, bx);
-    const int y0 = bin(d.node_y[j] - max_h, l.yl, dy, by);
-    const int y1 = bin(d.node_y[j] + d.node_size_y[j], l.yl, dy, by);
+    const double w = d.node_size_x[j] * exclusion_scale,
+                 h = d.node_size_y[j] * exclusion_scale;
+    const double mx = d.node_x[j] + (d.node_size_x[j] - w) / 2;
+    const double my = d.node_y[j] + (d.node_size_y[j] - h) / 2;
+    const int x0 = bin(mx - max_w, l.xl, dx, bx);
+    const int x1 = bin(mx + w, l.xl, dx, bx);
+    const int y0 = bin(my - max_h, l.yl, dy, by);
+    const int y1 = bin(my + h, l.yl, dy, by);
     for (int x = x0; x <= x1; ++x)
       for (int y = y0; y <= y1; ++y)
         grid[x * by + y].push_back(j);
@@ -193,8 +198,10 @@ Gradient fixed_macro_overlap(const Design &d, int bx, int by, double weight) {
     const auto &candidates =
         grid[bin(x, l.xl, dx, bx) * by + bin(y, l.yl, dy, by)];
     for (int j : candidates) {
-      const double mx = d.node_x[j], my = d.node_y[j];
-      const double mw = d.node_size_x[j], mh = d.node_size_y[j];
+      const double mw = d.node_size_x[j] * exclusion_scale,
+                   mh = d.node_size_y[j] * exclusion_scale;
+      const double mx = d.node_x[j] + (d.node_size_x[j] - mw) / 2;
+      const double my = d.node_y[j] + (d.node_size_y[j] - mh) / 2;
       if (x + w <= mx || x >= mx + mw || y + h <= my || y >= my + mh)
         continue;
       const double distances[4] = {x + w - mx, mx + mw - x, y + h - my,
