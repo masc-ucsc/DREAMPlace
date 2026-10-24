@@ -221,10 +221,12 @@ struct MacroTransparency {
 };
 // completed_steps is zero-based: warmup=100 first disables step 101.
 bool macro_transparent(const MacroTransparency &, int completed_steps);
-// One-based GP step: zero body through 100, full body at 200.
-double vanished_memory_scale(int iteration);
+// One-based GP step: hold initial size through start, then grow over duration.
+double vanished_memory_scale(int iteration, double initial_scale = .6,
+                             int growth_iterations = 25,
+                             int start_iteration = 70);
 double vanished_memory_local_weight(double initial, int iteration,
-                                    double floor = 0);
+                                    double floor = 0, int start_iteration = 70);
 // Opt-in, within-run speculative final-GP search. All candidates share the
 // same timing weights and complete optimizer/filler checkpoint. Host timing
 // is scored serially after parallel native trials; it must not change weights.
@@ -288,6 +290,9 @@ struct Options {
   MacroTransparency macro_transparency;
   bool vanished_memory =
       false; // final GP: grow fixed exclusion while reducing local pressure
+  double vanished_memory_initial_scale = .6; // linear width/height fraction
+  int vanished_memory_growth_iterations = 25;
+  int vanished_memory_start = 70; // growth/local decay begin on the next step
   double vanished_memory_local_floor =
       0; // retain this local weight after the ramp
   // Safe GP boundary independent of timing. nullopt retains targets; an empty

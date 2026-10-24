@@ -1065,24 +1065,33 @@ void transparent_macros() {
 }
 
 void vanished_memories() {
-  near(vanished_memory_scale(100), 0, 0, "memory vanished through 100");
-  near(vanished_memory_scale(101), .01, 0, "memory growth starts at 101");
-  near(vanished_memory_scale(110), .1, 0, "memory width at 110");
-  near(vanished_memory_scale(150), .5, 0, "memory width at 150");
-  near(vanished_memory_scale(200), 1, 0, "memory full at 200");
+  near(vanished_memory_scale(1), .6, 0, "initial memory size");
+  near(vanished_memory_scale(70), .6, 0, "hold initial size through 70");
+  near(vanished_memory_scale(71), .616, 1e-12, "memory growth starts at 71");
+  near(vanished_memory_scale(75), .68, 1e-12, "memory width at 75");
+  near(vanished_memory_scale(94), .984, 1e-12, "last partial memory step");
+  near(vanished_memory_scale(95), 1, 0, "memory full at 95");
   near(vanished_memory_scale(1000), 1, 0, "memory stays full");
-  near(vanished_memory_local_weight(.67, 100), .67, 0,
-       "local holds through 100");
-  near(vanished_memory_local_weight(.67, 101), .62, 1e-12,
-       "local starts falling at 101");
-  near(vanished_memory_local_weight(.67, 113), .02, 1e-12,
+  near(vanished_memory_scale(100, 0, 100, 100), 0, 0,
+       "explicit vanished start");
+  near(vanished_memory_scale(101, 0, 100, 100), .01, 0,
+       "explicit original ramp");
+  near(vanished_memory_scale(100, .8, 100, 100), .8, 0,
+       "partial initial memory");
+  near(vanished_memory_scale(150, .8, 100, 100), .9, 1e-12,
+       "standard partial ramp");
+  near(vanished_memory_scale(200, .5, 200, 100), .75, 0, "slow partial ramp");
+  near(vanished_memory_scale(300, .5, 200, 100), 1, 0, "slow ramp ends at 300");
+  near(vanished_memory_local_weight(.67, 70), .67, 0, "local holds through 70");
+  near(vanished_memory_local_weight(.67, 71), .62, 1e-12,
+       "local starts falling at 71");
+  near(vanished_memory_local_weight(.67, 83), .02, 1e-12,
        "local ramp before zero");
-  near(vanished_memory_local_weight(.67, 114), 0, 0,
-       "local reaches zero at 114");
-  near(vanished_memory_local_weight(.67, 111, .1), .12, 1e-12,
+  near(vanished_memory_local_weight(.67, 84), 0, 0, "local reaches zero at 84");
+  near(vanished_memory_local_weight(.67, 81, .1), .12, 1e-12,
        "local ramp before retained floor");
-  near(vanished_memory_local_weight(.67, 112, .1), .1, 0,
-       "local reaches retained floor at 112");
+  near(vanished_memory_local_weight(.67, 82, .1), .1, 0,
+       "local reaches retained floor at 82");
   near(vanished_memory_local_weight(.67, 1000, .1), .1, 0,
        "local floor persists after memory growth");
   auto base = design();
@@ -1117,7 +1126,9 @@ void vanished_memories() {
     }
     if (stage == PlacementStage::global_placement) {
       auto body = d;
-      const double scale = vanished_memory_scale(it);
+      const double scale = vanished_memory_scale(
+          it, o.vanished_memory_initial_scale,
+          o.vanished_memory_growth_iterations, o.vanished_memory_start);
       body.node_x[6] += body.node_size_x[6] * (1 - scale) / 2;
       body.node_y[6] += body.node_size_y[6] * (1 - scale) / 2;
       body.node_size_x[6] *= scale;
@@ -1125,29 +1136,105 @@ void vanished_memories() {
       expected.push_back(density_overflow(body, 8, 8, .5));
     }
   };
-  for (double floor : {0., .1}) {
-    o.vanished_memory_local_floor = floor;
-    expected.clear();
+  for (auto [initial, duration] : {std::pair{.6, 25},
+                                   {0., 100},
+                                   {.5, 100},
+                                   {.8, 100},
+                                   {.5, 200},
+                                   {.8, 200}}) {
+    o.vanished_memory_initial_scale = initial;
+    o.vanished_memory_growth_iterations = duration;
+    for (double floor : {0., .1}) {
+      o.vanished_memory_local_floor = floor;
+      expected.clear();
+      auto d = base;
+      const auto result = place(d, o);
+      check(result.legal && is_legal(d), "vanished-memory final legality");
+      check(result.iterations == 340 && result.history.size() == 17,
+            "schedule ended early");
+      for (size_t i = 0; i < result.history.size(); ++i) {
+        const auto &h = result.history[i];
+        const double scale =
+            vanished_memory_scale(h.iteration, initial, duration);
+        near(h.macro_exclusion_scale, scale, 0, "wrong memory extent report");
+        near(h.local_density_weight,
+             vanished_memory_local_weight(.67, h.iteration, floor), 0,
+             "wrong local report");
+        near(h.overflow, expected[i], 1e-12,
+             "density still uses full memory geometry");
+        near(h.filler_charge_scale,
+             (.5 * (400 - 8 * scale * scale) - 12) / result.filler_area, 1e-12,
+             "filler charge disagrees with grown memory area");
+      }
+    }
+  }
+  o.vanished_memory_initial_scale = .6;
+  o.vanished_memory_growth_iterations = 25;
+  o.vanished_memory_local_floor = 0;
+  o.min_iterations = o.max_iterations = 400;
+  for (int start : {50, 70, 100, 150, 200, 250, 300}) {
+    o.vanished_memory_start = start;
+    near(vanished_memory_scale(start, .6, 25, start), .6, 0,
+         "hold shifted initial size");
+    near(vanished_memory_scale(start + 5, .6, 25, start), .68, 1e-12,
+         "shifted growth");
+    near(vanished_memory_scale(start + 25, .6, 25, start), 1, 0,
+         "shifted full size");
+    near(vanished_memory_local_weight(.67, start, 0, start), .67, 0,
+         "hold shifted local");
+    near(vanished_memory_local_weight(.67, start + 1, 0, start), .62, 1e-12,
+         "shifted local decay");
+    near(vanished_memory_local_weight(.67, start + 14, 0, start), 0, 0,
+         "shifted local zero");
     auto d = base;
+    expected.clear();
     const auto result = place(d, o);
-    check(result.legal && is_legal(d), "vanished-memory final legality");
-    check(result.iterations == 340 && result.history.size() == 17,
-          "schedule ended early");
+    check(result.legal && is_legal(d) && result.iterations == 400,
+          "shifted ramp legality/iterations");
+    check(result.history.size() == 20, "shifted ramp history");
     for (size_t i = 0; i < result.history.size(); ++i) {
       const auto &h = result.history[i];
-      const double scale = vanished_memory_scale(h.iteration);
-      near(h.macro_exclusion_scale, scale, 0, "wrong memory extent report");
+      near(h.macro_exclusion_scale,
+           vanished_memory_scale(h.iteration, .6, 25, start), 0,
+           "shifted extent report");
       near(h.local_density_weight,
-           vanished_memory_local_weight(.67, h.iteration, floor), 0,
-           "wrong local report");
-      near(h.overflow, expected[i], 1e-12,
-           "density still uses full memory geometry");
-      near(h.filler_charge_scale,
-           (.5 * (400 - 8 * scale * scale) - 12) / result.filler_area, 1e-12,
-           "filler charge disagrees with grown memory area");
+           vanished_memory_local_weight(.67, h.iteration, 0, start), 0,
+           "shifted local report");
+      near(h.overflow, expected[i], 1e-12, "shifted density footprint");
     }
   }
   o.observer = {};
+  auto invalid = base;
+  o.vanished_memory_start = 300;
+  o.vanished_memory_growth_iterations = 1;
+  o.gp_search.enabled = true;
+  o.gp_search.start = 321;
+  // Full memory at 301 is not enough: local pressure settles only at 334.
+  rejects([&] { place(invalid, o); });
+  o.gp_search.enabled = false;
+  o.vanished_memory_growth_iterations = 25;
+  o.vanished_memory_start = -1;
+  rejects([&] { place(invalid, o); });
+  o.vanished_memory_start = 1000001;
+  rejects([&] { place(invalid, o); });
+  o.vanished_memory_start = 300;
+  o.max_iterations = 340;
+  rejects(
+      [&] { place(invalid, o); }); // Requires at least 345 including settling.
+  o.vanished_memory_start = 100;
+  o.vanished_memory_growth_iterations = 200;
+  o.min_iterations = 340;
+  o.max_iterations = 300;
+  rejects([&] {
+    place(invalid, o);
+  }); // 200-step growth needs opaque settling past 300
+  o.max_iterations = 340;
+  o.vanished_memory_initial_scale = 1.1;
+  rejects([&] { place(invalid, o); });
+  o.vanished_memory_initial_scale = 0;
+  o.vanished_memory_growth_iterations = 0;
+  rejects([&] { place(invalid, o); });
+  o.vanished_memory_growth_iterations = 100;
   o.macro_transparency.always = true;
   auto bad = base;
   rejects([&] { place(bad, o); });

@@ -30,12 +30,17 @@ bool macro_transparent(const MacroTransparency &o, int completed_steps) {
          completed_steps < end &&
          ((completed_steps - o.warmup) / o.period) % 2 == 0;
 }
-double vanished_memory_scale(int iteration) {
-  return std::clamp((double(iteration) - 100) / 100, 0., 1.);
+double vanished_memory_scale(int iteration, double initial_scale,
+                             int growth_iterations, int start_iteration) {
+  return initial_scale + (1 - initial_scale) *
+                             std::clamp((double(iteration) - start_iteration) /
+                                            growth_iterations,
+                                        0., 1.);
 }
-double vanished_memory_local_weight(double initial, int iteration,
-                                    double floor) {
-  return std::max(floor, initial - .05 * std::max(0., double(iteration) - 100));
+double vanished_memory_local_weight(double initial, int iteration, double floor,
+                                    int start_iteration) {
+  return std::max(
+      floor, initial - .05 * std::max(0., double(iteration) - start_iteration));
 }
 int select_gp_trial(const std::vector<GpTrialScore> &scores,
                     const GpSearch &policy, std::string *reason) {
@@ -179,6 +184,14 @@ double overflow(const Design &d, int bx, int by, double target_density,
   return total ? excess / total : 0;
 }
 
+double memory_settled_iteration(const Options &o) {
+  return o.vanished_memory_start + 20. +
+         std::max(double(o.vanished_memory_growth_iterations),
+                  std::ceil(
+                      (o.local_density_weight - o.vanished_memory_local_floor) /
+                      .05));
+}
+
 void options_check(const Options &o) {
   const auto &search = o.gp_search;
   require(search.start >= 220 && search.interval > search.steps &&
@@ -219,13 +232,25 @@ void options_check(const Options &o) {
               (o.vanished_memory || o.vanished_memory_local_floor == 0),
           "vanished_memory local floor requires the schedule and a value from "
           "zero to initial local weight");
+  require(
+      finite(o.vanished_memory_initial_scale) &&
+          o.vanished_memory_initial_scale >= 0 &&
+          o.vanished_memory_initial_scale <= 1 &&
+          o.vanished_memory_growth_iterations > 0 &&
+          o.vanished_memory_growth_iterations <= 1000000 &&
+          o.vanished_memory_start >= 0 && o.vanished_memory_start <= 1000000 &&
+          (o.vanished_memory || (o.vanished_memory_initial_scale == .6 &&
+                                 o.vanished_memory_growth_iterations == 25 &&
+                                 o.vanished_memory_start == 70)),
+      "invalid vanished_memory initial scale, growth duration or start");
   if (o.vanished_memory) {
+    require(!search.enabled || search.start >= memory_settled_iteration(o),
+            "GP A/B search must start after memory growth and local-pressure "
+            "settling");
     require(!cycle.enabled(),
             "vanished_memory cannot be combined with transparency cycling");
     require((o.trial_tuning ? o.schedule_iterations : o.max_iterations) >=
-                std::max(220., 120 + std::ceil((o.local_density_weight -
-                                                o.vanished_memory_local_floor) /
-                                               .05)),
+                memory_settled_iteration(o),
             "vanished_memory requires settling after the local-pressure ramp");
   }
   if (cycle.enabled() || o.vanished_memory) {
@@ -1071,7 +1096,11 @@ Result place(Design &design, const Options &options, GpState *state) {
             "GP A/B search cannot move macros");
   }
   if (o.trial_tuning) {
-    require(state && state->signature && state->iteration >= 220,
+    require(state && state->signature &&
+                state->iteration >=
+                    std::max(220., o.vanished_memory
+                                       ? memory_settled_iteration(o)
+                                       : 220.),
             "GP trial requires an opaque full optimizer checkpoint");
   }
   const int aux_x = o.auxiliary_bins ? o.auxiliary_bins : o.bins_x;
@@ -1347,6 +1376,11 @@ Result place(Design &design, const Options &options, GpState *state) {
   if (o.wirelength_gamma_start != 1) {
     salt(0x67616d6d61737461ULL);
     salt(std::bit_cast<std::uint64_t>(o.wirelength_gamma_start));
+  }
+  if (o.vanished_memory) {
+    salt(std::bit_cast<std::uint64_t>(o.vanished_memory_initial_scale));
+    salt(o.vanished_memory_growth_iterations);
+    salt(o.vanished_memory_start);
   }
   salt(o.seed);
   for (double v :
@@ -2290,13 +2324,18 @@ Result place(Design &design, const Options &options, GpState *state) {
         continue;
       }
       const double next_scale =
-          o.vanished_memory ? vanished_memory_scale(global_iter + 1) : 1;
+          o.vanished_memory
+              ? vanished_memory_scale(global_iter + 1,
+                                      o.vanished_memory_initial_scale,
+                                      o.vanished_memory_growth_iterations,
+                                      o.vanished_memory_start)
+              : 1;
       const double local_weight =
           tuned ? tuning.local_weight
           : o.vanished_memory
-              ? vanished_memory_local_weight(o.local_density_weight,
-                                             global_iter + 1,
-                                             o.vanished_memory_local_floor)
+              ? vanished_memory_local_weight(
+                    o.local_density_weight, global_iter + 1,
+                    o.vanished_memory_local_floor, o.vanished_memory_start)
               : o.local_density_weight;
       const bool next_transparent =
           o.vanished_memory
@@ -2304,11 +2343,14 @@ Result place(Design &design, const Options &options, GpState *state) {
               : macro_transparent(o.macro_transparency, global_iter);
       const bool schedule_boundary =
           o.vanished_memory &&
-          (global_iter + 1 == 200 || global_iter + 1 == 101 ||
-           (global_iter >= 101 &&
+          (global_iter + 1 ==
+               o.vanished_memory_start + o.vanished_memory_growth_iterations ||
+           global_iter + 1 == o.vanished_memory_start + 1 ||
+           (global_iter >= o.vanished_memory_start + 1 &&
             local_weight == o.vanished_memory_local_floor &&
             vanished_memory_local_weight(o.local_density_weight, global_iter,
-                                         o.vanished_memory_local_floor) >
+                                         o.vanished_memory_local_floor,
+                                         o.vanished_memory_start) >
                 o.vanished_memory_local_floor));
       exclusion_scale = next_scale;
       if (next_transparent != transparent || schedule_boundary) {
@@ -2332,15 +2374,10 @@ Result place(Design &design, const Options &options, GpState *state) {
         routing_utilization.clear();
       }
       const bool opacity_settled =
-          o.vanished_memory
-              ? global_iter + 1 >=
-                    std::max(220.,
-                             120 + std::ceil((o.local_density_weight -
-                                              o.vanished_memory_local_floor) /
-                                             .05))
-              : (!cycling ||
-                 global_iter + 1 >=
-                     transparency_end + o.macro_transparency.period);
+          o.vanished_memory ? global_iter + 1 >= memory_settled_iteration(o)
+                            : (!cycling || global_iter + 1 >=
+                                               transparency_end +
+                                                   o.macro_transparency.period);
       double progress = std::min(
           1., double(global_iter) /
                   std::max(1, (o.schedule_iterations ? o.schedule_iterations
@@ -2383,7 +2420,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
       if (o.routability &&
           (global_iter % 20 == 0 ||
-           (o.vanished_memory && global_iter >= 100 && global_iter < 200)) &&
+           (o.vanished_memory && global_iter >= o.vanished_memory_start &&
+            global_iter < o.vanished_memory_start +
+                              o.vanished_memory_growth_iterations)) &&
           (!o.improved_routability ||
            (previous_overflow >= 0 && previous_overflow < .3))) {
         Design physical = model;
