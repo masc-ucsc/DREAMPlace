@@ -14,7 +14,7 @@ RudyResult rsmt_rudy(const Design &, const RudyOptions &);
 namespace {
 template <typename T> inline DEFINE_NET_WIRING_DISTRIBUTION_MAP_WEIGHT;
 }
-RudyResult rudy(const Design &d, const RudyOptions &o) {
+void detail::validate_rudy(const Design &d, const RudyOptions &o) {
   d.validate();
   if (o.bins_x < 1 || o.bins_x > 1024 || o.bins_y < 1 || o.bins_y > 1024 ||
       !std::isfinite(o.horizontal_capacity) || o.horizontal_capacity <= 0 ||
@@ -27,10 +27,6 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
   if (!std::isfinite(o.fixed_macro_scale) || o.fixed_macro_scale < 0 ||
       o.fixed_macro_scale > 1)
     throw std::invalid_argument("invalid fixed macro exclusion scale");
-  RudyResult r;
-  r.horizontal.resize(o.bins_x * o.bins_y);
-  r.vertical.resize(o.bins_x * o.bins_y);
-  r.pin_utilization.resize(o.bins_x * o.bins_y);
   const auto &l = d.layout;
   const double dx = (l.xh - l.xl) / o.bins_x, dy = (l.yh - l.yl) / o.bins_y;
   if (!std::isfinite(dx * dy * o.horizontal_capacity) ||
@@ -39,6 +35,15 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
       dx * dy * o.vertical_capacity <= 0) {
     throw std::invalid_argument("RUDY bin capacity overflow or underflow");
   }
+}
+RudyResult rudy(const Design &d, const RudyOptions &o) {
+  detail::validate_rudy(d, o);
+  RudyResult r;
+  r.horizontal.resize(o.bins_x * o.bins_y);
+  r.vertical.resize(o.bins_x * o.bins_y);
+  r.pin_utilization.resize(o.bins_x * o.bins_y);
+  const auto &l = d.layout;
+  const double dx = (l.xh - l.xl) / o.bins_x, dy = (l.yh - l.yl) / o.bins_y;
   if (o.macro_blockages) {
     return obstacle_rudy(d, o);
   }

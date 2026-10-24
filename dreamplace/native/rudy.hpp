@@ -1,6 +1,8 @@
 // BSD-3-Clause. See LICENSE.
 #pragma once
 #include "dreamplace/native/placement.hpp"
+#include <memory>
+#include <span>
 
 namespace DreamPlace::native {
 enum class RudyModel { bbox, rsmt };
@@ -40,7 +42,23 @@ struct RudyResult {
 // to the core boundary; legacy mode clips bin overlap but keeps the full net
 // bbox normalization.
 RudyResult rudy(const Design &design, const RudyOptions &options = {});
+// Immutable geometry/demand snapshot for repeated exclusions at fixed
+// placement. measure() may disable originally active nets, never enable new
+// ones. Replays original contribution order, including non-additive blocked-pin
+// operations. Requires macro_blockages=true. The contribution budget bounds
+// additional cached events; exceeding it throws, allowing an uncached fallback.
+class RudyMaskSnapshot {
+public:
+  struct Data;
+  RudyMaskSnapshot(const Design &, const RudyOptions &,
+                   std::size_t max_contributions = 4 * 1024 * 1024);
+  RudyResult measure(std::span<const std::uint8_t> mask) const;
+
+private:
+  std::shared_ptr<const Data> data_;
+};
 namespace detail {
+void validate_rudy(const Design &, const RudyOptions &);
 struct MacroRoutingPressure {
   // Objective gradients: descent opens congested channels. Fixed nodes stay
   // zero.

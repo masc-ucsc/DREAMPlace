@@ -44,13 +44,54 @@ void subtract(std::vector<Rect> &free, Rect obstacle) {
 }
 } // namespace
 
+struct RudyMaskSnapshot::Data {
+  struct Deposit {
+    int bin;
+    double horizontal, vertical;
+  };
+  struct Net {
+    std::vector<Deposit> deposits;
+    int measured = 0, degenerate = 0, unroutable = 0;
+    double detour = 0;
+  };
+  struct Pin {
+    int net, bin;
+    bool blocked;
+    double access;
+  };
+  size_t remaining = 0;
+  void reserve_event() {
+    if (remaining == 0)
+      throw std::invalid_argument("RUDY snapshot contribution budget exceeded");
+    --remaining;
+  }
+  std::vector<std::uint8_t> enabled;
+  std::vector<double> blocked_fraction;
+  std::vector<Net> nets;
+  std::vector<Pin> pins;
+};
+static void finish_obstacle_result(RudyResult &r) {
+  const auto count = r.horizontal.size();
+  for (size_t k = 0; k < count; ++k) {
+    const double u =
+        std::max({r.horizontal[k], r.vertical[k], r.pin_utilization[k]});
+    r.max_utilization = std::max(r.max_utilization, u);
+    r.overflow += std::max(0., u - 1) / count;
+  }
+  r.overflow += double(r.unroutable_nets + r.blocked_pins) / count;
+  if (r.unroutable_nets || r.blocked_pins)
+    r.max_utilization = std::max(r.max_utilization, 2.);
+  if (!std::isfinite(r.overflow) || !std::isfinite(r.max_utilization))
+    throw std::invalid_argument("obstacle RUDY overflow");
+}
 // Obstacle-aware RUDY remains a demand estimator, not a detailed router. It
 // spreads wire demand only over the exact free area of each bin. A macro that
 // cuts the whole projected corridor forces that corridor around a macro edge;
 // the extra Manhattan excursion contributes demand too. Full-core barriers and
 // boxes with no free area are reported, never given artificial routing
 // capacity.
-RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
+static RudyResult obstacle_rudy_impl(const Design &d, const RudyOptions &o,
+                                     RudyMaskSnapshot::Data *snapshot) {
   const auto &l = d.layout;
   const Rect core{l.xl, l.yl, l.xh, l.yh};
   const double dx = (l.xh - l.xl) / o.bins_x, dy = (l.yh - l.yl) / o.bins_y;
@@ -102,6 +143,27 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
     });
   }
   RudyResult r;
+  if (snapshot) {
+    snapshot->enabled = d.net_mask;
+    snapshot->nets.resize(d.net_mask.size());
+  }
+  const auto mark = [&](int net, int kind) {
+    if (kind == 0) {
+      ++r.measured_nets;
+      if (snapshot)
+        ++snapshot->nets[net].measured;
+    }
+    if (kind == 1) {
+      ++r.degenerate_nets;
+      if (snapshot)
+        ++snapshot->nets[net].degenerate;
+    }
+    if (kind == 2) {
+      ++r.unroutable_nets;
+      if (snapshot)
+        ++snapshot->nets[net].unroutable;
+    }
+  };
   r.horizontal.resize(count);
   r.vertical.resize(count);
   r.pin_utilization.resize(count);
@@ -204,12 +266,16 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
       // the violation local so GP can inflate/expel overlapping standard cells.
       r.pin_utilization[k] = std::max(r.pin_utilization[k], 2.);
     }
-    if (macro[node] >= 0 && o.pin_access && active) {
-      if (available[k] > 0)
-        r.pin_utilization[k] +=
-            1 / ((dx + dy) *
-                 std::sqrt(o.horizontal_capacity * o.vertical_capacity) *
-                 available[k] / (dx * dy));
+    double access = 0;
+    if (macro[node] >= 0 && o.pin_access && active && available[k] > 0) {
+      access = 1 / ((dx + dy) *
+                    std::sqrt(o.horizontal_capacity * o.vertical_capacity) *
+                    available[k] / (dx * dy));
+      r.pin_utilization[k] += access;
+    }
+    if (snapshot && active && (pin_component[p] < 0 || access != 0)) {
+      snapshot->reserve_event();
+      snapshot->pins.push_back({d.pin2net[p], k, pin_component[p] < 0, access});
     }
   }
   std::vector<std::uint64_t> seen(obstacles.size());
@@ -236,12 +302,12 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
     }
     const double width = box.xh - box.xl, height = box.yh - box.yl;
     if (width == 0 && height == 0) {
-      ++r.degenerate_nets;
+      mark(n, 1);
       continue;
     }
-    ++r.measured_nets;
+    mark(n, 0);
     if (disconnected) {
-      ++r.unroutable_nets;
+      mark(n, 2);
       continue;
     }
     // A straight net still consumes tracks. Give its zero-width projection a
@@ -343,7 +409,7 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
         break;
     }
     if (impossible || free_area(box) <= 0) {
-      ++r.unroutable_nets;
+      mark(n, 2);
       continue;
     }
     const double extra_x =
@@ -370,6 +436,8 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
         d.net_weights[n] *
         (steiner ? 1. : netWiringDistributionMapWeight<double>(degree));
     r.detour_wirelength += weight * 2 * (extra_x + extra_y);
+    if (snapshot)
+      snapshot->nets[n].detour = weight * 2 * (extra_x + extra_y);
     auto deposit = [&](Rect region, double horizontal, double vertical) {
       const double area = free_area(region);
       if (area <= 0)
@@ -379,10 +447,16 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
           return;
         // A disconnected pocket in the same bin cannot supply this net with
         // capacity. Use only the free component reachable by its terminals.
-        r.horizontal[k] += weight * horizontal * overlap[k] / area /
-                           (component_area[k] * o.horizontal_capacity);
-        r.vertical[k] += weight * vertical * overlap[k] / area /
+        const double h = weight * horizontal * overlap[k] / area /
+                         (component_area[k] * o.horizontal_capacity);
+        const double v = weight * vertical * overlap[k] / area /
                          (component_area[k] * o.vertical_capacity);
+        r.horizontal[k] += h;
+        r.vertical[k] += v;
+        if (snapshot) {
+          snapshot->reserve_event();
+          snapshot->nets[n].deposits.push_back({k, h, v});
+        }
       });
       return true;
     };
@@ -401,20 +475,62 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
     }
     deposit(box, horizontal, vertical);
     if (impossible)
-      ++r.unroutable_nets;
+      mark(n, 2);
   }
-  for (int k = 0; k < count; ++k) {
-    const double u =
-        std::max({r.horizontal[k], r.vertical[k], r.pin_utilization[k]});
-    r.max_utilization = std::max(r.max_utilization, u);
-    r.overflow += std::max(0., u - 1) / count;
+  if (snapshot)
+    snapshot->blocked_fraction = r.blocked_fraction;
+  finish_obstacle_result(r);
+  return r;
+}
+RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
+  return obstacle_rudy_impl(d, o, nullptr);
+}
+RudyMaskSnapshot::RudyMaskSnapshot(const Design &d, const RudyOptions &o,
+                                   size_t max_contributions) {
+  detail::validate_rudy(d, o);
+  if (!o.macro_blockages)
+    throw std::invalid_argument("RUDY snapshot requires obstacle-aware demand");
+  auto data = std::make_shared<Data>();
+  data->remaining = max_contributions;
+  (void)obstacle_rudy_impl(d, o, data.get());
+  data_ = std::move(data);
+}
+RudyResult RudyMaskSnapshot::measure(std::span<const std::uint8_t> mask) const {
+  if (mask.size() != data_->enabled.size())
+    throw std::invalid_argument("RUDY snapshot mask size mismatch");
+  for (size_t n = 0; n < mask.size(); ++n)
+    if (mask[n] && !data_->enabled[n])
+      throw std::invalid_argument(
+          "RUDY snapshot cannot enable an excluded net");
+  RudyResult r;
+  const auto count = data_->blocked_fraction.size();
+  r.horizontal.resize(count);
+  r.vertical.resize(count);
+  r.pin_utilization.resize(count);
+  r.blocked_fraction = data_->blocked_fraction;
+  for (const auto &pin : data_->pins) {
+    if (!mask[pin.net])
+      continue;
+    if (pin.blocked) {
+      ++r.blocked_pins;
+      r.pin_utilization[pin.bin] = std::max(r.pin_utilization[pin.bin], 2.);
+    }
+    r.pin_utilization[pin.bin] += pin.access;
   }
-  // Geometry that cannot escape an obstacle must prevent false convergence.
-  r.overflow += double(r.unroutable_nets + r.blocked_pins) / count;
-  if (r.unroutable_nets || r.blocked_pins)
-    r.max_utilization = std::max(r.max_utilization, 2.);
-  if (!std::isfinite(r.overflow) || !std::isfinite(r.max_utilization))
-    throw std::invalid_argument("obstacle RUDY overflow");
+  for (size_t n = 0; n < mask.size(); ++n) {
+    if (!mask[n])
+      continue;
+    const auto &net = data_->nets[n];
+    r.measured_nets += net.measured;
+    r.degenerate_nets += net.degenerate;
+    r.unroutable_nets += net.unroutable;
+    r.detour_wirelength += net.detour;
+    for (const auto &p : net.deposits) {
+      r.horizontal[p.bin] += p.horizontal;
+      r.vertical[p.bin] += p.vertical;
+    }
+  }
+  finish_obstacle_result(r);
   return r;
 }
 } // namespace DreamPlace::native
