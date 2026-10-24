@@ -1,15 +1,17 @@
 // BSD-3-Clause. See LICENSE.
-#include "dreamplace/native/placement.hpp"
 #include <cmath>
 #include <iostream>
 #include <source_location>
 #include <stdexcept>
+
+#include "dreamplace/native/placement.hpp"
 using namespace DreamPlace::native;
 void check(bool ok,
            std::source_location where = std::source_location::current()) {
-  if (!ok)
+  if (!ok) {
     throw std::runtime_error("GP hook assertion failed at line " +
                              std::to_string(where.line()));
+  }
 }
 Design fixture() {
   Design d;
@@ -55,8 +57,9 @@ int main() {
       o.macro_pull_update =
           [](const Design &,
              int iteration) -> std::optional<std::vector<MacroPull>> {
-        if (iteration == 1)
+        if (iteration == 1) {
           return std::vector<MacroPull>{{0, 30, 80, 1}};
+        }
         return std::nullopt;
       };
       place(d, o);
@@ -201,8 +204,9 @@ int main() {
     check(patient_result.selected_iteration >= 40);
     for (const auto &sample : patient_result.history) {
       if (sample.iteration >= 40 &&
-          sample.overflow <= patient_options.stop_overflow)
+          sample.overflow <= patient_options.stop_overflow) {
         check(patient_result.hpwl <= sample.hpwl + 1e-8);
+      }
     }
     // A density-feasible but still moving objective must not stop at 40.
     auto settling = fixture();
@@ -212,9 +216,10 @@ int main() {
     settle_options.post_density_factor = 4;
     settle_options.convergence_tolerance = 0;
     settling.node_boxes.resize(5);
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 5; ++i) {
       settling.node_boxes[i] = {settling.node_x[i], settling.node_y[i],
                                 settling.node_x[i], settling.node_y[i]};
+    }
     const auto stable_result = place(settling, settle_options);
     check(stable_result.density_iteration == 40);
     check(stable_result.continuation_deadline == 200);
@@ -354,8 +359,9 @@ int main() {
     const auto global_result = place(global, global_options);
     check(global_result.macro_alignment_seconds > 0);
     bool force_seen = false;
-    for (const auto &sample : global_result.history)
+    for (const auto &sample : global_result.history) {
       force_seen |= sample.align_force > 0;
+    }
     check(force_seen);
     global_options.max_iterations = 20;
     GpState global_state;
@@ -399,6 +405,26 @@ int main() {
     check(calls == std::vector<int>({50, 100}));
     check(observed.node_x == untouched.node_x &&
           observed.node_y == untouched.node_y);
+    // Warm-up is independent of density and leaves no-op GP unchanged.
+    // Even a forced final checkpoint cannot bypass the in-loop warm-up.
+    for (bool density_gate : {false, true}) {
+      auto warming = fixture();
+      warming.node_macro = {0, 0, 0, 0, 0};
+      auto warm_options = cp;
+      warm_options.checkpoint_start = 75;
+      warm_options.checkpoint_final = true;
+      warm_options.checkpoint_after_density = density_gate;
+      calls.clear();
+      place(warming, warm_options);
+      check(calls == (density_gate ? std::vector<int>{120}
+                                   : std::vector<int>{100, 120}));
+      check(warming.node_x == untouched.node_x &&
+            warming.node_y == untouched.node_y);
+      warm_options.checkpoint_start = 200;
+      calls.clear();
+      place(warming, warm_options);
+      check(calls.empty());
+    }
     // Above-target density defers feedback, but the non-interval cap is timed.
     // The skipped no-op checkpoints must not disturb the optimization path.
     auto gated = fixture();
@@ -533,9 +559,10 @@ int main() {
     topology.node_halo_y = {2, 0, 0, 0, 0};
     topology.node_centroid_color = {0, 0, 0, -1, -1};
     topology.centroid_color_names = {"bank"};
-    for (size_t i = 0; i < topology.node_x.size(); ++i)
+    for (size_t i = 0; i < topology.node_x.size(); ++i) {
       topology.centroid_node_area.push_back(topology.node_size_x[i] *
                                             topology.node_size_y[i]);
+    }
     CentroidGroup bank;
     bank.name = "bank";
     bank.colors = {0};
@@ -563,17 +590,20 @@ int main() {
         next.node_centroid_color.insert(next.node_centroid_color.begin() + at,
                                         0);
         next.centroid_node_area.insert(next.centroid_node_area.begin() + at, 2);
-        for (auto &p : next.pin2node)
-          if (p >= at)
+        for (auto &p : next.pin2node) {
+          if (p >= at) {
             ++p;
+          }
+        }
         next.pin2node.push_back(at);
         next.pin_offset_x.push_back(1);
         next.pin_offset_y.push_back(.5);
         next.flat_net2pin.push_back(next.pin2node.size() - 1);
         next.flat_net2pin_start.back()++;
         ++next.num_movable;
-        for (int i = 0; i < int(next.node_x.size()); ++i)
+        for (int i = 0; i < int(next.node_x.size()); ++i) {
           u.previous_node.push_back(i == at ? -1 : i - (i > at));
+        }
       } else {
         // Remove the same inserted buffer, leaving the original pins/net
         // intact.
@@ -592,12 +622,15 @@ int main() {
         next.pin_offset_y.pop_back();
         next.flat_net2pin.pop_back();
         next.flat_net2pin_start.back()--;
-        for (auto &p : next.pin2node)
-          if (p > at)
+        for (auto &p : next.pin2node) {
+          if (p > at) {
             --p;
+          }
+        }
         --next.num_movable;
-        for (int i = 0; i < int(next.node_x.size()); ++i)
+        for (int i = 0; i < int(next.node_x.size()); ++i) {
           u.previous_node.push_back(i + (i >= at));
+        }
       }
       next.build_maps();
       u.replacement = std::move(next);
@@ -629,6 +662,34 @@ int main() {
       check(std::abs(guarded.filler_area - large.filler_area) <=
             small.filler_size_x * small.filler_size_y * 2);
     }
+    // An empty/deferred checkpoint must not retire jumps. The first real
+    // timing update can retire them and replace topology in the same callback,
+    // including through the halo adapter and filler implementation.
+    {
+      auto jumping = topology;
+      auto jumping_options = cp;
+      jumping_options.add_fillers = true;
+      jumping_options.filler_max_count = 128;
+      jumping_options.checkpoint_interval = 25;
+      jumping_options.movable_interval = 10;
+      std::vector<int> jumps;
+      jumping_options.movable_update = [&](const Design &, int iteration) {
+        jumps.push_back(iteration);
+        return std::vector<MovablePosition>{};
+      };
+      jumping_options.checkpoint = [&](const Design &snapshot, int iteration) {
+        if (iteration % 50) {
+          return GpUpdate{};
+        }
+        auto update = cp.checkpoint(snapshot, iteration);
+        update.stop_movable_updates = true;
+        return update;
+      };
+      place(jumping, jumping_options);
+      check(jumps == std::vector<int>({10, 20, 30, 40, 50}));
+      check(jumping.num_movable == topology.num_movable);
+      calls.clear();
+    }
     auto with_virtual = topology;
     auto virtual_options = cp;
     virtual_options.add_fillers = true;
@@ -656,6 +717,38 @@ int main() {
           topology.node_x[4] == fixture().node_x[4]);
     check(topology.node_size_x[0] == 2 && topology.node_halo_x[0] == 2);
     check(topology.centroid_groups[0].name == "bank");
+    // Final-GP memory schedules survive insertion/removal and fixed-node
+    // index shifts, including halo conversion and virtual filler particles.
+    for (bool grow : {false, true}) {
+      auto scheduled = topology;
+      scheduled.node_macro[0] = 0;
+      scheduled.node_macro[3] = 1;
+      scheduled.node_size_x[3] = scheduled.node_size_y[3] = 4;
+      auto scheduled_options = virtual_options;
+      scheduled_options.macro_cell_density_weight = 0;
+      scheduled_options.centroid_weight = 0;
+      scheduled_options.centroid_repulsion_weight = 0;
+      scheduled_options.centroid_adaptive_repulsion = false;
+      scheduled_options.max_iterations = scheduled_options.min_iterations = 225;
+      scheduled_options.post_density_factor = 0;
+      scheduled_options.vanished_memory = grow;
+      if (!grow) {
+        scheduled_options.macro_transparency.warmup = 20;
+        scheduled_options.macro_transparency.period = 20;
+        scheduled_options.macro_transparency.cycles = 2;
+      }
+      scheduled_options.checkpoint = [&](const Design &d, int iteration) {
+        return iteration <= 100 ? cp.checkpoint(d, iteration) : GpUpdate{};
+      };
+      calls.clear();
+      place(scheduled, scheduled_options);
+      check(calls == std::vector<int>({50, 100}));
+      scheduled.validate();
+      check(scheduled.node_x.size() == 5 && scheduled.num_movable == 3);
+      check(scheduled.node_x[3] == topology.node_x[3]);
+      check(scheduled.node_y[3] == topology.node_y[3]);
+      check(scheduled.node_size_x[3] == 4 && scheduled.node_size_y[3] == 4);
+    }
     // Invalid mappings fail atomically, including through the halo wrapper.
     const auto prior = topology;
     cp.checkpoint = [](const Design &snapshot, int) {
@@ -720,9 +813,10 @@ int main() {
     resized_halo.node_macro = {0, 0, 0, 0, 0};
     resized_halo.node_halo_x = {2, 0, 0, 0, 0};
     resized_halo.node_halo_y = {2, 0, 0, 0, 0};
-    for (size_t i = 0; i < resized_halo.node_x.size(); ++i)
+    for (size_t i = 0; i < resized_halo.node_x.size(); ++i) {
       resized_halo.centroid_node_area.push_back(resized_halo.node_size_x[i] *
                                                 resized_halo.node_size_y[i]);
+    }
     resized_halo.node_centroid_color = {0, 0, 0, -1, -1};
     resized_halo.centroid_color_names = {"bank"};
     CentroidGroup group;

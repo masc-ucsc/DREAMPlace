@@ -16,7 +16,9 @@ public:
   // macro footprint (already halo padded by place). Macros never emit charge.
   std::vector<double> cell_density(const Design &d) const;
   Gradient gradient(const Design &d, bool macros_only = false,
-                    const std::vector<double> &source = {}) const;
+                    const std::vector<double> &source = {},
+                    bool ignore_fixed_macros = false,
+                    double fixed_macro_scale = 1) const;
   // Prefix-sum local slope: no Poisson solve, cells are the only sources.
   Gradient density_pull(const Design &d, const std::vector<double> &source,
                         double range) const;

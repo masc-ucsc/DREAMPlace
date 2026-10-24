@@ -973,3 +973,17 @@ repeated gaps and common midpoints. Lattice-rounded targets and soft relative
 coordinate offsets enter the macro LP, whose hard box/halo constraints remain
 authoritative. Failed bounded fits supply no symmetry constraints. The alignment
 report retains accepted fit relations and post-legalization soft violations.
+
+
+Placement-only masks
+--------------------
+
+`Design::node_placement_mask` optionally marks fixed pinless macro-shaped
+geometry as `PlacementMask::hard` or `PlacementMask::soft`. Both retain GP
+density charge. Neither is an electrical routing obstacle, even when enhanced
+RSMT/RUDY treats physical macro bodies as opaque. Soft masks are ignored by
+row legalization, detail and legality checks; hard masks retain unavailable
+sites. Kernel adapters restore the original mask dimensions after legalizing.
+Masks require zero halos and N orientation. Empty metadata preserves ordinary
+macro behavior. Metadata survives rigid contraction and topology replacements;
+a replacement cannot change an existing node's mask semantics.

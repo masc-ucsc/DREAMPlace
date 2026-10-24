@@ -5,6 +5,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -19,6 +20,67 @@
 #include "dreamplace/native/spectral.hpp"
 
 namespace DreamPlace::native {
+bool macro_transparent(const MacroTransparency &o, int completed_steps) {
+  if (o.always) {
+    return true;
+  }
+  const auto end =
+      std::int64_t(o.warmup) + 2 * std::int64_t(o.period) * o.cycles;
+  return o.cycles > 0 && o.period > 0 && completed_steps >= o.warmup &&
+         completed_steps < end &&
+         ((completed_steps - o.warmup) / o.period) % 2 == 0;
+}
+double vanished_memory_scale(int iteration) {
+  return std::clamp((double(iteration) - 100) / 100, 0., 1.);
+}
+double vanished_memory_local_weight(double initial, int iteration,
+                                    double floor) {
+  return std::max(floor, initial - .05 * std::max(0., double(iteration) - 100));
+}
+int select_gp_trial(const std::vector<GpTrialScore> &scores,
+                    const GpSearch &policy, std::string *reason) {
+  if (scores.empty()) {
+    throw std::invalid_argument("empty GP candidate set");
+  }
+  for (double t : {policy.route_tolerance, policy.timing_tolerance,
+                   policy.hpwl_tolerance}) {
+    if (!std::isfinite(t) || t < 0 || t > .1) {
+      throw std::invalid_argument("invalid GP trial comparison tolerance");
+    }
+  }
+  std::vector<int> active(scores.size());
+  std::iota(active.begin(), active.end(), 0);
+  for (const auto &s : scores) {
+    for (double v : {s.route_overflow, s.wns, s.hpwl, s.tns}) {
+      if (!std::isfinite(v)) {
+        throw std::invalid_argument("nonfinite GP trial score");
+      }
+    }
+  }
+  const auto filter = [&](auto cost, double tolerance, const char *name) {
+    if (active.size() == 1) {
+      return;
+    }
+    double best = std::numeric_limits<double>::infinity();
+    for (int i : active) {
+      best = std::min(best, cost(scores[i]));
+    }
+    const double band = tolerance * std::max(std::abs(best), 1e-12);
+    std::erase_if(active, [&](int i) { return cost(scores[i]) > best + band; });
+    if (reason && active.size() == 1) {
+      *reason = name;
+    }
+  };
+  if (reason) {
+    *reason = "tie_keep_first";
+  }
+  filter([](const auto &s) { return s.route_overflow; }, policy.route_tolerance,
+         "rsmt_rudy");
+  filter([](const auto &s) { return -s.wns; }, policy.timing_tolerance, "wns");
+  filter([](const auto &s) { return s.hpwl; }, policy.hpwl_tolerance, "hpwl");
+  filter([](const auto &s) { return -s.tns; }, policy.timing_tolerance, "tns");
+  return active.front();
+}
 namespace {
 void require(bool condition, const char *message) {
   if (!condition) {
@@ -62,14 +124,26 @@ void csr_check(const std::vector<int> &flat, const std::vector<int> &start,
 
 // Exact physical overflow, excluding fillers; fixed area reduces bin capacity.
 double overflow(const Design &d, int bx, int by, double target_density,
-                bool scale_macro = false) {
+                bool scale_macro = false, bool ignore_fixed_macros = false,
+                double fixed_macro_scale = 1) {
   const auto &l = d.layout;
   double dx = (l.xh - l.xl) / bx, dy = (l.yh - l.yl) / by;
   std::vector<double> movable(bx * by), fixed(bx * by);
   double total = 0;
   for (int i = 0; i < count(d.node_x.size()); ++i) {
+    if (ignore_fixed_macros && i >= d.num_movable && !d.node_macro.empty() &&
+        d.node_macro[i]) {
+      continue;
+    }
     double x = d.node_x[i], y = d.node_y[i], w = d.node_size_x[i],
            h = d.node_size_y[i];
+    if (fixed_macro_scale != 1 && i >= d.num_movable && !d.node_macro.empty() &&
+        d.node_macro[i]) {
+      x += w * (1 - fixed_macro_scale) / 2;
+      y += h * (1 - fixed_macro_scale) / 2;
+      w *= fixed_macro_scale;
+      h *= fixed_macro_scale;
+    }
     const double charge = scale_macro && i < d.num_movable &&
                                   !d.node_macro.empty() && d.node_macro[i]
                               ? target_density
@@ -106,6 +180,59 @@ double overflow(const Design &d, int bx, int by, double target_density,
 }
 
 void options_check(const Options &o) {
+  const auto &search = o.gp_search;
+  require(search.start >= 220 && search.interval > search.steps &&
+              search.steps >= 1 && search.steps <= 3 && search.rounds >= 0 &&
+              search.rounds <= 100 && finite(search.filler_step) &&
+              search.filler_step > 0 && search.filler_step <= 1 &&
+              finite(search.local_step) && search.local_step > 0 &&
+              search.local_step <= 1,
+          "invalid GP A/B search controls");
+  for (double t : {search.route_tolerance, search.timing_tolerance,
+                   search.hpwl_tolerance}) {
+    require(finite(t) && t >= 0 && t <= .1,
+            "invalid GP A/B comparison tolerance");
+  }
+  if (o.trial_tuning) {
+    require(!search.enabled && finite(o.trial_tuning->filler_charge) &&
+                o.trial_tuning->filler_charge >= 0 &&
+                o.trial_tuning->filler_charge <= 1 &&
+                finite(o.trial_tuning->local_weight) &&
+                o.trial_tuning->local_weight >= 0 &&
+                o.trial_tuning->local_weight <= 1,
+            "invalid internal GP trial tuning");
+  }
+  const auto &cycle = o.macro_transparency;
+  require(cycle.cycles >= 0 && cycle.warmup >= 0 && cycle.period > 0,
+          "invalid macro transparency schedule");
+  require(!cycle.always || cycle.cycles == 0,
+          "always-transparent mode cannot be combined with cycling");
+  if (cycle.cycles > 0) {
+    require(std::int64_t(cycle.warmup) +
+                    (2 * std::int64_t(cycle.cycles) + 1) * cycle.period <=
+                o.max_iterations,
+            "macro transparency requires a final fully opaque settling period");
+  }
+  require(finite(o.vanished_memory_local_floor) &&
+              o.vanished_memory_local_floor >= 0 &&
+              o.vanished_memory_local_floor <= o.local_density_weight &&
+              (o.vanished_memory || o.vanished_memory_local_floor == 0),
+          "vanished_memory local floor requires the schedule and a value from "
+          "zero to initial local weight");
+  if (o.vanished_memory) {
+    require(!cycle.enabled(),
+            "vanished_memory cannot be combined with transparency cycling");
+    require((o.trial_tuning ? o.schedule_iterations : o.max_iterations) >=
+                std::max(220., 120 + std::ceil((o.local_density_weight -
+                                                o.vanished_memory_local_floor) /
+                                               .05)),
+            "vanished_memory requires settling after the local-pressure ramp");
+  }
+  if (cycle.enabled() || o.vanished_memory) {
+    require(
+        o.macro_cell_density_weight == 0 && o.macro_density_pull_weight == 0,
+        "macro transparency requires movable-macro density forces disabled");
+  }
   require(o.max_iterations >= 0 && o.bins_x >= 2 && o.bins_x <= 1024 &&
               o.bins_y >= 2 && o.bins_y <= 1024,
           "invalid iteration limit or bin count (2..1024)");
@@ -229,7 +356,9 @@ void options_check(const Options &o) {
   require(finite(o.cohesion_weight) && o.cohesion_weight >= 0,
           "invalid cohesion weight");
   require(o.terminal_interval >= 0, "negative terminal update interval");
+  require(o.movable_interval >= 0, "negative movable update interval");
   require(o.checkpoint_interval >= 0, "negative GP checkpoint interval");
+  require(o.checkpoint_start >= 0, "negative GP checkpoint start");
   require(!o.observer || o.observer_interval > 0,
           "observer interval must be positive");
 }
@@ -302,8 +431,9 @@ macro_pull_forces(const Design &d, const std::vector<MacroPull> &pulls,
                   const Gradient &wire, const Gradient &density,
                   double density_weight) {
   std::vector<MacroPullForce> result;
-  if (pulls.empty())
+  if (pulls.empty()) {
     return result;
+  }
   result.reserve(pulls.size());
   double reference = 0, minimum_reference = 0, length = 0;
   for (const auto &pull : pulls) {
@@ -331,8 +461,9 @@ macro_pull_forces(const Design &d, const std::vector<MacroPull> &pulls,
   return result;
 }
 Design unpad_snapshot(const Design &snapshot, const Design &reference) {
-  if (snapshot.node_pad_x.empty())
+  if (snapshot.node_pad_x.empty()) {
     return snapshot;
+  }
   require(snapshot.node_x.size() == reference.node_x.size() &&
               snapshot.node_pad_x.size() == snapshot.node_x.size() &&
               snapshot.node_pad_y.size() == snapshot.node_x.size(),
@@ -443,9 +574,10 @@ void Design::validate() const {
               (node_legalize_anchor_x.size() == node_x.size() &&
                node_legalize_anchor_y.size() == node_x.size()),
           "legalization anchor array size mismatch");
-  for (double weight : node_legalize_weights)
+  for (double weight : node_legalize_weights) {
     require(finite(weight) && weight >= 1,
             "invalid legalization displacement weight");
+  }
   require((node_halo_x.empty() || node_halo_x.size() == node_x.size()) &&
               (node_halo_y.empty() || node_halo_y.size() == node_x.size()),
           "halo array size mismatch");
@@ -487,6 +619,24 @@ void Design::validate() const {
   require(std::all_of(node_macro.begin(), node_macro.end(),
                       [](auto v) { return v <= 1; }),
           "invalid macro mask");
+  require(node_placement_mask.empty() ||
+              node_placement_mask.size() == node_x.size(),
+          "placement mask size mismatch");
+  for (int i = 0; i < n; ++i) {
+    const auto mask = placement_mask(i);
+    require(mask <= PlacementMask::soft, "invalid placement mask kind");
+    if (mask != PlacementMask::none) {
+      require(i >= num_movable && !node_macro.empty() && node_macro[i] &&
+                  flat_node2pin_start.size() == node_x.size() + 1 &&
+                  flat_node2pin_start[i] == flat_node2pin_start[i + 1],
+              "placement masks must be fixed pinless macro geometry");
+      require((node_halo_x.empty() || node_halo_x[i] == 0) &&
+                  (node_halo_y.empty() || node_halo_y[i] == 0) &&
+                  (node_orientation.empty() ||
+                   node_orientation[i] == Orientation::N),
+              "placement masks must have zero halo and N orientation");
+    }
+  }
   require(node_inflatable.empty() || node_inflatable.size() == node_x.size(),
           "inflation mask size mismatch");
   for (const auto &e : order_edges) {
@@ -585,13 +735,15 @@ void Design::validate() const {
                           node_centroid_color[n]) == group.colors.end() &&
                 centroid_node_area[n] > 0,
             "invalid or duplicate explicit centroid member");
-        if (!group.areas.empty())
+        if (!group.areas.empty()) {
           require(finite(group.areas[k]) && group.areas[k] > 0,
                   "invalid centroid logical member area");
-        if (!group.offsets.empty())
+        }
+        if (!group.offsets.empty()) {
           require(finite(group.offsets[k].first) &&
                       finite(group.offsets[k].second),
                   "nonfinite centroid logical member offset");
+        }
       }
       for (int c : group.colors) {
         require(c >= 0 && c < static_cast<int>(centroid_color_names.size()) &&
@@ -611,10 +763,11 @@ void Design::validate() const {
       int i = group.nodes[k];
       require(i >= 0 && i < n && (!grouped[i] || !group.offsets.empty()),
               "invalid or overlapping cohesion membership");
-      if (!group.offsets.empty())
+      if (!group.offsets.empty()) {
         require(finite(group.offsets[k].first) &&
                     finite(group.offsets[k].second),
                 "invalid cohesion member offset");
+      }
       grouped[i] = true;
       double a = group.areas.empty() ? node_size_x[i] * node_size_y[i]
                                      : group.areas[k];
@@ -692,19 +845,26 @@ bool macros_are_legal(const Design &d, std::string *reason) {
     macros.node_size_x.push_back(d.node_size_x[i]);
     macros.node_size_y.push_back(d.node_size_y[i]);
     macros.node_macro.push_back(d.node_macro.empty() ? 0 : d.node_macro[i]);
-    if (!d.node_halo_x.empty())
+    macros.node_placement_mask.push_back(d.placement_mask(i));
+    if (!d.node_halo_x.empty()) {
       macros.node_halo_x.push_back(d.node_halo_x[i]);
-    if (!d.node_halo_y.empty())
+    }
+    if (!d.node_halo_y.empty()) {
       macros.node_halo_y.push_back(d.node_halo_y[i]);
-    if (!d.node_orientation.empty())
+    }
+    if (!d.node_orientation.empty()) {
       macros.node_orientation.push_back(d.node_orientation[i]);
+    }
   };
-  for (int i = 0; i < d.num_movable; ++i)
-    if (!d.node_macro.empty() && d.node_macro[i])
+  for (int i = 0; i < d.num_movable; ++i) {
+    if (!d.node_macro.empty() && d.node_macro[i]) {
       append(i);
+    }
+  }
   macros.num_movable = macros.node_x.size();
-  for (int i = d.num_movable; i < count(d.node_x.size()); ++i)
+  for (int i = d.num_movable; i < count(d.node_x.size()); ++i) {
     append(i);
+  }
   macros.build_maps();
   return is_legal(macros, reason);
 }
@@ -728,7 +888,7 @@ bool is_legal(const Design &d, std::string *reason) {
   for (int i = 0; i < count(d.node_x.size()); ++i) {
     double x = d.node_x[i], y = d.node_y[i], w = d.node_size_x[i],
            h = d.node_size_y[i];
-    if (!w || !h) {
+    if (!w || !h || d.placement_mask(i) == PlacementMask::soft) {
       continue;
     }
     if (i < d.num_movable && (x < l.xl - eps || y < l.yl - eps ||
@@ -767,24 +927,28 @@ bool is_legal(const Design &d, std::string *reason) {
       // Keep the usual fixed/fixed exemption, but check exact Y intersections.
       std::multimap<double, int> active, movable;
       for (const auto v : row) {
-        while (!active.empty() && active.begin()->first <= v.x + eps)
+        while (!active.empty() && active.begin()->first <= v.x + eps) {
           active.erase(active.begin());
-        while (!movable.empty() && movable.begin()->first <= v.x + eps)
+        }
+        while (!movable.empty() && movable.begin()->first <= v.x + eps) {
           movable.erase(movable.begin());
+        }
         const auto &candidates = v.id < d.num_movable ? active : movable;
         for (const auto &[end, other] : candidates) {
           (void)end;
           if (d.node_y[other] < d.node_y[v.id] + d.node_size_y[v.id] - eps &&
               d.node_y[v.id] < d.node_y[other] + d.node_size_y[other] - eps) {
-            if (reason)
+            if (reason) {
               *reason = "overlap: node " + std::to_string(other) + "; node " +
                         std::to_string(v.id);
+            }
             return false;
           }
         }
         active.emplace(v.end, v.id);
-        if (v.id < d.num_movable)
+        if (v.id < d.num_movable) {
           movable.emplace(v.end, v.id);
+        }
       }
       continue;
     }
@@ -874,6 +1038,9 @@ Result place(Design &design, const Options &options, GpState *state) {
     o.bins_x = bins.first;
     o.bins_y = bins.second;
   }
+  if (o.gp_search.enabled && !o.schedule_iterations) {
+    o.schedule_iterations = o.max_iterations;
+  }
   options_check(o);
   o.magnet.validate();
   if (o.magnet.enabled) {
@@ -881,6 +1048,31 @@ Result place(Design &design, const Options &options, GpState *state) {
             "macro magnet requires one solve without external continuation");
     require(o.legalize, "macro magnet requires placement with legalization");
     return detail::magnet_place(design, o);
+  }
+  if (o.gp_search.enabled) {
+    require(!state && !o.trial_tuning && o.trial_timing && o.add_fillers &&
+                o.routability && o.improved_routability &&
+                o.route.model == RouteModel::rsmt &&
+                !o.macro_transparency.enabled() && !o.terminal_update &&
+                !o.movable_update && !o.macro_pull_update &&
+                o.centroid_weight == 0 && o.macro_align_weight == 0 &&
+                o.macro_cell_density_weight == 0 &&
+                o.macro_density_pull_weight == 0 &&
+                o.local_density_jitter == 0 && o.local_density_weight > 0 &&
+                o.local_density_weight <= 1 &&
+                std::int64_t(o.gp_search.start) + o.gp_search.steps + 20 <=
+                    o.max_iterations,
+            "GP A/B search requires final fixed-macro RSMT placement, fillers, "
+            "timing and settling budget");
+    require(design.node_macro.empty() ||
+                std::none_of(design.node_macro.begin(),
+                             design.node_macro.begin() + design.num_movable,
+                             [](auto v) { return v != 0; }),
+            "GP A/B search cannot move macros");
+  }
+  if (o.trial_tuning) {
+    require(state && state->signature && state->iteration >= 220,
+            "GP trial requires an opaque full optimizer checkpoint");
   }
   const int aux_x = o.auxiliary_bins ? o.auxiliary_bins : o.bins_x;
   const int aux_y = o.auxiliary_bins ? o.auxiliary_bins : o.bins_y;
@@ -923,6 +1115,19 @@ Result place(Design &design, const Options &options, GpState *state) {
           "GP checkpoints require no external continuation");
   require(!o.terminal_update || o.terminal_interval == 0 || !state,
           "terminal updates require no external continuation");
+  require(!o.movable_update || o.movable_interval == 0 || !state,
+          "movable updates require no external continuation");
+  require(
+      !(o.macro_transparency.enabled() || o.vanished_memory) || !state ||
+          (o.trial_tuning && !o.macro_transparency.enabled()),
+      "macro transparency requires one GP solve without external continuation");
+  if (o.macro_transparency.enabled() || o.vanished_memory) {
+    require(design.node_macro.empty() ||
+                std::none_of(design.node_macro.begin(),
+                             design.node_macro.begin() + design.num_movable,
+                             [](auto value) { return value != 0; }),
+            "macro transparency is final-placement only: macros must be fixed");
+  }
   if (has_halo(design)) {
     Design padded = padded_design(design);
     Options control = o;
@@ -964,6 +1169,11 @@ Result place(Design &design, const Options &options, GpState *state) {
     const auto unpad = [&](const Design &snapshot) {
       return detail::unpad_snapshot(snapshot, halo_model);
     };
+    if (o.trial_timing) {
+      control.trial_timing = [&](const Design &snapshot) {
+        return o.trial_timing(unpad(snapshot));
+      };
+    }
     if (o.macro_pull_update && o.macro_pull_interval > 0) {
       control.macro_pull_update = [&](const Design &snapshot, int iteration) {
         return o.macro_pull_update(unpad(snapshot), iteration);
@@ -1041,9 +1251,24 @@ Result place(Design &design, const Options &options, GpState *state) {
         };
       }
     }
+    if (o.movable_update && o.movable_interval > 0) {
+      control.movable_update = [&](const Design &snapshot, int iteration) {
+        auto updates = o.movable_update(unpad(snapshot), iteration);
+        for (auto &position : updates) {
+          require(position.node >= 0 && position.node < snapshot.num_movable,
+                  "invalid movable update index");
+          position.x -= halo(halo_model.node_halo_x, position.node,
+                             snapshot.layout.site_width);
+          position.y -= halo(halo_model.node_halo_y, position.node,
+                             snapshot.layout.row_height);
+        }
+        return updates;
+      };
+    }
     const auto result = place(padded, control, state);
     if ((o.checkpoint && o.checkpoint_interval > 0) ||
-        (o.terminal_update && o.terminal_interval > 0) || o.before_legalize ||
+        (o.terminal_update && o.terminal_interval > 0) ||
+        (o.movable_update && o.movable_interval > 0) || o.before_legalize ||
         o.after_macro_legalize) {
       design = unpad(padded);
       return result;
@@ -1070,14 +1295,16 @@ Result place(Design &design, const Options &options, GpState *state) {
   salt(o.bins_y);
   salt(o.add_fillers);
   if (o.add_fillers) {
-    if (o.filler_macro_fraction > 0)
+    if (o.filler_macro_fraction > 0) {
       salt(std::bit_cast<std::uint64_t>(o.filler_macro_fraction));
+    }
     salt(std::bit_cast<std::uint64_t>(o.filler_cell_scale));
     salt(std::bit_cast<std::uint64_t>(o.filler_bin_fraction));
     salt(o.filler_max_count);
     salt(std::bit_cast<std::uint64_t>(o.filler_area_fraction));
-    if (o.filler_cell_space)
+    if (o.filler_cell_space) {
       salt(0x63656c6c73706163ULL);
+    }
   }
   if (o.dynamic_bins || o.local_density_weight || o.macro_cell_density_weight ||
       o.macro_density_pull_weight || o.auxiliary_bins) {
@@ -1086,7 +1313,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     salt(o.auxiliary_bins);
     salt(o.local_density_bins);
     for (double v : {o.local_density_weight, o.local_density_range,
-                     o.local_density_jitter}) {
+                     o.local_density_target, o.local_density_jitter}) {
       salt(std::bit_cast<std::uint64_t>(v));
     }
   }
@@ -1094,10 +1321,6 @@ Result place(Design &design, const Options &options, GpState *state) {
     salt(0x6d6163726f726563ULL); // long-range, stage-calibrated cell pressure
     salt(std::bit_cast<std::uint64_t>(o.macro_cell_density_weight));
     salt(std::bit_cast<std::uint64_t>(o.macro_cell_density_reach));
-  }
-  if (o.local_density_weight > 0 && o.local_density_target >= 0) {
-    salt(0x6c6f63616c746774ULL);
-    salt(std::bit_cast<std::uint64_t>(o.local_density_target));
   }
   if (o.timing_spread_weight) {
     salt(0x74696d6573707264ULL);
@@ -1140,8 +1363,9 @@ Result place(Design &design, const Options &options, GpState *state) {
   }
   if (!design.node_orientation_fixed.empty()) {
     salt(0x7269676964666978ULL);
-    for (auto fixed : design.node_orientation_fixed)
+    for (auto fixed : design.node_orientation_fixed) {
       salt(fixed);
+    }
   }
   for (int v : design.pin2node) {
     salt(v);
@@ -1171,6 +1395,9 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
       }
     }
+  }
+  for (auto mask : design.node_placement_mask) {
+    salt(static_cast<unsigned>(mask));
   }
   if (o.fixed_macro_overlap_weight > 0) {
     salt(std::uint64_t{0x66697865646d6163});
@@ -1255,7 +1482,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       std::any_of(d.node_macro.begin() + d.num_movable, d.node_macro.end(),
                   [](auto m) { return m != 0; });
   const double fixed_macro_weight =
-      fixed_macro_obstacles ? o.fixed_macro_overlap_weight : 0;
+      fixed_macro_obstacles && !o.macro_transparency.always
+          ? o.fixed_macro_overlap_weight
+          : 0;
   if (!d.node_boxes.empty()) {
     for (int i = 0; i < d.num_movable; ++i) {
       const auto &b = d.node_boxes[i];
@@ -1275,7 +1504,7 @@ Result place(Design &design, const Options &options, GpState *state) {
   // A local engine owns all temporary/filler state. No global RNG or settings.
   std::mt19937 rng(o.seed);
   std::uniform_real_distribution<double> unit(0, 1);
-  double area = 0, fixed_area = 0, macro_area = 0;
+  double area = 0, fixed_area = 0, macro_area = 0, fixed_macro_area = 0;
   for (int i = 0; i < original; ++i) {
     double a = d.node_size_x[i] * d.node_size_y[i];
     if (i < d.num_movable) {
@@ -1289,6 +1518,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       double h = std::max(0., std::min(l.yh, d.node_y[i] + d.node_size_y[i]) -
                                   std::max(l.yl, d.node_y[i]));
       fixed_area += w * h;
+      if (!d.node_macro.empty() && d.node_macro[i]) {
+        fixed_macro_area += w * h;
+      }
     }
   }
   // Reserve physical macro bodies, not their halos or their current overlap
@@ -1314,6 +1546,10 @@ Result place(Design &design, const Options &options, GpState *state) {
   const auto gp_start = std::chrono::steady_clock::now();
   if (d.num_movable && o.max_iterations) {
     auto active = [&](int i) { return i < d.num_movable || i >= original; };
+    std::vector<int> movable_holds(d.num_movable, 0);
+    const auto can_move = [&](int i) {
+      return active(i) && (i >= d.num_movable || movable_holds[i] == 0);
+    };
     // Area without the halo padding a place() wrapper added to node_size.
     const auto physical_area = [&](int i) {
       const double px = d.node_pad_x.empty() ? 0 : d.node_pad_x[i];
@@ -1375,8 +1611,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       if (o.filler_macro_fraction > 0) {
         double smallest_area = std::numeric_limits<double>::infinity();
         for (size_t i = 0; i < d.node_x.size(); ++i) {
-          if (d.node_macro.empty() || !d.node_macro[i])
+          if (d.node_macro.empty() || !d.node_macro[i]) {
             continue;
+          }
           const double w = d.node_size_x[i] -
                            (d.node_pad_x.empty() ? 0 : 2 * d.node_pad_x[i]);
           const double h = d.node_size_y[i] -
@@ -1549,14 +1786,12 @@ Result place(Design &design, const Options &options, GpState *state) {
     PoissonSolver solver(o.bins_x, o.bins_y, width, height, o.dynamic_bins, 0,
                          o.num_threads);
     std::unique_ptr<detail::LocalDensity> local_density;
-    const double local_target = o.local_density_target < 0
-                                    ? o.target_density
-                                    : o.local_density_target;
     std::unique_ptr<detail::LocalDensity> macro_cell_density;
     double macro_cell_scale = -1;
     const auto rebuild_macro_cell_density = [&] {
-      if (o.macro_cell_density_weight <= 0)
+      if (o.macro_cell_density_weight <= 0) {
         return;
+      }
       const double reach = detail::macro_cell_screening_length(
           model, o.macro_cell_density_reach);
       r.macro_cell_density_screening_length = reach;
@@ -1568,9 +1803,12 @@ Result place(Design &design, const Options &options, GpState *state) {
     };
     rebuild_macro_cell_density();
 
+    const double local_target =
+        o.local_density_target < 0 ? o.target_density : o.local_density_target;
     if (o.local_density_weight > 0 || o.macro_cell_density_weight > 0 ||
         o.macro_density_pull_weight > 0) {
-      require(!state, "local spreading continuation is not supported yet");
+      require(!state || o.trial_tuning,
+              "local spreading continuation requires a GP trial");
       local_density = std::make_unique<detail::LocalDensity>(
           model, o.local_density_bins, o.local_density_range, local_target,
           o.num_threads);
@@ -1591,6 +1829,13 @@ Result place(Design &design, const Options &options, GpState *state) {
     const auto *rigid_route = o.magnet_runtime && o.magnet_runtime->routing
                                   ? &*o.magnet_runtime->routing
                                   : nullptr;
+    const bool cycling = o.macro_transparency.cycles > 0;
+    const auto transparency_end =
+        std::int64_t(o.macro_transparency.warmup) +
+        2 * std::int64_t(o.macro_transparency.period) *
+            o.macro_transparency.cycles;
+    bool transparent = false;
+    double exclusion_scale = 1;
     RouteModel active_route =
         warm          ? state->route_model
         : rigid_route ? rigid_route->model
@@ -1619,7 +1864,8 @@ Result place(Design &design, const Options &options, GpState *state) {
     int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
     double route_rudy_seconds = 0, route_rsmt_seconds = 0;
     r.route_model = active_route;
-    auto measure_route = [&](const Design &physical, RouteModel model) {
+    auto measure_route = [&](const Design &physical, RouteModel model,
+                             bool record_history = true) {
       const auto started = std::chrono::steady_clock::now();
       RudyOptions route_options{aux_x,
                                 aux_y,
@@ -1632,22 +1878,31 @@ Result place(Design &design, const Options &options, GpState *state) {
       route_options.degree = o.route.degree;
       route_options.accuracy = o.route.accuracy;
       route_options.initialize = o.route_initialize;
+      route_options.fixed_macro_scale = exclusion_scale;
+      if (transparent) {
+        route_options.macro_blockages = false;
+        route_options.pin_access = false;
+      }
       auto result = rudy(physical, route_options);
       const double seconds = std::chrono::duration<double>(
                                  std::chrono::steady_clock::now() - started)
                                  .count();
       r.rudy_seconds += seconds;
-      route_sample_seconds += seconds;
       ++r.rudy_calls;
-      ++route_calls;
-      route_sampled = true;
-      if (model == RouteModel::rsmt) {
-        route_rsmt_seconds += seconds;
-      } else {
-        route_rudy_seconds += seconds;
+      // Trial scores have their own trace. Do not let a losing candidate
+      // overwrite the selected trajectory's most recent routing sample.
+      if (record_history) {
+        route_sample_seconds += seconds;
+        ++route_calls;
+        route_sampled = true;
+        if (model == RouteModel::rsmt) {
+          route_rsmt_seconds += seconds;
+        } else {
+          route_rudy_seconds += seconds;
+        }
+        route_blocked_pins = result.blocked_pins;
+        route_unroutable_nets = result.unroutable_nets;
       }
-      route_blocked_pins = result.blocked_pins;
-      route_unroutable_nets = result.unroutable_nets;
       return result;
     };
     auto latch_route = [&](const Design &physical, RudyResult old,
@@ -1723,8 +1978,9 @@ Result place(Design &design, const Options &options, GpState *state) {
                                              : std::vector<MacroPull>{};
     std::vector<double> best_feasible_x, best_feasible_y;
     int best_feasible_iteration = 0;
-    bool restart = false;
+    bool restart = o.trial_tuning.has_value();
     int last_checkpoint = -1;
+    bool movable_updates_active = o.movable_update && o.movable_interval > 0;
     bool checkpoint_invoked =
         o.magnet_runtime && o.magnet_runtime->checkpoint_invoked;
     const bool density_gated_checkpoints =
@@ -1807,17 +2063,284 @@ Result place(Design &design, const Options &options, GpState *state) {
     // Telemetry has its own lifetime and never enables magnet force/stopping
     // rules. Rigid placement uses its existing shared runtime instead.
     std::optional<detail::MagnetRuntime> step_recorder;
-    if (o.macro_step_observer && !o.magnet_runtime)
+    if (o.macro_step_observer && !o.magnet_runtime) {
       step_recorder.emplace(o);
-    if (step_recorder)
+    }
+    if (step_recorder) {
       step_recorder->observe(model, x, y, offset);
+    }
     if (o.magnet_runtime) {
       o.magnet_runtime->observe(model, x, y, offset);
     }
-    if (o.macro_motion_observer)
+    if (o.macro_motion_observer) {
       o.macro_motion_observer(model, x, y, offset);
+    }
+    const auto save_state = [&](int iteration) {
+      GpState s;
+      s.convergence = convergence;
+      s.signature = signature;
+      s.iteration = iteration;
+      s.x = x;
+      s.y = y;
+      s.prev_x = prev_x;
+      s.prev_y = prev_y;
+      s.old_gx = old_gx;
+      s.old_gy = old_gy;
+      s.old_ex = old_ex;
+      s.old_ey = old_ey;
+      s.density_weight = density_weight;
+      s.density_initialized = density_initialized;
+      s.previous_overflow = previous_overflow;
+      s.previous_hpwl = previous_hpwl;
+      s.momentum = t;
+      s.step = alpha;
+      s.inflation = inflation;
+      s.routing_utilization = routing_utilization;
+      s.route_model = active_route;
+      s.route_hold = route_hold;
+      s.route_probe_deadline = probe_deadline;
+      s.route_probed = r.route_probed;
+      s.route_switch_iteration = r.route_switch_iteration;
+      s.route_switch_rudy = r.route_switch_rudy;
+      s.route_switch_rsmt = r.route_switch_rsmt;
+      s.align_pairs = align_pairs;
+      return s;
+    };
+    GpTrialTuning tuning = o.trial_tuning.value_or(
+        GpTrialTuning{1, o.vanished_memory ? o.vanished_memory_local_floor
+                                           : o.local_density_weight});
+    int search_round = 0;
+    bool tuned = o.trial_tuning.has_value();
     for (int iter = 0; iter < o.max_iterations; ++iter) {
       const int global_iter = offset + iter;
+      if (o.gp_search.enabled && global_iter >= o.checkpoint_start &&
+          global_iter >= o.gp_search.start &&
+          (global_iter - o.gp_search.start) % o.gp_search.interval == 0 &&
+          (o.gp_search.rounds == 0 || search_round < o.gp_search.rounds) &&
+          iter + o.gp_search.steps + 20 <= o.max_iterations) {
+        Design parent = model;
+        std::copy_n(x.begin(), original, parent.node_x.begin());
+        std::copy_n(y.begin(), original, parent.node_y.begin());
+        GpTrialSample sample;
+        sample.iteration = global_iter;
+        sample.steps = o.gp_search.steps;
+        sample.round = search_round++;
+        sample.adjusting_fillers = sample.round % 2 == 0;
+        sample.settings.push_back(tuning); // unchanged control is always first
+        for (int direction : {-1, 1}) {
+          auto candidate = tuning;
+          double &value = sample.adjusting_fillers ? candidate.filler_charge
+                                                   : candidate.local_weight;
+          value = std::clamp(value + direction * (sample.adjusting_fillers
+                                                      ? o.gp_search.filler_step
+                                                      : o.gp_search.local_step),
+                             0., 1.);
+          if (candidate.filler_charge != tuning.filler_charge ||
+              candidate.local_weight != tuning.local_weight) {
+            sample.settings.push_back(candidate);
+          }
+        }
+        const auto score = [&](const Design &physical) {
+          GpTrialScore q;
+          const auto route = measure_route(physical, RouteModel::rsmt, false);
+          q.route_overflow = route.overflow;
+          q.route_unroutable_nets = route.unroutable_nets;
+          q.route_blocked_pins = route.blocked_pins;
+          q.route_measured_nets = route.measured_nets;
+          q.route_congestion_overflow =
+              std::max(0., route.overflow - double(route.unroutable_nets +
+                                                   route.blocked_pins) /
+                                                (aux_x * aux_y));
+          q.route_peak_utilization = route.max_utilization;
+          q.route_detour_wirelength = route.detour_wirelength;
+          const auto [wns, tns] = o.trial_timing(physical);
+          q.wns = wns;
+          q.tns = tns;
+          auto unweighted = physical;
+          std::fill(unweighted.net_weights.begin(),
+                    unweighted.net_weights.end(), 1.);
+          q.hpwl = hpwl(unweighted);
+          q.physical_overflow =
+              overflow(physical, o.bins_x, o.bins_y, o.target_density,
+                       o.scale_macro_density);
+          return q;
+        };
+        sample.before = score(parent);
+        auto checkpoint = save_state(global_iter);
+        // Every candidate, including unchanged control, starts with the same
+        // objective-boundary momentum restart. Retain filler positions, density
+        // normalization, inflation, weights and the global smoothing schedule.
+        checkpoint.momentum = 1;
+        checkpoint.step = 0;
+        checkpoint.prev_x = checkpoint.x;
+        checkpoint.prev_y = checkpoint.y;
+        checkpoint.old_ex = checkpoint.x;
+        checkpoint.old_ey = checkpoint.y;
+        std::fill(checkpoint.old_gx.begin(), checkpoint.old_gx.end(), 0.);
+        std::fill(checkpoint.old_gy.begin(), checkpoint.old_gy.end(), 0.);
+        struct Trial {
+          Design physical;
+          GpState state;
+          Result result;
+        };
+        std::vector<std::future<Trial>> futures;
+        // Small thread budgets must not launch one worker per candidate in
+        // addition to each candidate's own native worker team.
+        const bool parallel_trials =
+            o.num_threads >= int(sample.settings.size());
+        for (const auto &setting : sample.settings) {
+          auto child = o;
+          child.gp_search.enabled = false;
+          child.trial_tuning = setting;
+          child.max_iterations = sample.steps;
+          child.legalize = child.detailed_place = false;
+          child.before_legalize = {};
+          child.after_macro_legalize = {};
+          child.checkpoint = {};
+          child.checkpoint_interval = 0;
+          child.checkpoint_observer = {};
+          child.observer = {};
+          child.progress_observer = {};
+          child.trial_timing = {};
+          child.trial_observer = {};
+          child.num_threads = parallel_trials
+                                  ? o.num_threads / int(sample.settings.size())
+                                  : o.num_threads;
+          futures.push_back(std::async(
+              parallel_trials ? std::launch::async : std::launch::deferred,
+              [parent, checkpoint, child]() mutable {
+                Trial trial{std::move(parent), std::move(checkpoint), {}};
+                trial.result = place(trial.physical, child, &trial.state);
+                return trial;
+              }));
+        }
+        std::vector<Trial> trials;
+        for (auto &f : futures) {
+          trials.push_back(f.get());
+        }
+        // STA/host graph access is serialized; losing trials never refresh the
+        // shared timing weights, observer stream or placement state.
+        for (const auto &trial : trials) {
+          require(trial.state.iteration == global_iter + sample.steps,
+                  "unequal GP trial horizon");
+          sample.scores.push_back(score(trial.physical));
+        }
+        sample.selected =
+            select_gp_trial(sample.scores, o.gp_search, &sample.reason);
+        if (o.trial_observer) {
+          o.trial_observer(sample);
+        }
+        auto &winner = trials[sample.selected];
+        tuning = sample.settings[sample.selected];
+        tuned = true;
+        auto &s = winner.state;
+        x = std::move(s.x);
+        y = std::move(s.y);
+        prev_x = std::move(s.prev_x);
+        prev_y = std::move(s.prev_y);
+        old_gx = std::move(s.old_gx);
+        old_gy = std::move(s.old_gy);
+        old_ex = std::move(s.old_ex);
+        old_ey = std::move(s.old_ey);
+        density_weight = s.density_weight;
+        density_initialized = s.density_initialized;
+        previous_overflow = s.previous_overflow;
+        previous_hpwl = s.previous_hpwl;
+        t = s.momentum;
+        alpha = s.step;
+        convergence = s.convergence;
+        inflation = std::move(s.inflation);
+        routing_utilization = std::move(s.routing_utilization);
+        active_route = s.route_model;
+        route_hold = s.route_hold;
+        probe_deadline = s.route_probe_deadline;
+        r.route_probed = s.route_probed;
+        r.route_switch_iteration = s.route_switch_iteration;
+        r.route_switch_rudy = s.route_switch_rudy;
+        r.route_switch_rsmt = s.route_switch_rsmt;
+        align_pairs = std::move(s.align_pairs);
+        model = std::move(winner.physical);
+        double inflated = 0;
+        for (int i = 0; i < d.num_movable; ++i) {
+          inflated += d.node_size_x[i] * d.node_size_y[i] * inflation[i];
+        }
+        inflated_ratio = area ? inflated / area : 1;
+        route_overflow = sample.scores[sample.selected].route_overflow;
+        r.overflow = sample.scores[sample.selected].physical_overflow;
+        restart = false;
+        last_checkpoint = global_iter + sample.steps;
+        convergence.previous_hpwl = -1;
+        convergence.previous_inflation = -1;
+        convergence.stable_samples = 0;
+        best_feasible_x.clear();
+        best_feasible_y.clear();
+        best_feasible_hpwl = std::numeric_limits<double>::infinity();
+        for (const auto &h : winner.result.history) {
+          r.history.push_back(h);
+          if (o.progress_observer) {
+            o.progress_observer(h);
+          }
+        }
+        iter += sample.steps - 1;
+        r.iterations = iter + 1;
+        if (o.observer) {
+          o.observer(model, PlacementStage::global_placement,
+                     offset + r.iterations);
+        }
+        continue;
+      }
+      const double next_scale =
+          o.vanished_memory ? vanished_memory_scale(global_iter + 1) : 1;
+      const double local_weight =
+          tuned ? tuning.local_weight
+          : o.vanished_memory
+              ? vanished_memory_local_weight(o.local_density_weight,
+                                             global_iter + 1,
+                                             o.vanished_memory_local_floor)
+              : o.local_density_weight;
+      const bool next_transparent =
+          o.vanished_memory
+              ? next_scale == 0
+              : macro_transparent(o.macro_transparency, global_iter);
+      const bool schedule_boundary =
+          o.vanished_memory &&
+          (global_iter + 1 == 200 || global_iter + 1 == 101 ||
+           (global_iter >= 101 &&
+            local_weight == o.vanished_memory_local_floor &&
+            vanished_memory_local_weight(o.local_density_weight, global_iter,
+                                         o.vanished_memory_local_floor) >
+                o.vanished_memory_local_floor));
+      exclusion_scale = next_scale;
+      if (next_transparent != transparent || schedule_boundary) {
+        transparent = next_transparent;
+        t = 1;
+        prev_x = x;
+        prev_y = y;
+        restart = true;
+        last_checkpoint = global_iter;
+        convergence.previous_hpwl = -1;
+        convergence.previous_inflation = -1;
+        convergence.stable_samples = 0;
+        previous_hpwl = -1;
+        best_feasible_x.clear();
+        best_feasible_y.clear();
+        best_feasible_hpwl = std::numeric_limits<double>::infinity();
+        // Inflation from a blocked routing model must not persist through a
+        // transparent phase (or vice versa). Re-estimate using the new model.
+        std::fill(inflation.begin(), inflation.end(), 1);
+        inflated_ratio = 1;
+        routing_utilization.clear();
+      }
+      const bool opacity_settled =
+          o.vanished_memory
+              ? global_iter + 1 >=
+                    std::max(220.,
+                             120 + std::ceil((o.local_density_weight -
+                                              o.vanished_memory_local_floor) /
+                                             .05))
+              : (!cycling ||
+                 global_iter + 1 >=
+                     transparency_end + o.macro_transparency.period);
       double progress = std::min(
           1., double(global_iter) /
                   std::max(1, (o.schedule_iterations ? o.schedule_iterations
@@ -1835,7 +2358,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
       double nt = (1 + std::sqrt(1 + 4 * t * t)) / 2, momentum = (t - 1) / nt;
       for (int i = 0; i < n; ++i) {
-        if (active(i)) {
+        if (can_move(i)) {
           d.node_x[i] = x[i] + momentum * (x[i] - prev_x[i]);
           d.node_y[i] = y[i] + momentum * (y[i] - prev_y[i]);
           project(i, d.node_x[i], d.node_y[i]);
@@ -1858,7 +2381,9 @@ Result place(Design &design, const Options &options, GpState *state) {
           g[e.to] -= force;
         }
       }
-      if (o.routability && global_iter % 20 == 0 &&
+      if (o.routability &&
+          (global_iter % 20 == 0 ||
+           (o.vanished_memory && global_iter >= 100 && global_iter < 200)) &&
           (!o.improved_routability ||
            (previous_overflow >= 0 && previous_overflow < .3))) {
         Design physical = model;
@@ -1914,7 +2439,26 @@ Result place(Design &design, const Options &options, GpState *state) {
       const double target =
           o.target_density / (o.improved_routability ? inflated_ratio : 1);
       double filler_scale = 1;
-      if (o.improved_routability && o.routability_charge_compensation &&
+      double excluded_macro_area = transparent ? 0 : fixed_macro_area;
+      if (o.vanished_memory && exclusion_scale > 0 && exclusion_scale < 1) {
+        excluded_macro_area = 0;
+        for (int i = d.num_movable; i < original; ++i) {
+          if (d.node_macro.empty() || !d.node_macro[i]) {
+            continue;
+          }
+          const double w = d.node_size_x[i] * exclusion_scale;
+          const double h = d.node_size_y[i] * exclusion_scale;
+          const double mx = d.node_x[i] + (d.node_size_x[i] - w) / 2;
+          const double my = d.node_y[i] + (d.node_size_y[i] - h) / 2;
+          excluded_macro_area +=
+              std::max(0., std::min(l.xh, mx + w) - std::max(l.xl, mx)) *
+              std::max(0., std::min(l.yh, my + h) - std::max(l.yl, my));
+        }
+      }
+      if ((o.gp_search.enabled || o.trial_tuning || o.vanished_memory ||
+           (o.improved_routability && o.routability_charge_compensation) ||
+           (o.macro_transparency.always ||
+            (cycling && global_iter >= o.macro_transparency.warmup))) &&
           n > original) {
         double filler_area = 0;
         for (int i = original; i < n; ++i) {
@@ -1925,10 +2469,14 @@ Result place(Design &design, const Options &options, GpState *state) {
         const double real_charge =
             area * inflated_ratio -
             (o.scale_macro_density ? (1 - target) * macro_area : 0);
+        const double freed_macro_area =
+            o.vanished_memory ? fixed_macro_area - excluded_macro_area
+                              : (transparent ? fixed_macro_area : 0);
         const double budget =
             o.filler_cell_space
                 ? (1 - o.target_density) * cell_space * o.filler_area_fraction
-                : std::max(0., target * (width * height - fixed_area) -
+                : std::max(0., target * (width * height - fixed_area +
+                                         freed_macro_area) -
                                    real_charge) *
                       o.filler_area_fraction;
         filler_scale = filler_area ? budget / filler_area : 0;
@@ -1940,6 +2488,23 @@ Result place(Design &design, const Options &options, GpState *state) {
           ratio[i] = sx[i] * sy[i] > 0 ? target * d.node_size_x[i] *
                                              d.node_size_y[i] / (sx[i] * sy[i])
                                        : 0;
+        }
+      }
+      if (tuned) {
+        filler_scale *= tuning.filler_charge;
+        for (int i = original; i < n; ++i) {
+          ratio[i] *= tuning.filler_charge;
+        }
+      }
+      if (o.macro_transparency.always ||
+          (cycling && global_iter >= o.macro_transparency.warmup)) {
+        for (int i = d.num_movable; i < original; ++i) {
+          const bool hidden =
+              transparent && !d.node_macro.empty() && d.node_macro[i];
+          ratio[i] = !hidden && sx[i] * sy[i] > 0
+                         ? target * d.node_size_x[i] * d.node_size_y[i] /
+                               (sx[i] * sy[i])
+                         : 0;
         }
       }
       if (o.routability) {
@@ -1958,6 +2523,18 @@ Result place(Design &design, const Options &options, GpState *state) {
             ratio[i] *=
                 o.routability_charge_compensation ? target : o.target_density;
           }
+        }
+      }
+      if (o.vanished_memory) {
+        for (int i = d.num_movable; i < original; ++i) {
+          if (d.node_macro.empty() || !d.node_macro[i]) {
+            continue;
+          }
+          sx[i] = d.node_size_x[i] * exclusion_scale;
+          sy[i] = d.node_size_y[i] * exclusion_scale;
+          ox[i] = (d.node_size_x[i] - sx[i]) / 2;
+          oy[i] = (d.node_size_y[i] - sy[i]) / 2;
+          ratio[i] = exclusion_scale > 0 ? target : 0;
         }
       }
       detail::density_map(d, o.bins_x, o.bins_y, o.num_threads, sx, sy, ox, oy,
@@ -1993,14 +2570,17 @@ Result place(Design &design, const Options &options, GpState *state) {
       const auto macro_pull_forces =
           detail::macro_pull_forces(d, macro_pulls, wg, dg, density_weight);
       double ordinary_macro_force = 0;
-      if (local_density) {
+      if (local_density &&
+          (local_weight > 0 || o.macro_cell_density_weight > 0 ||
+           o.macro_density_pull_weight > 0)) {
         const auto begin = std::chrono::steady_clock::now();
         cell_density = local_density->cell_density(d);
         r.local_density_grid_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           begin)
                 .count();
-        if (o.macro_density_pull_weight > 0 || o.macro_cell_density_weight > 0) {
+        if (o.macro_density_pull_weight > 0 ||
+            o.macro_cell_density_weight > 0) {
           for (int i = 0; i < d.num_movable; ++i) {
             if (!d.node_macro.empty() && d.node_macro[i]) {
               ordinary_macro_force +=
@@ -2010,9 +2590,10 @@ Result place(Design &design, const Options &options, GpState *state) {
           }
         }
       }
-      if (local_density && o.local_density_weight > 0) {
+      if (local_density && local_weight > 0) {
         const auto begin = std::chrono::steady_clock::now();
-        const auto lg = local_density->gradient(d, false, cell_density);
+        const auto lg = local_density->gradient(d, false, cell_density,
+                                                transparent, exclusion_scale);
         double base = 0, force = 0;
         for (int i = 0; i < d.num_movable; ++i) {
           if (d.node_macro.empty() || !d.node_macro[i]) {
@@ -2034,7 +2615,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         const double reference =
             cell_area * local_target * pitch / (2 * std::acos(-1.));
         const double scale =
-            o.local_density_weight * base / std::max({reference, force, 1e-12});
+            local_weight * base / std::max({reference, force, 1e-12});
         double applied_force = 0;
         for (int i = 0; i < d.num_movable; ++i) {
           // Calibrate before attenuation; otherwise a uniformly critical
@@ -2073,7 +2654,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         // renormalizing by the current field would cap away that accumulation.
         // A physical floor avoids amplifying an initially tiny sparse field.
         if (macro_cell_scale < 0 && ordinary_macro_force > 0) {
-          macro_cell_scale = o.macro_cell_density_weight * ordinary_macro_force /
+          macro_cell_scale = o.macro_cell_density_weight *
+                             ordinary_macro_force /
                              std::max({reference, force, 1e-12});
           r.macro_cell_density_coefficient = macro_cell_scale;
         }
@@ -2214,9 +2796,10 @@ Result place(Design &design, const Options &options, GpState *state) {
         macro_routing_channels_peak =
             std::max(macro_routing_channels_peak, macro_routing_channels);
       }
-      if (fixed_macro_weight > 0) {
+      if (fixed_macro_weight > 0 && !transparent) {
         const auto og = detail::fixed_macro_overlap(
-            d, o.bins_x, o.bins_y, fixed_macro_weight * progress * progress);
+            d, o.bins_x, o.bins_y, fixed_macro_weight * progress * progress,
+            exclusion_scale);
         for (int i = 0; i < d.num_movable; ++i) {
           wg.x[i] += og.x[i];
           wg.y[i] += og.y[i];
@@ -2392,7 +2975,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       double max_grad = 0, ss = 0, yy = 0;
       std::vector<double> gx(n), gy(n);
       for (int i = 0; i < n; ++i) {
-        if (active(i)) {
+        if (can_move(i)) {
           const double pre = placement_preconditioner(d, i, density_weight);
           double cell_density_weight = density_weight;
           if (o.routability && !spread_mobility.empty() && inflation[i] > 1) {
@@ -2428,7 +3011,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       prev_y = y;
       double macro_momentum_work = 0;
       for (int i = 0; i < n; ++i) {
-        if (active(i)) {
+        if (can_move(i)) {
           x[i] = d.node_x[i] - alpha * gx[i];
           y[i] = d.node_y[i] - alpha * gy[i];
           project(i, x[i], y[i]);
@@ -2446,6 +3029,58 @@ Result place(Design &design, const Options &options, GpState *state) {
       // routing force or changing the step/curvature estimate.
       t = o.magnet_runtime && macro_momentum_work > 0 ? 1 : nt;
       r.iterations = iter + 1;
+      // Decrement after this step, before installing newly requested holds.
+      // A hold changes only motion, never net forces or density accounting.
+      for (auto &remaining : movable_holds) {
+        if (remaining > 0) {
+          --remaining;
+        }
+      }
+      if (movable_updates_active &&
+          (global_iter + 1) % o.movable_interval == 0) {
+        Design snapshot = model;
+        std::copy_n(x.begin(), original, snapshot.node_x.begin());
+        std::copy_n(y.begin(), original, snapshot.node_y.begin());
+        const auto updates = o.movable_update(snapshot, global_iter + 1);
+        std::vector<bool> seen(original);
+        bool changed = false;
+        for (const auto &position : updates) {
+          const int i = position.node;
+          require(i >= 0 && i < d.num_movable &&
+                      (d.node_macro.empty() || !d.node_macro[i]) && !seen[i] &&
+                      finite(position.x) && finite(position.y) &&
+                      position.fix_iterations >= 0,
+                  "invalid movable standard-cell update");
+          double px = position.x, py = position.y;
+          project(i, px, py);
+          require(std::abs(px - position.x) <= 1e-6 &&
+                      std::abs(py - position.y) <= 1e-6,
+                  "movable update outside legal origin bounds");
+          seen[i] = true;
+          changed |= x[i] != px || y[i] != py;
+          changed |= position.fix_iterations > 0;
+        }
+        for (const auto &position : updates) {
+          const int i = position.node;
+          x[i] = d.node_x[i] = model.node_x[i] = position.x;
+          y[i] = d.node_y[i] = model.node_y[i] = position.y;
+          movable_holds[i] = position.fix_iterations;
+        }
+        if (changed) {
+          t = 1;
+          prev_x = x;
+          prev_y = y;
+          restart = true;
+          last_checkpoint = global_iter + 1;
+          convergence.previous_hpwl = -1;
+          convergence.previous_inflation = -1;
+          convergence.stable_samples = 0;
+          previous_hpwl = -1;
+          best_feasible_x.clear();
+          best_feasible_y.clear();
+          best_feasible_hpwl = std::numeric_limits<double>::infinity();
+        }
+      }
       if (o.terminal_update && o.terminal_interval > 0 &&
           (global_iter + 1) % o.terminal_interval == 0) {
         Design snapshot = model;
@@ -2493,7 +3128,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         std::optional<std::vector<MacroPull>> replacement;
         if (!o.macro_pull_after_density ||
             overflow(snapshot, o.bins_x, o.bins_y, o.target_density,
-                     o.scale_macro_density) <= o.stop_overflow) {
+                     o.scale_macro_density,
+                     o.macro_transparency.always) <= o.stop_overflow) {
           replacement = o.macro_pull_update(snapshot, global_iter + 1);
         }
         if (replacement) {
@@ -2530,6 +3166,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           (iter + 1 == o.max_iterations ||
            (convergence.deadline && global_iter + 1 == convergence.deadline));
       if (o.checkpoint && o.checkpoint_interval > 0 &&
+          global_iter + 1 >= o.checkpoint_start &&
           ((global_iter + 1) % o.checkpoint_interval == 0 ||
            forced_checkpoint ||
            (o.checkpoint_final && iter + 1 == o.max_iterations))) {
@@ -2540,7 +3177,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         if (density_gated_checkpoints) {
           const double measured =
               overflow(snapshot, o.bins_x, o.bins_y, o.target_density,
-                       o.scale_macro_density);
+                       o.scale_macro_density, o.macro_transparency.always,
+                       exclusion_scale);
           invoke = forced_checkpoint || measured <= o.stop_overflow;
           r.checkpoint_history.push_back(
               {global_iter + 1, measured, invoke, forced_checkpoint});
@@ -2556,6 +3194,9 @@ Result place(Design &design, const Options &options, GpState *state) {
             o.magnet_runtime->event(global_iter + 1, MagnetEvent::timing);
           }
         }
+        if (update.stop_movable_updates) {
+          movable_updates_active = false;
+        }
         if (update.timing_violation) {
           require(finite(*update.timing_violation) &&
                       *update.timing_violation >= 0,
@@ -2565,6 +3206,10 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         bool objective_changed = update.replacement.has_value();
         if (update.replacement) {
+          require(!o.gp_search.enabled,
+                  "GP A/B search requires fixed topology checkpoints");
+          require(!movable_updates_active,
+                  "retire movable updates before topology checkpoints");
           macro_pulls.clear();
           macro_pull_changed = -1;
           require(update.net_weights.empty() && update.node_size_x.empty() &&
@@ -2620,6 +3265,8 @@ Result place(Design &design, const Options &options, GpState *state) {
                       "GP replacement inserted a macro or fixed node");
               continue;
             }
+            require(candidate.placement_mask(i) == d.placement_mask(old),
+                    "GP replacement changed placement-mask semantics");
             require(!seen[old], "duplicate GP replacement node mapping");
             seen[old] = true;
             require((i < candidate.num_movable) == (old < d.num_movable) &&
@@ -2655,6 +3302,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           candidate.build_maps();
           d = std::move(candidate);
           original = size;
+          movable_holds.assign(d.num_movable, 0);
           n = count(d.node_x.size());
           inflation = std::move(next_inflation);
           x = d.node_x;
@@ -2669,6 +3317,14 @@ Result place(Design &design, const Options &options, GpState *state) {
           old_ex = x;
           old_ey = y;
           align_pairs = alignment_pairs(d);
+          // A saved feasible point belongs to the old netlist and dimensions.
+          best_feasible_x.clear();
+          best_feasible_y.clear();
+          best_feasible_hpwl = std::numeric_limits<double>::infinity();
+          // Recompute density-step scaling for the new graph. Memory geometry
+          // remains fixed; the next iteration reapplies its current schedule.
+          density_initialized = false;
+          alpha = 0;
         } else {
           Design candidate = model;
           auto assign = [](auto &to, const auto &from) {
@@ -2798,13 +3454,15 @@ Result place(Design &design, const Options &options, GpState *state) {
           previous_hpwl = hpwl(model);
         }
       }
-      if (step_recorder)
+      if (step_recorder) {
         step_recorder->observe(model, x, y, global_iter + 1);
+      }
       if (o.magnet_runtime) {
         o.magnet_runtime->observe(model, x, y, global_iter + 1);
       }
-      if (o.macro_motion_observer)
+      if (o.macro_motion_observer) {
         o.macro_motion_observer(model, x, y, global_iter + 1);
+      }
       if (o.observer && r.iterations % o.observer_interval == 0) {
         Design physical = model;
         std::copy_n(x.begin(), original, physical.node_x.begin());
@@ -2817,7 +3475,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         std::copy_n(x.begin(), original, physical.node_x.begin());
         std::copy_n(y.begin(), original, physical.node_y.begin());
         r.overflow = overflow(physical, o.bins_x, o.bins_y, o.target_density,
-                              o.scale_macro_density);
+                              o.scale_macro_density,
+                              o.macro_transparency.always, exclusion_scale);
         const double current_hpwl = hpwl(physical);
         const double selection_cost =
             current_hpwl +
@@ -2826,8 +3485,8 @@ Result place(Design &design, const Options &options, GpState *state) {
                                                fixed_macro_weight)
                        .value
                  : 0);
-        if (keep_feasible && global_iter >= 39 && inflated_ratio == 1 &&
-            (!fixed_macro_weight || progress >= 1) &&
+        if (keep_feasible && opacity_settled && global_iter >= 39 &&
+            inflated_ratio == 1 && (!fixed_macro_weight || progress >= 1) &&
             r.overflow <= o.stop_overflow &&
             selection_cost < best_feasible_hpwl) {
           best_feasible_hpwl = selection_cost;
@@ -2852,6 +3511,10 @@ Result place(Design &design, const Options &options, GpState *state) {
              route_overflow, inflated_ratio, overlaps.first, overlaps.second,
              overflow(physical, o.bins_x, o.bins_y, o.target_density), target,
              filler_scale, align_pairs.size(), align_residual, align_ramp});
+        r.history.back().macro_opacity = transparent ? 0 : 1;
+        r.history.back().macro_exclusion_scale =
+            transparent ? 0 : exclusion_scale;
+        r.history.back().local_density_weight = local_weight;
         if (align_centroids) {
           detail::centroid_alignment(physical, 0, 0, o.centroid_align_sigma,
                                      o.target_density, &centroid_align_pairs,
@@ -2893,7 +3556,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           r.centroid.effective_repulsion_weight = centroid_repulsion_weight;
         }
         const bool settled =
-            global_iter + 1 >= o.min_iterations &&
+            opacity_settled && global_iter + 1 >= o.min_iterations &&
             r.overflow <= o.stop_overflow &&
             (!o.macro_align_weight || global_iter >= o.macro_align_full) &&
             (!align_centroids || global_iter >= o.centroid_align_full) &&
@@ -2906,6 +3569,8 @@ Result place(Design &design, const Options &options, GpState *state) {
                                           o.macro_pull_settle_iterations;
         const bool geometry_ready =
             geometry_feasible && global_iter + 1 > last_checkpoint &&
+            std::none_of(movable_holds.begin(), movable_holds.end(),
+                         [](int hold) { return hold > 0; }) &&
             macro_pulls_ready &&
             (!density_gated_checkpoints || checkpoint_invoked);
         if (o.post_density_factor) {
@@ -2991,13 +3656,14 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         const bool magnet_ready =
             !o.magnet_runtime || o.magnet_runtime->ready(global_iter + 1);
-        if (magnet_ready && geometry_ready &&
+        if (!o.trial_tuning && magnet_ready && geometry_ready &&
             ((!o.post_density_factor && !probe_deadline) ||
              r.objective_converged)) {
           r.converged = true;
           break;
         }
-        if (r.continuation_limit && macro_pulls_ready && magnet_ready) {
+        if (!o.trial_tuning && r.continuation_limit && macro_pulls_ready &&
+            magnet_ready) {
           break;
         }
         if (separate_circles && global_iter + 1 >= o.centroid_ramp &&
@@ -3106,8 +3772,8 @@ Result place(Design &design, const Options &options, GpState *state) {
   r.global_placement_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - gp_start)
           .count();
-  r.overflow =
-      overflow(d, o.bins_x, o.bins_y, o.target_density, o.scale_macro_density);
+  r.overflow = overflow(d, o.bins_x, o.bins_y, o.target_density,
+                        o.scale_macro_density, o.macro_transparency.always);
   if (separate_circles) {
     const auto circles = detail::centroid_circle_overlaps(d, o.target_density);
     r.centroid.circle_overlaps = circles.overlaps;

@@ -149,6 +149,40 @@ int main() {
     near(wide.blocked_fraction[4 * 10 + 4], 1);
     near(wide.horizontal[4 * 10 + 4], 0);
     near(wide.vertical[4 * 10 + 4], 0);
+    // Centered growth scales both dimensions, not just blockage charge.
+    // Include a real macro pin: shrinking its body must not move the pin.
+    auto growing = corridor;
+    growing.pin2node[0] = 2;
+    growing.pin_offset_x[0] = 0;
+    growing.pin_offset_y[0] = 10;
+    growing.build_maps();
+    for (double scale : {0., .1, .5, 1.}) {
+      auto opts = hard;
+      opts.fixed_macro_scale = scale;
+      opts.pin_access = true;
+      const auto measured = rudy(growing, opts);
+      auto explicit_body = growing;
+      const double inset = 10 * (1 - scale);
+      explicit_body.node_x[2] += inset;
+      explicit_body.node_y[2] += inset;
+      explicit_body.node_size_x[2] *= scale;
+      explicit_body.node_size_y[2] *= scale;
+      explicit_body.pin_offset_x[0] -= inset;
+      explicit_body.pin_offset_y[0] -= inset;
+      opts.fixed_macro_scale = 1;
+      const auto expected = rudy(explicit_body, opts);
+      check(measured.blocked_fraction == expected.blocked_fraction);
+      check(measured.horizontal == expected.horizontal &&
+            measured.vertical == expected.vertical);
+      check(measured.pin_utilization == expected.pin_utilization);
+      double area = 0;
+      for (double fraction : measured.blocked_fraction)
+        area += fraction * 100;
+      near(area, 400 * scale * scale);
+    }
+    auto invalid_scale = hard;
+    invalid_scale.fixed_macro_scale = 1.1;
+    rejects([&] { rudy(corridor, invalid_scale); });
     double hwire = 0, vwire = 0;
     for (int k = 0; k < 100; ++k) {
       hwire += wide.horizontal[k] * 100 * .1 * (1 - wide.blocked_fraction[k]);

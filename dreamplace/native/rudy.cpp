@@ -24,6 +24,9 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
   if (o.degree < 2 || o.degree > 1000 || o.accuracy < 1 || o.accuracy > 10)
     throw std::invalid_argument(
         "invalid FLUTE degree (2..1000) or accuracy (1..10)");
+  if (!std::isfinite(o.fixed_macro_scale) || o.fixed_macro_scale < 0 ||
+      o.fixed_macro_scale > 1)
+    throw std::invalid_argument("invalid fixed macro exclusion scale");
   RudyResult r;
   r.horizontal.resize(o.bins_x * o.bins_y);
   r.vertical.resize(o.bins_x * o.bins_y);

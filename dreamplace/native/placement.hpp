@@ -62,6 +62,8 @@ struct CentroidSample {
   double area = 0; // physical anchored area; fillers/halo padding excluded
   int cells = 0, macros = 0;
 };
+enum class PlacementMask : std::uint8_t { none, hard, soft };
+
 struct Design {
   Layout layout;
   std::vector<CohesionGroup> cohesion_groups;
@@ -74,6 +76,14 @@ struct Design {
   std::vector<double> centroid_node_area; // physical weights, not halo area
   // Explicit non-standard-cell identity, independent of geometry/row height.
   std::vector<std::uint8_t> node_macro;
+  // Fixed, pinless placement-only geometry, never a routing obstruction.
+  // Hard masks represent missing sites; soft masks guide GP but are ignored
+  // by legalization/detail, allowing repair cells in reserved channels.
+  std::vector<PlacementMask> node_placement_mask;
+  PlacementMask placement_mask(size_t i) const {
+    return i < node_placement_mask.size() ? node_placement_mask[i]
+                                          : PlacementMask::none;
+  }
   // Host alignment identity; -1 opts a node out. LiveHD uses master x color
   // normally, and master alone for global strip-grid alignment.
   std::vector<int> node_align_class;
@@ -145,6 +155,9 @@ using PlacementObserver =
 // macro/fixed geometry are preserved; momentum restarts after topology changes.
 // Empty vectors preserve fields; do not combine them with replacement.
 struct GpUpdate {
+  // Permanently retire the movable-update hook before applying this update.
+  // Existing temporary holds expire normally unless topology is replaced.
+  bool stop_movable_updates = false;
   // Optional nonnegative setup violation from the host STA at this checkpoint.
   std::optional<double> timing_violation;
   std::vector<double> net_weights, node_size_x, node_size_y;
@@ -158,6 +171,12 @@ struct GpCheckpointSample;
 struct TerminalPosition {
   int node = -1;
   double x = 0, y = 0;
+};
+struct MovablePosition {
+  int node = -1;
+  double x = 0, y = 0;
+  int fix_iterations =
+      0; // hold for this many subsequent GP steps, then release
 };
 enum class RouteModel { off, rudy, rsmt, automatic };
 const char *route_model_name(RouteModel model);
@@ -192,6 +211,55 @@ struct MagnetMacroFrame;
 namespace detail {
 class MagnetRuntime;
 }
+struct MacroTransparency {
+  // Zero cycles with always=false preserves the original GP exactly. Fixed
+  // macro bodies (also host-created macro-shaped blockage masks) remain
+  // physically immutable.
+  int cycles = 0, warmup = 100, period = 20;
+  bool always = false; // diagnostic: transparent for the entire GP solve
+  bool enabled() const { return always || cycles > 0; }
+};
+// completed_steps is zero-based: warmup=100 first disables step 101.
+bool macro_transparent(const MacroTransparency &, int completed_steps);
+// One-based GP step: zero body through 100, full body at 200.
+double vanished_memory_scale(int iteration);
+double vanished_memory_local_weight(double initial, int iteration,
+                                    double floor = 0);
+// Opt-in, within-run speculative final-GP search. All candidates share the
+// same timing weights and complete optimizer/filler checkpoint. Host timing
+// is scored serially after parallel native trials; it must not change weights.
+struct GpTrialTuning {
+  double filler_charge = 1, local_weight = 0;
+};
+struct GpTrialScore {
+  double route_overflow = 0, wns = 0, hpwl = 0, tns = 0;
+  double physical_overflow = 0;
+  // Separate geometric access failures from capacity overflow. Counts are
+  // unweighted active nets/pins; overflow already includes their penalties.
+  int route_unroutable_nets = 0, route_blocked_pins = 0,
+      route_measured_nets = 0;
+  double route_congestion_overflow = 0, route_peak_utilization = 0;
+  double route_detour_wirelength = 0;
+};
+struct GpTrialSample {
+  int iteration = 0, steps = 0, round = 0, selected = 0;
+  bool adjusting_fillers = false;
+  std::string reason;
+  GpTrialScore before;
+  std::vector<GpTrialTuning> settings;
+  std::vector<GpTrialScore> scores;
+};
+struct GpSearch {
+  bool enabled = false;
+  // Zero rounds keeps adapting until the final settling window.
+  int start = 220, interval = 40, steps = 3, rounds = 0;
+  double filler_step = .2, local_step = .1;
+  // Lexicographic near-best filtering; comparisons always use the best value
+  // of the remaining set, avoiding non-transitive pairwise epsilon ordering.
+  double route_tolerance = .01, timing_tolerance = .01, hpwl_tolerance = .005;
+};
+int select_gp_trial(const std::vector<GpTrialScore> &, const GpSearch &,
+                    std::string *reason = nullptr);
 struct Options {
   MagnetOptions magnet;
   // Host feasibility check before selecting a rigid macro merge. Members use
@@ -212,6 +280,16 @@ struct Options {
   // rebase across merges/snap, rather than counting their packing jumps.
   std::function<void(int, double, bool)> macro_step_observer;
   int iteration_offset = 0;
+  GpSearch gp_search;
+  // Internal branch continuation only; no host callback runs in worker threads.
+  std::optional<GpTrialTuning> trial_tuning;
+  std::function<std::pair<double, double>(const Design &)> trial_timing;
+  std::function<void(const GpTrialSample &)> trial_observer;
+  MacroTransparency macro_transparency;
+  bool vanished_memory =
+      false; // final GP: grow fixed exclusion while reducing local pressure
+  double vanished_memory_local_floor =
+      0; // retain this local weight after the ramp
   // Safe GP boundary independent of timing. nullopt retains targets; an empty
   // vector clears them. A replacement atomically validates and restarts
   // momentum.
@@ -226,7 +304,16 @@ struct Options {
   int terminal_interval = 0;
   std::function<std::vector<TerminalPosition>(const Design &, int)>
       terminal_update;
+  // One-shot host relocations at safe GP boundaries, in physical coordinates.
+  // Only movable standard cells may change. Fillers are hidden, fixed geometry
+  // is immutable, and momentum/selected-iterate history restarts after a move.
+  int movable_interval = 0;
+  std::function<std::vector<MovablePosition>(const Design &, int)>
+      movable_update;
   int checkpoint_interval = 0;
+  // No in-loop checkpoint or A/B timing evaluation before this global step.
+  // Host final-placement reporting callbacks are independent of this gate.
+  int checkpoint_start = 0;
   bool checkpoint_final =
       false; // also sample the iteration cap, without double-calling
   // Defer checkpoints above stop_overflow. Always invoke at the iteration or
@@ -435,6 +522,8 @@ struct GpSample {
   int magnet_round = 0, magnet_groups = 0;
   double macro_move_max = 0, macro_move_rms = 0;
   int last_instability_iteration = 0;
+  double macro_opacity = 1;
+  double macro_exclusion_scale = 1, local_density_weight = 0;
 };
 struct CentroidReport {
   bool started = false, completed = false;
@@ -636,7 +725,8 @@ double centroid_cell_area(const Design &);
 std::vector<CentroidSample> centroid_summary(const Design &);
 // Squared exact intersection area, normalized by pair size for unit invariance.
 Gradient macro_overlap(const Design &, double weight);
-Gradient fixed_macro_overlap(const Design &, int bx, int by, double weight);
+Gradient fixed_macro_overlap(const Design &, int bx, int by, double weight,
+                             double exclusion_scale = 1);
 std::pair<std::uint64_t, std::uint64_t> macro_overlap_counts(const Design &);
 std::pair<int, int> automatic_bins(const Design &d);
 std::pair<int, int> dynamic_bins(const Design &d, double target, int maximum);

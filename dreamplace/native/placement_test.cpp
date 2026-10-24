@@ -1,5 +1,6 @@
 // BSD-3-Clause. See LICENSE. Checks deliberately remain active under -c opt.
 #include "dreamplace/native/placement.hpp"
+#include "dreamplace/native/rudy.hpp"
 
 #include <array>
 #include <barrier>
@@ -40,6 +41,77 @@ template <typename F> void rejects(F f) {
   }
   check(rejected, "expected rejection");
 }
+void placement_masks() {
+  // A full-height placement-only strip must not sever an estimated signal.
+  Design d;
+  d.layout = {0, 0, 20, 4, 1, 1};
+  d.node_x = {9, 0, 20};
+  d.node_y = {0, 2, 2};
+  d.node_size_x = {2, 0, 0};
+  d.node_size_y = {4, 0, 0};
+  d.node_macro = {1, 0, 0};
+  d.pin2node = {1, 2};
+  d.pin_offset_x = d.pin_offset_y = {0, 0};
+  d.flat_net2pin = {0, 1};
+  d.flat_net2pin_start = {0, 2};
+  d.net_weights = {1};
+  d.build_maps();
+  RudyOptions route;
+  route.bins_x = 10;
+  route.bins_y = 2;
+  route.macro_blockages = route.pin_access = true;
+  route.model = RudyModel::rsmt;
+  check(rudy(d, route).unroutable_nets == 1,
+        "real macro wall must block routing");
+  for (auto kind : {PlacementMask::hard, PlacementMask::soft}) {
+    d.node_placement_mask = {kind, PlacementMask::none, PlacementMask::none};
+    const auto result = rudy(d, route);
+    check(result.unroutable_nets == 0 && result.blocked_pins == 0,
+          "placement-only wall must allow routing");
+    for (double f : result.blocked_fraction)
+      check(f == 0, "mask reduced routing capacity");
+  }
+  auto bad = d;
+  bad.node_placement_mask[1] = PlacementMask::hard;
+  rejects([&] { bad.validate(); }); // A pin-bearing object cannot be a mask.
+  bad = d;
+  bad.node_placement_mask.resize(1);
+  rejects([&] { bad.validate(); });
+  // A repair buffer has space only in the soft strip between two hard masks.
+  Design cells;
+  cells.layout = {0, 0, 20, 4, 1, 1};
+  cells.num_movable = 1;
+  cells.node_x = {9, 0, 8, 12};
+  cells.node_y = {1, 0, 0, 0};
+  cells.node_size_x = {2, 8, 4, 8};
+  cells.node_size_y = {1, 4, 4, 4};
+  cells.node_macro = {0, 1, 1, 1};
+  cells.node_placement_mask = {PlacementMask::none, PlacementMask::hard,
+                               PlacementMask::soft, PlacementMask::hard};
+  cells.build_maps();
+  check(is_legal(cells), "buffer in a soft channel should be legal");
+  check(detail::kernel_is_legal(cells), "row checker must release soft masks");
+  const auto sizes = cells.node_size_x;
+  Options options;
+  options.max_iterations = 0;
+  options.routability = false;
+  options.bins_x = options.bins_y = 2;
+  check(place(cells, options).legal,
+        "buffer legalization in a soft channel failed");
+  check(cells.node_x[0] >= 8 && cells.node_x[0] + 2 <= 12,
+        "buffer crossed a hard placement exclusion");
+  check(cells.node_size_x == sizes, "legalization changed mask geometry");
+  auto occupied = cells;
+  occupied.node_placement_mask[2] = PlacementMask::none;
+  check(!is_legal(occupied), "real macro overlap was allowed");
+  occupied = cells;
+  occupied.node_placement_mask[2] = PlacementMask::hard;
+  check(!is_legal(occupied), "hard mask overlap was allowed");
+  // Both masks retain identical GP density charge despite different legality.
+  near(density_overflow(cells, 2, 2, .5), density_overflow(occupied, 2, 2, .5),
+       1e-12, "soft mask lost its GP density charge");
+}
+
 Design design() {
   Design d;
   d.layout = {10, 20, 50, 30, 1, 1};
@@ -863,6 +935,326 @@ void halos() {
         "failed halo placement mutated input");
 }
 
+void transparent_macros() {
+  MacroTransparency schedule{5, 100, 20};
+  for (int i = 0; i < 1000; ++i) {
+    const bool expected = i >= 100 && i < 300 && (i / 20) % 2 == 1;
+    check(macro_transparent(schedule, i) == expected,
+          "wrong transparency phase boundary");
+    check(!macro_transparent({}, i), "default transparency must be disabled");
+  }
+  Options o;
+  o.bins_x = o.bins_y = 8;
+  o.num_threads = 1;
+  o.min_iterations = o.max_iterations = 120;
+  o.legalize = o.detailed_place = false;
+  o.add_fillers = true;
+  o.filler_max_count = 64;
+  o.target_density = .5;
+  o.fixed_macro_overlap_weight = 1;
+  auto base = design();
+  base.node_macro.assign(base.node_x.size(), 0);
+  base.node_macro[6] = 1;
+  auto plain = base, cycle = base;
+  const auto baseline = place(plain, o);
+  o.macro_transparency = {2, 20, 20};
+  const auto result = place(cycle, o);
+  check(result.iterations == 120,
+        "transparency stopped before opaque settling");
+  check(result.filler_count == baseline.filler_count &&
+            result.filler_area == baseline.filler_area,
+        "transparency changed the filler population");
+  check(result.history.size() == 6, "missing transparency phase samples");
+  for (const auto &s : result.history) {
+    const bool transparent = s.iteration == 40 || s.iteration == 80;
+    near(s.macro_opacity, transparent ? 0 : 1, 0,
+         "wrong reported macro opacity");
+    const double effective_fixed = transparent ? 0 : 8;
+    const double expected_scale =
+        (.5 * (400 - effective_fixed) - 12) / result.filler_area;
+    near(s.filler_charge_scale, expected_scale, 1e-12,
+         "inconsistent transparent filler charge");
+    if (s.iteration == 20) {
+      near(s.hpwl, baseline.history[0].hpwl, 0,
+           "transparency changed warmup HPWL");
+      near(s.overflow, baseline.history[0].overflow, 0,
+           "transparency changed warmup density");
+    }
+  }
+  check(plain.node_x != cycle.node_x || plain.node_y != cycle.node_y,
+        "transparency did not affect movement");
+  for (int i = base.num_movable; i < int(base.node_x.size()); ++i) {
+    near(cycle.node_x[i], base.node_x[i], 0, "transparency moved a fixed node");
+    near(cycle.node_y[i], base.node_y[i], 0, "transparency moved a fixed node");
+  }
+  check(cycle.node_size_x == base.node_size_x &&
+            cycle.pin_offset_x == base.pin_offset_x &&
+            cycle.flat_net2pin == base.flat_net2pin,
+        "transparency changed physical geometry/connectivity");
+  // The final legalizer receives fully opaque original physical geometry.
+  auto legal = base;
+  o.legalize = true;
+  check(place(legal, o).legal && is_legal(legal),
+        "transparent-phase overlap escaped legalization");
+  o.legalize = false;
+  auto invalid = base;
+  o.max_iterations = 100;
+  rejects([&] { place(invalid, o); });
+  check(invalid.node_x == base.node_x,
+        "invalid transparency schedule mutated input");
+  o.max_iterations = 120;
+  GpState state;
+  rejects([&] { place(invalid, o, &state); });
+  invalid.node_macro[0] = 1;
+  rejects([&] { place(invalid, o); });
+
+  // Permanent transparency must behave like zero-area fixed terminals with
+  // identical pin coordinates, including density feedback and the GP forces.
+  o.macro_transparency = {};
+  o.macro_transparency.always = true;
+  o.add_fillers = false;
+  auto always = base;
+  std::vector<double> physical_overflows;
+  o.observer_interval = 20;
+  o.observer = [&](const Design &snapshot, PlacementStage stage, int) {
+    if (stage == PlacementStage::global_placement) {
+      physical_overflows.push_back(density_overflow(snapshot, 8, 8, .5));
+    }
+  };
+  const auto all = place(always, o);
+  for (const auto &sample : all.history) {
+    near(sample.macro_opacity, 0, 0, "permanent transparency became opaque");
+    near(sample.raw_overflow, physical_overflows[sample.iteration / 20 - 1],
+         1e-12, "raw overflow lost physical macro occupancy");
+  }
+  auto zero_area = base;
+  zero_area.node_size_x[6] = zero_area.node_size_y[6] = 0;
+  o.macro_transparency.always = false;
+  o.fixed_macro_overlap_weight = 0;
+  o.observer = {};
+  const auto reference = place(zero_area, o);
+  check(always.node_x == zero_area.node_x && always.node_y == zero_area.node_y,
+        "transparent macro differs from fixed pins without a body");
+  near(all.overflow, reference.overflow, 0,
+       "transparent overflow still subtracts macro area");
+  check(always.node_size_x == base.node_size_x &&
+            always.node_size_y == base.node_size_y &&
+            always.pin_offset_x == base.pin_offset_x &&
+            always.pin_offset_y == base.pin_offset_y &&
+            always.flat_net2pin == base.flat_net2pin,
+        "permanent transparency changed macro geometry or pins");
+  for (int i = base.num_movable; i < int(base.node_x.size()); ++i) {
+    near(always.node_x[i], base.node_x[i], 0,
+         "permanent transparency moved fixed x");
+    near(always.node_y[i], base.node_y[i], 0,
+         "permanent transparency moved fixed y");
+  }
+  o.macro_transparency.always = true;
+  o.add_fillers = true;
+  auto filled = base;
+  const auto fill = place(filled, o);
+  near(fill.history.front().filler_charge_scale,
+       (.5 * 400 - 12) / fill.filler_area, 1e-12,
+       "permanent transparency did not compensate fillers from step one");
+  o.legalize = true;
+  auto final_legal = base;
+  check(place(final_legal, o).legal && is_legal(final_legal),
+        "permanent transparent GP changed final physical legality");
+  o.macro_transparency.cycles = 1;
+  rejects([&] { place(invalid, o); });
+}
+
+void vanished_memories() {
+  near(vanished_memory_scale(100), 0, 0, "memory vanished through 100");
+  near(vanished_memory_scale(101), .01, 0, "memory growth starts at 101");
+  near(vanished_memory_scale(110), .1, 0, "memory width at 110");
+  near(vanished_memory_scale(150), .5, 0, "memory width at 150");
+  near(vanished_memory_scale(200), 1, 0, "memory full at 200");
+  near(vanished_memory_scale(1000), 1, 0, "memory stays full");
+  near(vanished_memory_local_weight(.67, 100), .67, 0,
+       "local holds through 100");
+  near(vanished_memory_local_weight(.67, 101), .62, 1e-12,
+       "local starts falling at 101");
+  near(vanished_memory_local_weight(.67, 113), .02, 1e-12,
+       "local ramp before zero");
+  near(vanished_memory_local_weight(.67, 114), 0, 0,
+       "local reaches zero at 114");
+  near(vanished_memory_local_weight(.67, 111, .1), .12, 1e-12,
+       "local ramp before retained floor");
+  near(vanished_memory_local_weight(.67, 112, .1), .1, 0,
+       "local reaches retained floor at 112");
+  near(vanished_memory_local_weight(.67, 1000, .1), .1, 0,
+       "local floor persists after memory growth");
+  auto base = design();
+  base.node_macro.assign(base.node_x.size(), 0);
+  base.node_macro[6] = 1;
+  Options o;
+  o.vanished_memory = true;
+  o.min_iterations = o.max_iterations = 340;
+  o.bins_x = o.bins_y = 8;
+  o.local_density_bins = 16;
+  o.local_density_weight = .67;
+  o.local_density_target = .05;
+  o.local_density_jitter = 0;
+  o.num_threads = 1;
+  o.target_density = .5;
+  o.add_fillers = true;
+  o.filler_max_count = 64;
+  o.fixed_macro_overlap_weight = 1;
+  o.legalize = true;
+  o.detailed_place = false;
+  std::vector<double> expected;
+  o.observer_interval = 20;
+  o.observer = [&](const Design &d, PlacementStage stage, int it) {
+    check(d.node_size_x == base.node_size_x &&
+              d.node_size_y == base.node_size_y &&
+              d.pin_offset_x == base.pin_offset_x &&
+              d.pin_offset_y == base.pin_offset_y,
+          "memory growth leaked into physical geometry or pins");
+    for (int i = base.num_movable; i < int(base.node_x.size()); ++i) {
+      near(d.node_x[i], base.node_x[i], 0, "memory growth moved fixed x");
+      near(d.node_y[i], base.node_y[i], 0, "memory growth moved fixed y");
+    }
+    if (stage == PlacementStage::global_placement) {
+      auto body = d;
+      const double scale = vanished_memory_scale(it);
+      body.node_x[6] += body.node_size_x[6] * (1 - scale) / 2;
+      body.node_y[6] += body.node_size_y[6] * (1 - scale) / 2;
+      body.node_size_x[6] *= scale;
+      body.node_size_y[6] *= scale;
+      expected.push_back(density_overflow(body, 8, 8, .5));
+    }
+  };
+  for (double floor : {0., .1}) {
+    o.vanished_memory_local_floor = floor;
+    expected.clear();
+    auto d = base;
+    const auto result = place(d, o);
+    check(result.legal && is_legal(d), "vanished-memory final legality");
+    check(result.iterations == 340 && result.history.size() == 17,
+          "schedule ended early");
+    for (size_t i = 0; i < result.history.size(); ++i) {
+      const auto &h = result.history[i];
+      const double scale = vanished_memory_scale(h.iteration);
+      near(h.macro_exclusion_scale, scale, 0, "wrong memory extent report");
+      near(h.local_density_weight,
+           vanished_memory_local_weight(.67, h.iteration, floor), 0,
+           "wrong local report");
+      near(h.overflow, expected[i], 1e-12,
+           "density still uses full memory geometry");
+      near(h.filler_charge_scale,
+           (.5 * (400 - 8 * scale * scale) - 12) / result.filler_area, 1e-12,
+           "filler charge disagrees with grown memory area");
+    }
+  }
+  o.observer = {};
+  o.macro_transparency.always = true;
+  auto bad = base;
+  rejects([&] { place(bad, o); });
+  o.macro_transparency.always = false;
+  o.max_iterations = 200;
+  rejects([&] { place(bad, o); });
+  o.max_iterations = 340;
+  o.vanished_memory_local_floor = -.1;
+  rejects([&] { place(bad, o); });
+  o.vanished_memory_local_floor = .68;
+  rejects([&] { place(bad, o); });
+  o.vanished_memory_local_floor = .1;
+  o.vanished_memory = false;
+  rejects([&] { place(bad, o); });
+  check(bad.node_x == base.node_x, "invalid growth schedule changed input");
+}
+
+void moving_cells() {
+  Options o;
+  o.max_iterations = o.min_iterations = 4;
+  o.bins_x = o.bins_y = 8;
+  o.legalize = o.detailed_place = false;
+  o.num_threads = 1;
+  auto plain = design(), off = plain;
+  place(plain, o);
+  o.movable_update = [](const Design &, int) -> std::vector<MovablePosition> {
+    throw std::runtime_error("disabled movable callback was called");
+  };
+  place(off, o);
+  check(plain.node_x == off.node_x && plain.node_y == off.node_y,
+        "disabled movable update changed GP");
+  o.movable_interval = 4;
+  for (bool haloed : {false, true}) {
+    auto d = design();
+    d.node_macro.assign(d.node_x.size(), 0);
+    d.node_macro[6] = 1;
+    if (haloed) {
+      d.node_halo_x.assign(d.node_x.size(), 0);
+      d.node_halo_y.assign(d.node_x.size(), 0);
+      d.node_halo_x[0] = d.node_halo_y[0] = 1;
+    }
+    const auto before = d;
+    int calls = 0;
+    o.add_fillers = true;
+    o.target_density = .8;
+    o.filler_max_count = 64;
+    o.movable_update = [&](const Design &snapshot, int iteration) {
+      ++calls;
+      check(iteration == 4 && snapshot.node_x.size() == before.node_x.size(),
+            "movable callback iteration or filler isolation");
+      check(snapshot.node_size_x == before.node_size_x &&
+                snapshot.pin_offset_x == before.pin_offset_x,
+            "movable callback must see physical halo geometry");
+      return std::vector<MovablePosition>{{0, 12, 22}};
+    };
+    place(d, o);
+    check(calls == 1, "missing movable callback");
+    near(d.node_x[0], 12, 0, "jumped x overwritten by stale iterate");
+    near(d.node_y[0], 22, 0, "jumped y overwritten by stale iterate");
+    for (int i = d.num_movable; i < int(d.node_x.size()); ++i) {
+      near(d.node_x[i], before.node_x[i], 0, "jump moved fixed x");
+      near(d.node_y[i], before.node_y[i], 0, "jump moved fixed y");
+    }
+    for (auto invalid : std::vector<std::vector<MovablePosition>>{
+             {{6, 12, 22}},
+             {{0, 12, 22}, {0, 13, 22}},
+             {{-1, 12, 22}},
+             {{0, -100, 22}},
+             {{0, std::numeric_limits<double>::quiet_NaN(), 22}}}) {
+      auto candidate = before;
+      o.movable_update = [invalid](const Design &, int) { return invalid; };
+      rejects([&] { place(candidate, o); });
+      check(candidate.node_x == before.node_x &&
+                candidate.node_y == before.node_y,
+            "invalid jump mutated caller design");
+    }
+  }
+  auto d = design();
+  o.movable_interval = 1;
+  o.observer_interval = 1;
+  int held_samples = 0, released_samples = 0;
+  o.movable_update = [](const Design &, int iteration) {
+    return iteration == 1 ? std::vector<MovablePosition>{{0, 12, 22, 2}}
+                          : std::vector<MovablePosition>{};
+  };
+  o.observer = [&](const Design &snapshot, PlacementStage stage,
+                   int iteration) {
+    if (stage != PlacementStage::global_placement)
+      return;
+    if (iteration == 2 || iteration == 3) {
+      near(snapshot.node_x[0], 12, 0, "hold expired too early in x");
+      near(snapshot.node_y[0], 22, 0, "hold expired too early in y");
+      ++held_samples;
+    }
+    if (iteration == 4) {
+      check(snapshot.node_x[0] != 12 || snapshot.node_y[0] != 22,
+            "cell not released after the requested two iterations");
+      ++released_samples;
+    }
+  };
+  place(d, o);
+  check(held_samples == 2 && released_samples == 1,
+        "missing hold/release observations");
+  GpState state;
+  rejects([&] { place(d, o, &state); });
+}
+
 void moving_terminals() {
   auto base = design();
   Options o;
@@ -1436,10 +1828,231 @@ void macro_sized_virtual_fillers() {
   options.filler_macro_fraction = 1.01;
   rejects([&] { place(design, options); });
 }
+void gp_ab_search() {
+  GpSearch policy;
+  std::string why;
+  check(select_gp_trial({{1., -1., 10., -1.}, {.8, -100., 1000., -1000.}},
+                        policy, &why) == 1 &&
+            why == "rsmt_rudy",
+        "RUDY must rank before timing");
+  check(select_gp_trial({{1., -10., 10., -1.}, {1.005, -1., 100., -100.}},
+                        policy, &why) == 1 &&
+            why == "wns",
+        "WNS must decide within RUDY tie band");
+  check(select_gp_trial({{1., -1., 100., -1.}, {1., -1., 80., -100.}}, policy,
+                        &why) == 1 &&
+            why == "hpwl",
+        "HPWL must rank before TNS");
+  check(select_gp_trial({{1., -1., 100., -100.}, {1., -1., 100., -1.}}, policy,
+                        &why) == 1 &&
+            why == "tns",
+        "TNS must break final tie");
+  check(select_gp_trial({{1., -1., 100., -1.}, {1., -1., 100., -1.}}, policy) ==
+            0,
+        "ties must keep unchanged control");
+  rejects([&] { select_gp_trial({{NAN, 0, 0, 0}}, policy); });
+  auto base = design();
+  base.node_macro.assign(base.node_x.size(), 0);
+  base.node_macro[6] = 1;
+  Options o;
+  o.vanished_memory = true;
+  o.max_iterations = o.min_iterations = 300;
+  o.bins_x = o.bins_y = 8;
+  o.local_density_bins = 16;
+  o.local_density_weight = .67;
+  o.local_density_target = .05;
+  o.local_density_jitter = 0;
+  o.target_density = .5;
+  o.add_fillers = true;
+  o.filler_max_count = 64;
+  o.legalize = true;
+  o.detailed_place = false;
+  o.routability = o.improved_routability = true;
+  o.route.model = RouteModel::rsmt;
+  o.route_capacity_h = o.route_capacity_v = 1;
+  o.after_macro_legalize = [](Design &) {
+  }; // host finalization hook, excluded from trials
+  o.gp_search.enabled = true;
+  o.gp_search.rounds = 2;
+  o.num_threads = 3;
+  const auto main_thread = std::this_thread::get_id();
+  int timing_calls = 0, normal_calls = 0;
+  double expected_weight = 1;
+  o.checkpoint_interval = 20;
+  o.checkpoint = [&](const Design &, int it) {
+    ++normal_calls;
+    expected_weight = 1 + .001 * it;
+    GpUpdate u;
+    u.net_weights.assign(base.net_weights.size(), expected_weight);
+    return u;
+  };
+  std::vector<Design> scored;
+  o.trial_timing = [&](const Design &d) {
+    check(std::this_thread::get_id() == main_thread,
+          "STA callback ran in a worker");
+    check(d.net_weights == std::vector<double>(base.net_weights.size(),
+                                               expected_weight) &&
+              d.pin2node == base.pin2node && d.node_size_x == base.node_size_x,
+          "trial changed net weights, topology or dimensions");
+    ++timing_calls;
+    scored.push_back(d);
+    return std::pair{-hpwl(d), -2 * hpwl(d)};
+  };
+  std::vector<GpTrialSample> trace;
+  std::optional<Design> selected;
+  o.trial_observer = [&](const GpTrialSample &s) {
+    check(s.iteration == 220 + int(trace.size()) * 40 && s.steps == 3,
+          "incorrect branch phase or horizon");
+    check(s.settings.size() >= 2 && s.settings.size() <= 3 &&
+              s.settings.size() == s.scores.size(),
+          "missing hold/change candidate");
+    check(s.selected == select_gp_trial(s.scores, o.gp_search),
+          "wrong selected trial");
+    for (size_t i = 0; i < s.scores.size(); ++i) {
+      const auto &physical = scored[scored.size() - s.scores.size() + i];
+      RudyOptions ro{o.bins_x,           o.bins_y, o.route_capacity_h,
+                     o.route_capacity_v, true,     true};
+      ro.model = RudyModel::rsmt;
+      const auto route = rudy(physical, ro);
+      const auto &q = s.scores[i];
+      check(
+          q.route_unroutable_nets == route.unroutable_nets &&
+              q.route_blocked_pins == route.blocked_pins &&
+              q.route_measured_nets == route.measured_nets &&
+              q.route_peak_utilization == route.max_utilization &&
+              q.route_detour_wirelength == route.detour_wirelength &&
+              std::abs(q.route_congestion_overflow +
+                       double(q.route_unroutable_nets + q.route_blocked_pins) /
+                           (o.bins_x * o.bins_y) -
+                       q.route_overflow) < 1e-12,
+          "trial route diagnostics disagree with candidate geometry");
+    }
+    selected = scored[scored.size() - s.scores.size() + s.selected];
+    trace.push_back(s);
+  };
+  o.observer = [&](const Design &d, PlacementStage stage, int it) {
+    if (selected && stage == PlacementStage::global_placement &&
+        (it == 223 || it == 263)) {
+      check(d.node_x == selected->node_x && d.node_y == selected->node_y,
+            "winner coordinates were not adopted exactly");
+    }
+    for (size_t i = base.num_movable; i < base.node_x.size(); ++i)
+      check(d.node_x[i] == base.node_x[i] && d.node_y[i] == base.node_y[i],
+            "trial moved a fixed node");
+  };
+  auto first = base;
+  const auto result = place(first, o);
+  check(result.legal && result.iterations == 300 && trace.size() == 2 &&
+            timing_calls >= 6,
+        "A/B search failed final legality or schedule");
+  check(normal_calls == 15, "losing trials leaked checkpoint updates");
+  const auto first_trace = trace;
+  trace.clear();
+  scored.clear();
+  selected.reset();
+  auto second = base;
+  place(second, o);
+  check(first.node_x == second.node_x && first.node_y == second.node_y,
+        "parallel A/B trials are not repeatable");
+  for (size_t i = 0; i < trace.size(); ++i)
+    check(trace[i].selected == first_trace[i].selected,
+          "A/B selection is nondeterministic");
+  // Unlimited search must continue past the old 12-decision cap, but leave
+  // at least 20 iterations after the last trial for final settling.
+  trace.clear();
+  scored.clear();
+  selected.reset();
+  o.gp_search.rounds = 0;
+  o.max_iterations = o.min_iterations = 1000;
+  auto unlimited = base;
+  const auto unlimited_result = place(unlimited, o);
+  check(unlimited_result.legal && unlimited_result.iterations == 1000 &&
+            trace.size() == 19 && trace.back().iteration == 940 &&
+            trace.back().iteration + trace.back().steps + 20 <= 1000,
+        "unlimited A/B search stopped early or consumed final settling");
+  o.gp_search.rounds = -1;
+  auto invalid_rounds = base;
+  rejects([&] { place(invalid_rounds, o); });
+  o.gp_search.rounds = 2;
+  o.max_iterations = o.min_iterations = 300;
+  // Trial timing must use the same physical coordinates as normal checkpoints,
+  // even when the optimizer reserves halo padding around the cells.
+  auto haloed = base;
+  haloed.node_halo_x.assign(base.node_x.size(), 0);
+  haloed.node_halo_y.assign(base.node_x.size(), 0);
+  haloed.node_halo_x[0] = 1;
+  haloed.node_halo_y[0] = 1;
+  auto halo_options = o;
+  halo_options.num_threads = 1;
+  halo_options.trial_observer = {};
+  halo_options.observer = {};
+  int halo_scores = 0;
+  halo_options.trial_timing = [&](const Design &physical) {
+    ++halo_scores;
+    check(physical.node_size_x == base.node_size_x &&
+              physical.node_size_y == base.node_size_y &&
+              physical.pin_offset_x == base.pin_offset_x &&
+              physical.pin_offset_y == base.pin_offset_y &&
+              physical.node_pad_x.empty() && physical.node_pad_y.empty(),
+          "trial timing received halo-padded geometry");
+    return std::pair{-hpwl(physical), -2 * hpwl(physical)};
+  };
+  place(haloed, halo_options);
+  check(halo_scores >= 6, "halo trial timing was not exercised");
+  // The warm-up also gates speculative timing, not only normal checkpoints.
+  auto delayed = base;
+  auto delayed_options = o;
+  delayed_options.checkpoint_start = 260;
+  delayed_options.observer = {};
+  int delayed_trials = 0, delayed_checkpoints = 0, delayed_scores = 0;
+  delayed_options.checkpoint = [&](const Design &, int iteration) {
+    check(iteration >= 260, "normal timing bypassed warm-up");
+    ++delayed_checkpoints;
+    return GpUpdate{};
+  };
+  delayed_options.trial_timing = [&](const Design &) {
+    ++delayed_scores;
+    return std::pair{0., 0.};
+  };
+  delayed_options.trial_observer = [&](const GpTrialSample &sample) {
+    check(sample.iteration >= 260, "trial timing bypassed warm-up");
+    ++delayed_trials;
+  };
+  place(delayed, delayed_options);
+  check(delayed_trials == 1 && delayed_checkpoints > 0 && delayed_scores > 0,
+        "warm-up disabled timing instead of delaying it");
+  auto topology = base;
+  auto topology_options = o;
+  topology_options.checkpoint = [](const Design &d, int) {
+    GpUpdate update;
+    update.replacement = d;
+    return update;
+  };
+  rejects([&] { place(topology, topology_options); });
+  check(topology.node_x == base.node_x && topology.pin2node == base.pin2node,
+        "rejected A/B topology update changed caller state");
+  auto invalid_weight_options = o;
+  invalid_weight_options.local_density_weight = 2;
+  auto invalid_weight = base;
+  rejects([&] { place(invalid_weight, invalid_weight_options); });
+  auto failed = base;
+  o.trial_timing = [](const Design &) -> std::pair<double, double> {
+    throw std::runtime_error("host timing failed");
+  };
+  rejects([&] { place(failed, o); });
+  check(failed.node_x == base.node_x && failed.node_y == base.node_y &&
+            failed.net_weights == base.net_weights,
+        "failed trial scoring partially committed caller state");
+  auto bad = base;
+  o.gp_search.steps = 4;
+  rejects([&] { place(bad, o); });
+  check(bad.node_x == base.node_x, "invalid A/B search changed caller state");
+}
 int main() {
   try {
     size_neutral_macro_pull();
     macro_sized_virtual_fillers();
+    gp_ab_search();
     virtual_macro_pulls();
     spectral();
     power2_grid();
@@ -1449,11 +2062,15 @@ int main() {
     gradients();
     hpwl_case();
     native_flow();
+    transparent_macros();
+    vanished_memories();
+    moving_cells();
     moving_terminals();
     offgrid_macro_swap();
     same_bin_swap();
     weighted_detailed_placement();
     weighted_detailed_placement_wide_die();
+    placement_masks();
     placer_instances();
     concurrent_instances();
     macros();

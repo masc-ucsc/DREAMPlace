@@ -56,6 +56,7 @@ struct CellMovableView {
     copy(design.node_size_x, source.node_size_x);
     copy(design.node_size_y, source.node_size_y);
     copy(design.node_macro, source.node_macro);
+    copy(design.node_placement_mask, source.node_placement_mask);
     copy(design.node_legalize_weights, source.node_legalize_weights);
     copy(design.node_legalize_last, source.node_legalize_last);
     copy(design.node_legalize_anchor_x, source.node_legalize_anchor_x);
@@ -87,7 +88,39 @@ bool has_movable_macro(const Design &d) {
                      [](auto value) { return value != 0; });
 }
 
+// Keep GP's soft-mask geometry intact; only row/detail kernels see zero area.
+// Restore even when a kernel or host callback throws.
+struct SoftMaskSizes {
+  Design &d;
+  struct Saved {
+    size_t i;
+    double x, y;
+  };
+  std::vector<Saved> saved;
+  explicit SoftMaskSizes(Design &design) : d(design) {
+    for (size_t i = 0; i < d.node_placement_mask.size(); ++i) {
+      if (d.placement_mask(i) == PlacementMask::soft) {
+        saved.push_back({i, d.node_size_x[i], d.node_size_y[i]});
+        d.node_size_x[i] = d.node_size_y[i] = 0;
+      }
+    }
+  }
+  ~SoftMaskSizes() {
+    for (auto s : saved) {
+      d.node_size_x[s.i] = s.x;
+      d.node_size_y[s.i] = s.y;
+    }
+  }
+};
+
 bool kernel_is_legal(const Design &d) {
+  if (std::any_of(d.node_placement_mask.begin(), d.node_placement_mask.end(),
+                  [](auto m) { return m == PlacementMask::soft; })) {
+    auto physical = d;
+    SoftMaskSizes masks(physical);
+    physical.node_placement_mask.clear();
+    return kernel_is_legal(physical);
+  }
   const auto &l = d.layout;
   std::vector<int> regions(d.node_x.size(), 0);
   if (!d.node_macro.empty() &&
@@ -306,6 +339,7 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
               AlignmentReport *report,
               const std::function<void(Design &)> &after_macro_legalize,
               bool macro_only) {
+  SoftMaskSizes masks(d);
   auto ix = d.node_x, iy = d.node_y;
   if (snap)
     for (const auto &group : snap->groups) {
@@ -462,6 +496,7 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
 void detailed_place(Design &d, int bx, int by, int threads,
                     bool preserve_macros, int iterations,
                     std::vector<DetailedSample> *history) {
+  SoftMaskSizes masks(d);
   if (preserve_macros && has_movable_macro(d)) {
     CellMovableView cells(d);
     if (cells.design.num_movable)

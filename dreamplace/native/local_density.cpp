@@ -59,7 +59,9 @@ std::vector<double> LocalDensity::cell_density(const Design &d) const {
   return rho;
 }
 Gradient LocalDensity::gradient(const Design &d, bool macros_only,
-                                const std::vector<double> &source) const {
+                                const std::vector<double> &source,
+                                bool ignore_fixed_macros,
+                                double fixed_macro_scale) const {
   auto rho = source.empty() ? cell_density(d) : source;
   if (rho.size() != size_t(bins_ * bins_)) {
     throw std::invalid_argument("invalid local density source");
@@ -94,9 +96,11 @@ Gradient LocalDensity::gradient(const Design &d, bool macros_only,
   std::vector<double> blocked(rho.size());
   if (!macros_only && target_ > 0 && !d.node_macro.empty()) {
     for (int i = 0; i < std::min(original, int(d.node_macro.size())); ++i) {
-      if (d.node_macro[i]) {
-        const double x = d.node_x[i], y = d.node_y[i], w = d.node_size_x[i],
-                     h = d.node_size_y[i];
+      if (d.node_macro[i] && !(ignore_fixed_macros && i >= d.num_movable)) {
+        const double scale = i >= d.num_movable ? fixed_macro_scale : 1;
+        const double w = d.node_size_x[i] * scale, h = d.node_size_y[i] * scale;
+        const double x = d.node_x[i] + (d.node_size_x[i] - w) / 2;
+        const double y = d.node_y[i] + (d.node_size_y[i] - h) / 2;
         const int x0 =
             std::clamp(int(std::floor((x - d.layout.xl) / dx_)), 0, bins_);
         const int x1 =
