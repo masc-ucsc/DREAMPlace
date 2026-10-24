@@ -529,4 +529,92 @@ RudyResult RudyMaskSnapshot::measure(std::span<const std::uint8_t> mask) const {
   finish_obstacle_result(r);
   return r;
 }
+struct RudyMaskCursor::State {
+  std::shared_ptr<const RudyMaskSnapshot::Data> data;
+  std::vector<std::uint8_t> mask;
+  RudyResult current;
+  struct DepositRef {
+    size_t net, deposit;
+  };
+  std::vector<std::vector<DepositRef>> deposits;
+  std::vector<std::vector<size_t>> pins;
+  std::vector<std::vector<int>> affected;
+  std::vector<int> blocked;
+  std::vector<size_t> detours;
+};
+RudyMaskCursor::RudyMaskCursor(const RudyMaskSnapshot &snapshot)
+    : state_(std::make_shared<State>()) {
+  auto &s = *state_;
+  s.data = snapshot.data_;
+  s.mask = s.data->enabled;
+  s.current = snapshot.measure(s.mask);
+  const auto bins = s.current.horizontal.size();
+  s.deposits.resize(bins);
+  s.pins.resize(bins);
+  s.affected.resize(s.mask.size());
+  s.blocked.resize(s.mask.size());
+  for (size_t n = 0; n < s.data->nets.size(); ++n) {
+    const auto &net = s.data->nets[n];
+    if (net.detour != 0)
+      s.detours.push_back(n);
+    for (size_t i = 0; i < net.deposits.size(); ++i) {
+      const auto bin = net.deposits[i].bin;
+      s.deposits[bin].push_back({n, i});
+      s.affected[n].push_back(bin);
+    }
+  }
+  for (size_t i = 0; i < s.data->pins.size(); ++i) {
+    const auto &pin = s.data->pins[i];
+    s.pins[pin.bin].push_back(i);
+    s.affected[pin.net].push_back(pin.bin);
+    s.blocked[pin.net] += pin.blocked;
+  }
+  for (auto &bins_for_net : s.affected) {
+    std::sort(bins_for_net.begin(), bins_for_net.end());
+    bins_for_net.erase(std::unique(bins_for_net.begin(), bins_for_net.end()),
+                       bins_for_net.end());
+  }
+}
+RudyResult RudyMaskCursor::without(size_t net) const {
+  const auto &s = *state_;
+  if (net >= s.mask.size() || !s.mask[net])
+    throw std::invalid_argument("RUDY cursor exclusion is not an active net");
+  auto r = s.current;
+  const auto &removed = s.data->nets[net];
+  r.measured_nets -= removed.measured;
+  r.degenerate_nets -= removed.degenerate;
+  r.unroutable_nets -= removed.unroutable;
+  r.blocked_pins -= s.blocked[net];
+  // Preserve the original accumulation order even for the scalar detour sum.
+  r.detour_wirelength = 0;
+  for (auto n : s.detours)
+    if (n != net && s.mask[n])
+      r.detour_wirelength += s.data->nets[n].detour;
+  for (auto bin : s.affected[net]) {
+    r.horizontal[bin] = r.vertical[bin] = r.pin_utilization[bin] = 0;
+    for (auto i : s.pins[bin]) {
+      const auto &pin = s.data->pins[i];
+      if (size_t(pin.net) == net || !s.mask[pin.net])
+        continue;
+      if (pin.blocked)
+        r.pin_utilization[bin] = std::max(r.pin_utilization[bin], 2.);
+      r.pin_utilization[bin] += pin.access;
+    }
+    for (auto ref : s.deposits[bin]) {
+      if (ref.net == net || !s.mask[ref.net])
+        continue;
+      const auto &deposit = s.data->nets[ref.net].deposits[ref.deposit];
+      r.horizontal[bin] += deposit.horizontal;
+      r.vertical[bin] += deposit.vertical;
+    }
+  }
+  r.overflow = r.max_utilization = 0;
+  finish_obstacle_result(r);
+  return r;
+}
+void RudyMaskCursor::exclude(size_t net) {
+  auto next = without(net);
+  state_->current = std::move(next);
+  state_->mask[net] = 0;
+}
 } // namespace DreamPlace::native

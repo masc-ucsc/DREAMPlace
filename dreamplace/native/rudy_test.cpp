@@ -28,6 +28,19 @@ template <typename F> void rejects(F f) {
   }
   check(bad);
 }
+void same(const RudyResult &a, const RudyResult &b) {
+  check(a.horizontal == b.horizontal);
+  check(a.vertical == b.vertical);
+  check(a.pin_utilization == b.pin_utilization);
+  check(a.blocked_fraction == b.blocked_fraction);
+  check(a.blocked_pins == b.blocked_pins);
+  check(a.unroutable_nets == b.unroutable_nets);
+  check(a.measured_nets == b.measured_nets);
+  check(a.degenerate_nets == b.degenerate_nets);
+  check(a.detour_wirelength == b.detour_wirelength);
+  check(a.overflow == b.overflow);
+  check(a.max_utilization == b.max_utilization);
+}
 Design design() {
   Design d;
   d.layout = {10, 20, 50, 44, 1, 1};
@@ -284,6 +297,36 @@ int main() {
             check(actual.detour_wirelength == expected.detour_wirelength);
             check(actual.overflow == expected.overflow);
             check(actual.max_utilization == expected.max_utilization);
+          }
+          // Trial queries never mutate state; commits affect only later trials.
+          // Exercise both commit orders and all subset masks, including blocked
+          // pin max operations, not just additive wire demand.
+          for (int bits = 0; bits < 8; ++bits) {
+            for (bool reverse : {false, true}) {
+              RudyMaskCursor cursor(snapshot);
+              auto mask = captured_mask;
+              for (int i = 0; i < 3; ++i) {
+                const int n = reverse ? 2 - i : i;
+                if ((bits >> n) & 1)
+                  continue;
+                auto trial_mask = mask;
+                trial_mask[n] = 0;
+                same(cursor.without(n), snapshot.measure(trial_mask));
+                same(cursor.without(n), snapshot.measure(trial_mask));
+                cursor.exclude(n);
+                mask[n] = 0;
+                rejects([&] { cursor.exclude(n); });
+              }
+              for (int n = 0; n < 3; ++n) {
+                if (!mask[n])
+                  continue;
+                auto trial_mask = mask;
+                trial_mask[n] = 0;
+                same(cursor.without(n), snapshot.measure(trial_mask));
+              }
+              rejects([&] { cursor.without(3); });
+              rejects([&] { cursor.without(100); });
+            }
           }
           auto invalid = sample.net_mask;
           invalid[3] = 1;

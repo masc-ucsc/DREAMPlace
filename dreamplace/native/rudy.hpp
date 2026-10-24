@@ -45,6 +45,8 @@ RudyResult rudy(const Design &design, const RudyOptions &options = {});
 // operations. Requires macro_blockages=true. The contribution budget bounds
 // additional cached events; exceeding it throws, allowing an uncached fallback.
 class RudyMaskSnapshot {
+  friend class RudyMaskCursor;
+
 public:
   struct Data;
   RudyMaskSnapshot(const Design &, const RudyOptions &,
@@ -53,6 +55,23 @@ public:
 
 private:
   std::shared_ptr<const Data> data_;
+};
+// Trial exclusions at fixed placement. Replays affected bins in original
+// contribution order, preserving measure() results without subtractive drift.
+// without() is read-only; exclude() commits one previously active net.
+class RudyMaskCursor {
+public:
+  explicit RudyMaskCursor(const RudyMaskSnapshot &);
+  RudyMaskCursor(const RudyMaskCursor &) = delete;
+  RudyMaskCursor &operator=(const RudyMaskCursor &) = delete;
+  RudyMaskCursor(RudyMaskCursor &&) noexcept = default;
+  RudyMaskCursor &operator=(RudyMaskCursor &&) noexcept = default;
+  RudyResult without(std::size_t net) const;
+  void exclude(std::size_t net);
+
+private:
+  struct State;
+  std::shared_ptr<State> state_;
 };
 namespace detail {
 void validate_rudy(const Design &, const RudyOptions &);
