@@ -5,7 +5,8 @@
 #include <span>
 
 namespace DreamPlace::native {
-enum class RudyModel { bbox, rsmt };
+class UrouteContext;
+enum class RudyModel { bbox, rsmt, uroute };
 struct RudyOptions {
   int bins_x = 32, bins_y = 32;
   // Routing tracks per layout unit; callers derive these from their technology.
@@ -17,6 +18,7 @@ struct RudyOptions {
   std::function<void()> initialize;
   double fixed_macro_scale =
       1; // centered exclusion footprint; physical pins unchanged
+  std::shared_ptr<const UrouteContext> uroute;
 };
 struct RudyResult {
   // X-major bin index = x*bins_y+y. Directional utilization is demand
@@ -31,6 +33,9 @@ struct RudyResult {
   std::vector<double> blocked_fraction;
   int unroutable_nets = 0, blocked_pins = 0;
   double detour_wirelength = 0;
+  std::vector<double>
+      drc_density; // URoute report, contributes only when calibrated
+  std::string uroute_skipped;
 };
 // Serial deterministic RUDY measurement; no placement edits or cell inflation.
 // Uses DREAMPlace's WDM degree weights and enabled physical hypernets. Like

@@ -178,7 +178,8 @@ struct MovablePosition {
   int fix_iterations =
       0; // hold for this many subsequent GP steps, then release
 };
-enum class RouteModel { off, rudy, rsmt, automatic };
+class UrouteContext;
+enum class RouteModel { off, rudy, rsmt, automatic, uroute };
 const char *route_model_name(RouteModel model);
 struct RoutePolicy {
   RouteModel model = RouteModel::rudy;
@@ -186,6 +187,12 @@ struct RoutePolicy {
   int hold = 1, degree = 40, accuracy = 3;
   bool probe = false;
   int probe_iterations = 100;
+  RouteModel probe_model = RouteModel::rsmt;
+  double uroute_switch_overflow = .01;
+  int uroute_hold = 2;
+  // Only the final cell stage enables the automatic third rung. FP/macro may
+  // still request a one-shot URoute convergence probe.
+  bool uroute_ladder = false;
 };
 // Optimizer-only absolute center targets. No physical nodes/pins/nets are
 // added. Targets survive magnet-round restarts within one macro stage, but
@@ -446,6 +453,13 @@ struct Options {
   double order_weight = 0, order_growth = 1;
   int schedule_iterations = 0;
   RoutePolicy route;
+  std::shared_ptr<const UrouteContext> uroute;
+  std::string uroute_identity, uroute_skipped;
+  std::function<void(const Design &, int bins_x, int bins_y)>
+      route_probe_observer;
+  // Optional expansion of contracted macro geometry for routing measurement.
+  // Inflation still consumes the resulting utilization on the same core grid.
+  std::function<Design(const Design &)> route_physical_snapshot;
   std::function<void()> route_initialize;
   bool routability = false;
   double route_capacity_h = 1, route_capacity_v = 1;
@@ -523,7 +537,11 @@ struct GpSample {
   int route_switch_iteration = -1, route_bins = 0;
   bool route_sampled = false, route_probe = false;
   int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
-  double route_rudy_seconds = 0, route_rsmt_seconds = 0;
+  double route_rudy_seconds = 0, route_rsmt_seconds = 0,
+         route_uroute_seconds = 0;
+  int route_uroute_switch_iteration = -1;
+  double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
+  double route_probe_overflow = -1;
   int magnet_round = 0, magnet_groups = 0;
   double macro_move_max = 0, macro_move_rms = 0;
   int last_instability_iteration = 0;
@@ -574,6 +592,11 @@ struct Result {
   int route_switch_iteration = -1;
   double route_switch_rudy = -1, route_switch_rsmt = -1;
   bool route_probed = false;
+  int route_uroute_switch_iteration = -1;
+  double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
+  double route_probe_overflow = -1;
+  std::string uroute_skipped;
+  std::vector<std::string> uroute_sample_ids;
   int filler_count = 0;
   double filler_area = 0;
   double filler_size_x = 0, filler_size_y = 0;
@@ -603,9 +626,13 @@ struct Result {
 struct GpState {
   GpConvergence convergence;
   RouteModel route_model = RouteModel::rudy;
+  int route_uroute_hold = 0;
   int route_hold = 0, route_switch_iteration = -1, route_probe_deadline = 0;
   double route_switch_rudy = -1, route_switch_rsmt = -1;
   bool route_probed = false;
+  int route_uroute_switch_iteration = -1;
+  double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
+  double route_probe_overflow = -1;
   std::uint64_t signature = 0;
   int iteration = 0;
   double density_weight = 0, momentum = 1, step = 0;

@@ -18,6 +18,7 @@
 #include "dreamplace/native/magnet.hpp"
 #include "dreamplace/native/rudy.hpp"
 #include "dreamplace/native/spectral.hpp"
+#include "dreamplace/native/uroute_weights.hpp"
 
 namespace DreamPlace::native {
 bool macro_transparent(const MacroTransparency &o, int completed_steps) {
@@ -346,6 +347,16 @@ void options_check(const Options &o) {
           o.route.probe_iterations <= 10000,
       "invalid route switch, target, hold, degree, accuracy or probe budget");
   route_model_name(o.route.model);
+  require(o.route.probe_model == RouteModel::rsmt ||
+              o.route.probe_model == RouteModel::uroute,
+          "route probe model must be rsmt or uroute");
+  require(
+      finite(o.route.uroute_switch_overflow) &&
+          o.route.uroute_switch_overflow >= 0 && o.route.uroute_hold >= 1 &&
+          o.route.uroute_hold <= 1000 &&
+          (!(o.route.model == RouteModel::automatic && o.route.uroute_ladder) ||
+           o.route.uroute_switch_overflow <= o.route.switch_overflow),
+      "invalid URoute switch or hold");
   require(!o.routability ||
               (finite(o.route_capacity_h) && o.route_capacity_h > 0 &&
                finite(o.route_capacity_v) && o.route_capacity_v > 0),
@@ -1040,6 +1051,8 @@ const char *route_model_name(RouteModel model) {
     return "rsmt";
   case RouteModel::automatic:
     return "auto";
+  case RouteModel::uroute:
+    return "uroute";
   }
   throw std::invalid_argument("invalid route model");
 }
@@ -1501,10 +1514,27 @@ Result place(Design &design, const Options &options, GpState *state) {
   salt(o.route.accuracy);
   salt(o.route.probe);
   salt(o.route.probe_iterations);
+  salt(static_cast<std::uint64_t>(o.route.probe_model));
+  salt(std::bit_cast<std::uint64_t>(o.route.uroute_switch_overflow));
+  salt(o.route.uroute_hold);
+  salt(o.route.uroute_ladder);
+  salt(bool(o.route_physical_snapshot));
+  // A continuation must keep its immutable stage context, including support.
+  salt(reinterpret_cast<std::uintptr_t>(o.uroute.get()));
+  for (unsigned char c : o.uroute_identity)
+    salt(c);
   if (warm && state->signature != signature) {
     throw std::invalid_argument("GP continuation options changed");
   }
   Result r;
+  r.uroute_skipped = o.uroute_skipped;
+  if (o.uroute)
+    r.uroute_sample_ids = o.uroute->sample_ids();
+  else if (r.uroute_skipped.empty() &&
+           (o.route.model == RouteModel::uroute ||
+            (o.route.model == RouteModel::automatic && o.route.uroute_ladder) ||
+            (o.route.probe && o.route.probe_model == RouteModel::uroute)))
+    r.uroute_skipped = "no usable URoute context";
   r.bins_x = o.bins_x;
   r.bins_y = o.bins_y;
   r.initial_hpwl = hpwl(design);
@@ -1871,14 +1901,18 @@ Result place(Design &design, const Options &options, GpState *state) {
     bool transparent = false;
     double exclusion_scale = 1;
     RouteModel active_route =
-        warm          ? state->route_model
-        : rigid_route ? rigid_route->model
-                      : (o.route.model == RouteModel::rsmt ? RouteModel::rsmt
-                                                           : RouteModel::rudy);
+        warm ? state->route_model
+        : rigid_route
+            ? rigid_route->model
+            : (o.route.model == RouteModel::uroute
+                   ? (o.uroute ? RouteModel::uroute : RouteModel::rsmt)
+                   : (o.route.model == RouteModel::rsmt ? RouteModel::rsmt
+                                                        : RouteModel::rudy));
     if (!o.routability) {
       active_route = RouteModel::off;
     }
     int route_hold = warm ? state->route_hold : 0;
+    int uroute_hold = warm ? state->route_uroute_hold : 0;
     int probe_deadline = warm          ? state->route_probe_deadline
                          : rigid_route ? rigid_route->probe_deadline
                                        : 0;
@@ -1887,16 +1921,25 @@ Result place(Design &design, const Options &options, GpState *state) {
       r.route_switch_rudy = state->route_switch_rudy;
       r.route_switch_rsmt = state->route_switch_rsmt;
       r.route_probed = state->route_probed;
+      r.route_uroute_switch_iteration = state->route_uroute_switch_iteration;
+      r.route_switch_uroute_rsmt = state->route_switch_uroute_rsmt;
+      r.route_switch_uroute = state->route_switch_uroute;
+      r.route_probe_overflow = state->route_probe_overflow;
     } else if (rigid_route) {
       r.route_switch_iteration = rigid_route->switch_iteration;
       r.route_switch_rudy = rigid_route->switch_rudy;
       r.route_switch_rsmt = rigid_route->switch_rsmt;
       r.route_probed = rigid_route->probed;
+      r.route_uroute_switch_iteration = rigid_route->uroute_switch_iteration;
+      r.route_switch_uroute_rsmt = rigid_route->switch_uroute_rsmt;
+      r.route_switch_uroute = rigid_route->switch_uroute;
+      r.route_probe_overflow = rigid_route->probe_overflow;
     }
     double route_sample_seconds = 0, route_peak_utilization = 0;
     bool route_sampled = false;
     int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
-    double route_rudy_seconds = 0, route_rsmt_seconds = 0;
+    double route_rudy_seconds = 0, route_rsmt_seconds = 0,
+           route_uroute_seconds = 0;
     r.route_model = active_route;
     auto measure_route = [&](const Design &physical, RouteModel model,
                              bool record_history = true) {
@@ -1907,8 +1950,10 @@ Result place(Design &design, const Options &options, GpState *state) {
                                 o.route_capacity_v,
                                 o.improved_routability,
                                 o.improved_routability};
-      route_options.model =
-          model == RouteModel::rsmt ? RudyModel::rsmt : RudyModel::bbox;
+      route_options.model = model == RouteModel::uroute ? RudyModel::uroute
+                            : model == RouteModel::rsmt ? RudyModel::rsmt
+                                                        : RudyModel::bbox;
+      route_options.uroute = o.uroute;
       route_options.degree = o.route.degree;
       route_options.accuracy = o.route.accuracy;
       route_options.initialize = o.route_initialize;
@@ -1917,7 +1962,10 @@ Result place(Design &design, const Options &options, GpState *state) {
         route_options.macro_blockages = false;
         route_options.pin_access = false;
       }
-      auto result = rudy(physical, route_options);
+      std::optional<Design> expanded;
+      if (o.route_physical_snapshot)
+        expanded = o.route_physical_snapshot(physical);
+      auto result = rudy(expanded ? *expanded : physical, route_options);
       const double seconds = std::chrono::duration<double>(
                                  std::chrono::steady_clock::now() - started)
                                  .count();
@@ -1929,7 +1977,9 @@ Result place(Design &design, const Options &options, GpState *state) {
         route_sample_seconds += seconds;
         ++route_calls;
         route_sampled = true;
-        if (model == RouteModel::rsmt) {
+        if (model == RouteModel::uroute) {
+          route_uroute_seconds += seconds;
+        } else if (model == RouteModel::rsmt) {
           route_rsmt_seconds += seconds;
         } else {
           route_rudy_seconds += seconds;
@@ -1958,6 +2008,22 @@ Result place(Design &design, const Options &options, GpState *state) {
           result = latch_route(physical, std::move(result), iteration);
         }
       }
+      // Do not count the first-rung switch sample toward the second hold.
+      // Consecutive samples are measured on RSMT before a one-way URoute latch.
+      else if (active_route == RouteModel::rsmt &&
+               o.route.model == RouteModel::automatic &&
+               o.route.uroute_ladder && o.uroute) {
+        uroute_hold = result.overflow <= o.route.uroute_switch_overflow
+                          ? uroute_hold + 1
+                          : 0;
+        if (uroute_hold >= o.route.uroute_hold) {
+          r.route_switch_uroute_rsmt = result.overflow;
+          result = measure_route(physical, RouteModel::uroute);
+          r.route_switch_uroute = result.overflow;
+          r.route_uroute_switch_iteration = iteration;
+          active_route = r.route_model = RouteModel::uroute;
+        }
+      }
       route_peak_utilization = result.max_utilization;
       return result;
     };
@@ -1968,8 +2034,13 @@ Result place(Design &design, const Options &options, GpState *state) {
       sample.route_calls = route_calls;
       sample.route_rudy_seconds = route_rudy_seconds;
       sample.route_rsmt_seconds = route_rsmt_seconds;
+      sample.route_uroute_seconds = route_uroute_seconds;
+      sample.route_uroute_switch_iteration = r.route_uroute_switch_iteration;
+      sample.route_switch_uroute_rsmt = r.route_switch_uroute_rsmt;
+      sample.route_switch_uroute = r.route_switch_uroute;
+      sample.route_probe_overflow = r.route_probe_overflow;
       route_calls = 0;
-      route_rudy_seconds = route_rsmt_seconds = 0;
+      route_rudy_seconds = route_rsmt_seconds = route_uroute_seconds = 0;
       sample.route_model = active_route;
       sample.route_sampled = route_sampled;
       sample.route_seconds = route_sample_seconds;
@@ -2132,11 +2203,16 @@ Result place(Design &design, const Options &options, GpState *state) {
       s.routing_utilization = routing_utilization;
       s.route_model = active_route;
       s.route_hold = route_hold;
+      s.route_uroute_hold = uroute_hold;
       s.route_probe_deadline = probe_deadline;
       s.route_probed = r.route_probed;
       s.route_switch_iteration = r.route_switch_iteration;
       s.route_switch_rudy = r.route_switch_rudy;
       s.route_switch_rsmt = r.route_switch_rsmt;
+      s.route_uroute_switch_iteration = r.route_uroute_switch_iteration;
+      s.route_switch_uroute_rsmt = r.route_switch_uroute_rsmt;
+      s.route_switch_uroute = r.route_switch_uroute;
+      s.route_probe_overflow = r.route_probe_overflow;
       s.align_pairs = align_pairs;
       return s;
     };
@@ -2287,11 +2363,16 @@ Result place(Design &design, const Options &options, GpState *state) {
         routing_utilization = std::move(s.routing_utilization);
         active_route = s.route_model;
         route_hold = s.route_hold;
+        uroute_hold = s.route_uroute_hold;
         probe_deadline = s.route_probe_deadline;
         r.route_probed = s.route_probed;
         r.route_switch_iteration = s.route_switch_iteration;
         r.route_switch_rudy = s.route_switch_rudy;
         r.route_switch_rsmt = s.route_switch_rsmt;
+        r.route_uroute_switch_iteration = s.route_uroute_switch_iteration;
+        r.route_switch_uroute_rsmt = s.route_switch_uroute_rsmt;
+        r.route_switch_uroute = s.route_switch_uroute;
+        r.route_probe_overflow = s.route_probe_overflow;
         align_pairs = std::move(s.align_pairs);
         model = std::move(winner.physical);
         double inflated = 0;
@@ -2431,11 +2512,17 @@ Result place(Design &design, const Options &options, GpState *state) {
         const auto route = estimate_route(physical, global_iter + 1);
         route_overflow = route.overflow;
         if (macro_routing) {
-          routing_utilization.resize(route.horizontal.size());
+          // Learned utilization only drives inflation and convergence. Macro
+          // channel forces retain their physical RSMT demand measurement.
+          std::optional<RudyResult> rsmt_pressure;
+          if (active_route == RouteModel::uroute)
+            rsmt_pressure = measure_route(physical, RouteModel::rsmt, false);
+          const auto &pressure = rsmt_pressure ? *rsmt_pressure : route;
+          routing_utilization.resize(pressure.horizontal.size());
           for (size_t k = 0; k < routing_utilization.size(); ++k) {
             routing_utilization[k] =
-                std::max({route.horizontal[k], route.vertical[k],
-                          route.pin_utilization[k]});
+                std::max({pressure.horizontal[k], pressure.vertical[k],
+                          pressure.pin_utilization[k]});
           }
         }
         auto proposed = inflation;
@@ -3638,21 +3725,52 @@ Result place(Design &design, const Options &options, GpState *state) {
           convergence.previous_hpwl = current_hpwl;
           convergence.previous_inflation = inflated_ratio;
         }
-        const bool route_candidate = o.post_density_factor
-                                         ? convergence.stable_samples >= 2
-                                         : (geometry_ready && o.route.probe);
+        const bool learned_ladder = o.routability &&
+                                    o.route.model == RouteModel::automatic &&
+                                    o.route.uroute_ladder && o.uroute;
+        const bool route_candidate =
+            o.post_density_factor
+                ? convergence.stable_samples >= 2
+                : (geometry_ready &&
+                   (o.route.probe || active_route == RouteModel::uroute ||
+                    learned_ladder));
         if (route_candidate && o.routability) {
           auto route = estimate_route(physical, global_iter + 1);
+          const auto probe_model =
+              o.route.probe_model == RouteModel::uroute && !o.uroute
+                  ? RouteModel::rsmt
+                  : o.route.probe_model;
           if (o.route.probe && !r.route_probed && geometry_ready &&
               convergence.timing_satisfied &&
-              active_route == RouteModel::rudy) {
+              active_route != RouteModel::uroute &&
+              (probe_model == RouteModel::uroute ||
+               active_route == RouteModel::rudy)) {
             r.route_probed = true;
-            auto probe = measure_route(physical, RouteModel::rsmt);
-            r.route_switch_rudy = route.overflow;
-            r.route_switch_rsmt = probe.overflow;
+            if (o.route_probe_observer) {
+              if (o.route_physical_snapshot) {
+                const auto expanded = o.route_physical_snapshot(physical);
+                o.route_probe_observer(expanded, aux_x, aux_y);
+              } else
+                o.route_probe_observer(physical, aux_x, aux_y);
+            }
+            auto probe = measure_route(physical, probe_model);
+            r.route_probe_overflow = probe.overflow;
+            if (probe_model == RouteModel::uroute) {
+              r.route_switch_uroute_rsmt =
+                  active_route == RouteModel::rsmt
+                      ? route.overflow
+                      : measure_route(physical, RouteModel::rsmt).overflow;
+              r.route_switch_uroute = probe.overflow;
+            } else {
+              r.route_switch_rudy = route.overflow;
+              r.route_switch_rsmt = probe.overflow;
+            }
             if (probe.overflow > o.route.target_overflow) {
-              active_route = r.route_model = RouteModel::rsmt;
-              r.route_switch_iteration = global_iter + 1;
+              active_route = r.route_model = probe_model;
+              if (probe_model == RouteModel::uroute)
+                r.route_uroute_switch_iteration = global_iter + 1;
+              else
+                r.route_switch_iteration = global_iter + 1;
               probe_deadline =
                   std::min(o.max_iterations + offset,
                            global_iter + 1 + o.route.probe_iterations);
@@ -3664,14 +3782,20 @@ Result place(Design &design, const Options &options, GpState *state) {
           route_overflow = route.overflow;
           r.history.back().route_overflow = route_overflow;
         }
-        if (o.post_density_factor || probe_deadline) {
+        // A qualifying RSMT candidate must collect its hold window rather
+        // than exit before the learned model has a chance to measure it.
+        const bool uroute_pending =
+            learned_ladder && active_route == RouteModel::rsmt &&
+            route_overflow <= o.route.uroute_switch_overflow;
+        if (o.post_density_factor || probe_deadline ||
+            active_route == RouteModel::uroute || learned_ladder) {
           r.objective_converged =
               (!density_gated_checkpoints || checkpoint_invoked) &&
-              route_candidate &&
+              !uroute_pending && route_candidate &&
               convergence.stable_samples >= (o.post_density_factor ? 2 : 0) &&
               (!o.routability || route_overflow <= o.route.target_overflow ||
-               (r.route_probed && r.route_switch_iteration < 0 &&
-                r.route_switch_rsmt <= o.route.target_overflow)) &&
+               (r.route_probed && r.route_probe_overflow >= 0 &&
+                r.route_probe_overflow <= o.route.target_overflow)) &&
               convergence.timing_satisfied;
           r.continuation_limit =
               probe_deadline ? global_iter + 1 >= probe_deadline
@@ -3696,7 +3820,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         const bool magnet_ready =
             !o.magnet_runtime || o.magnet_runtime->ready(global_iter + 1);
         if (!o.trial_tuning && magnet_ready && geometry_ready &&
-            ((!o.post_density_factor && !probe_deadline) ||
+            ((!o.post_density_factor && !probe_deadline &&
+              active_route != RouteModel::uroute && !learned_ladder) ||
              r.objective_converged)) {
           r.converged = true;
           break;
@@ -3742,9 +3867,17 @@ Result place(Design &design, const Options &options, GpState *state) {
     r.centroid.completed = r.centroid.started;
     if (o.magnet_runtime) {
       o.magnet_runtime->density_initialized = density_initialized;
-      o.magnet_runtime->routing = detail::MagnetRuntime::RouteProgress{
-          active_route,        probe_deadline,      r.route_switch_iteration,
-          r.route_switch_rudy, r.route_switch_rsmt, r.route_probed};
+      o.magnet_runtime->routing =
+          detail::MagnetRuntime::RouteProgress{active_route,
+                                               probe_deadline,
+                                               r.route_switch_iteration,
+                                               r.route_switch_rudy,
+                                               r.route_switch_rsmt,
+                                               r.route_probed,
+                                               r.route_uroute_switch_iteration,
+                                               r.route_switch_uroute_rsmt,
+                                               r.route_switch_uroute,
+                                               r.route_probe_overflow};
       o.magnet_runtime->convergence = convergence;
       o.magnet_runtime->checkpoint_invoked = checkpoint_invoked;
       o.magnet_runtime->macro_pulls = std::move(macro_pulls);
@@ -3783,11 +3916,16 @@ Result place(Design &design, const Options &options, GpState *state) {
       next.routing_utilization = routing_utilization;
       next.route_model = active_route;
       next.route_hold = route_hold;
+      next.route_uroute_hold = uroute_hold;
       next.route_probe_deadline = probe_deadline;
       next.route_probed = r.route_probed;
       next.route_switch_iteration = r.route_switch_iteration;
       next.route_switch_rudy = r.route_switch_rudy;
       next.route_switch_rsmt = r.route_switch_rsmt;
+      next.route_uroute_switch_iteration = r.route_uroute_switch_iteration;
+      next.route_switch_uroute_rsmt = r.route_switch_uroute_rsmt;
+      next.route_switch_uroute = r.route_switch_uroute;
+      next.route_probe_overflow = r.route_probe_overflow;
       next.align_pairs = align_pairs;
     }
     r.selected_iteration = offset + r.iterations;
@@ -3828,7 +3966,11 @@ Result place(Design &design, const Options &options, GpState *state) {
        (o.magnet_runtime && o.magnet_runtime->checkpoint_invoked) ||
        std::any_of(r.checkpoint_history.begin(), r.checkpoint_history.end(),
                    [](const auto &sample) { return sample.invoked; })) &&
-      (!gp_ran || !o.post_density_factor || r.objective_converged) &&
+      (!gp_ran ||
+       (!o.post_density_factor && r.route_model != RouteModel::uroute &&
+        !(o.routability && o.route.model == RouteModel::automatic &&
+          o.route.uroute_ladder && o.uroute)) ||
+       r.objective_converged) &&
       r.overflow <= o.stop_overflow &&
       (!separate_circles || r.centroid.circles_converged) &&
       (!align_centroids || r.iterations > o.centroid_align_full) &&

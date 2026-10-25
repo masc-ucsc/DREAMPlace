@@ -177,6 +177,9 @@ public:
     int probe_deadline = 0, switch_iteration = -1;
     double switch_rudy = -1, switch_rsmt = -1;
     bool probed = false;
+    int uroute_switch_iteration = -1;
+    double switch_uroute_rsmt = -1, switch_uroute = -1;
+    double probe_overflow = -1;
   };
   std::optional<RouteProgress> routing;
 

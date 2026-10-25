@@ -488,6 +488,9 @@ RudyResult obstacle_rudy(const Design &d, const RudyOptions &o) {
 RudyMaskSnapshot::RudyMaskSnapshot(const Design &d, const RudyOptions &o,
                                    size_t max_contributions) {
   detail::validate_rudy(d, o);
+  if (o.model == RudyModel::uroute)
+    throw std::invalid_argument(
+        "URoute cannot replay per-net RUDY contributions");
   if (!o.macro_blockages)
     throw std::invalid_argument("RUDY snapshot requires obstacle-aware demand");
   auto data = std::make_shared<Data>();
