@@ -18,6 +18,8 @@ cc_library(
         "magnet_flow.cpp",
         "orientation.cpp",
         "placement.cpp",
+        "pin_timing.cpp",
+        "reservations.cpp",
         "rudy.cpp",
         "uroute_features.cpp",
         "uroute_maps.cpp",
@@ -128,6 +130,22 @@ cc_test(
 )
 
 cc_test(
+    name = "placement_rollback_smoke",
+    size = "small",
+    timeout = "short",
+    srcs = ["placement_rollback_smoke.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
+    name = "pin_timing_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["pin_timing_test.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
     name = "magnet_flow_test",
     size = "small",
     timeout = "short",
@@ -221,6 +239,8 @@ filegroup(
         "orientation.cpp",
         "orientation.hpp",
         "placement.cpp",
+        "pin_timing.cpp",
+        "reservations.cpp",
         "placement.hpp",
         "rudy.cpp",
         "uroute_features.cpp",
@@ -322,4 +342,12 @@ cc_test(
     args = ["$(location //thirdparty/flute:lut.ICCAD2015/POWV9.dat)", "$(location //thirdparty/flute:lut.ICCAD2015/POST9.dat)"],
     data = ["//thirdparty/flute:lut.ICCAD2015/POWV9.dat", "//thirdparty/flute:lut.ICCAD2015/POST9.dat"],
     deps = [":placer", "//thirdparty/flute"],
+)
+
+cc_test(
+    name = "reservations_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["reservations_test.cpp"],
+    deps = [":placer"],
 )

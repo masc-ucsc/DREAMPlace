@@ -1,5 +1,7 @@
 // BSD-3-Clause. See LICENSE.
 #pragma once
+#define DREAMPLACE_NATIVE_PIN_TIMING_API 3
+#define DREAMPLACE_NATIVE_DENSITY_RESERVATION_API 2
 
 #include <cstdint>
 #include <functional>
@@ -64,6 +66,43 @@ struct CentroidSample {
 };
 enum class PlacementMask : std::uint8_t { none, hard, soft };
 
+// Per-sink timing wirelength objective. Arrays use physical pin indices;
+// driver=-1 and weight=0 disables a pin. Empty arrays explicitly clear it.
+struct PinGapPull {
+  int driver = -1;
+  // Fixed world-coordinate gap-entry target, in the design's length units.
+  double x = 0, y = 0, fraction = 0;
+  // A checkpoint may freeze suppression of conflicting straight pairs for a
+  // critical gap. No position-dependent branch changes the objective mid-step.
+  bool critical = false;
+  std::vector<int> suppressed_sinks{};
+  bool operator==(const PinGapPull &) const = default;
+};
+struct PinTiming {
+  std::vector<int> driver;
+  std::vector<double> weight;
+  double coefficient = .25;
+  // Fractions share the original per-driver sum of sink weights. This is a
+  // bounded part of the original timing weight, never a physical net/pin.
+  std::vector<PinGapPull> gap_pulls{};
+  double maximum_gap_fraction = .25;
+  bool enabled() const;
+  bool operator==(const PinTiming &) const = default;
+};
+// A frozen checkpoint footprint, never a netlist/pin/obstacle node. A bound
+// materialized node contributes through its ordinary physical density exactly
+// once; its predicted rectangle remains only for virtual-to-real diagnostics.
+struct DensityReservation {
+  std::string owner;
+  double x = 0, y = 0, width = 0, height = 0;
+  int materialized_node = -1;
+  bool operator==(const DensityReservation &) const = default;
+};
+struct ReservationCharge {
+  double virtual_area = 0, materialized_area = 0;
+  double predicted_materialized_area = 0;
+  size_t virtual_count = 0, materialized_count = 0;
+};
 struct Design {
   Layout layout;
   std::vector<CohesionGroup> cohesion_groups;
@@ -128,6 +167,8 @@ struct Design {
   std::vector<int> flat_node2pin, flat_node2pin_start;
   std::vector<double> net_weights;
   std::vector<std::uint8_t> net_mask;
+  std::optional<PinTiming> pin_timing;
+  std::vector<DensityReservation> density_reservations;
 
   // Rebuild inverse maps from net CSR and pin2node. Rejects duplicate/missing
   // pins and malformed CSR before kernels can index raw pointers.
@@ -154,6 +195,7 @@ using PlacementObserver =
 // index (-1 for an inserted movable standard cell). Existing positions and
 // macro/fixed geometry are preserved; momentum restarts after topology changes.
 // Empty vectors preserve fields; do not combine them with replacement.
+enum class GpCheckpointAction { update, retain, restore };
 struct GpUpdate {
   // Permanently retire the movable-update hook before applying this update.
   // Existing temporary holds expire normally unless topology is replaced.
@@ -164,6 +206,15 @@ struct GpUpdate {
   std::vector<double> pin_offset_x, pin_offset_y;
   std::optional<Design> replacement;
   std::vector<int> previous_node;
+  // nullopt preserves it; PinTiming{} clears it. Replacement clears old pin
+  // identities and requires a fresh timing update on the replacement graph.
+  std::optional<PinTiming> pin_timing;
+  // nullopt preserves the complete reservation list; an empty list clears it.
+  // Replacement must carry its own freshly rebound list, never stale node IDs.
+  std::optional<std::vector<DensityReservation>> density_reservations;
+  // Retain the accepted full optimizer/filler/objective state, or restore it.
+  // Restore cannot carry other updates; spent iterations never rewind.
+  GpCheckpointAction action = GpCheckpointAction::update;
 };
 using GpCheckpoint = std::function<GpUpdate(const Design &, int)>;
 struct GpSample;
@@ -438,7 +489,7 @@ struct Options {
   // Optional particle count guard. Zero derives count from area and resolution.
   // A positive cap enlarges both dimensions, never the physical design.
   int filler_max_count = 0;
-  double filler_area_fraction = 1; // fraction of whitespace density charge
+  double filler_area_fraction = 1; // whitespace charge multiplier, (0,2]
   bool filler_cell_space =
       false; // budget: (1-target_density) * non-macro space
   double filler_macro_fraction =
@@ -481,6 +532,8 @@ struct Options {
   std::function<void(Design &)> after_macro_legalize;
   PlacementObserver observer;
   int observer_interval = 20; // GP steps between snapshots, when enabled
+  // Fixed-footprint transactions only; unsupported mutable policies fail.
+  bool checkpoint_rollback = false;
 };
 
 struct AlignmentPair {
@@ -547,6 +600,11 @@ struct GpSample {
   int last_instability_iteration = 0;
   double macro_opacity = 1;
   double macro_exclusion_scale = 1, local_density_weight = 0;
+  int filler_count = 0;
+  double filler_area = 0, filler_size_x = 0, filler_size_y = 0;
+  double pin_timing_cost = 0;
+  double reserved_area = 0, materialized_reserved_area = 0;
+  double effective_filler_area = 0;
 };
 struct CentroidReport {
   bool started = false, completed = false;
@@ -568,6 +626,9 @@ struct GpConvergence {
   int density_iteration = 0, deadline = 0, stable_samples = 0;
   double previous_hpwl = -1, previous_inflation = -1;
   bool timing_observed = false, timing_satisfied = true;
+};
+struct GpRollbackSample {
+  int iteration = 0, restored_iteration = 0;
 };
 struct GpCheckpointSample {
   int iteration = 0;
@@ -601,6 +662,8 @@ struct Result {
   double filler_area = 0;
   double filler_size_x = 0, filler_size_y = 0;
   bool filler_count_limited = false;
+  double reserved_area = 0, materialized_reserved_area = 0;
+  double effective_filler_area = 0, physical_overflow = 0;
   double macro_alignment_seconds = 0;
   double global_placement_seconds = 0, detailed_placement_seconds = 0;
   std::vector<GpSample> history;
@@ -618,6 +681,7 @@ struct Result {
   double initial_hpwl = 0, hpwl = 0, overflow = 0;
   bool converged = false;
   bool legal = false;
+  std::vector<GpRollbackSample> rollback_history;
 };
 
 // Optional full GP continuation. Includes private fillers, Nesterov/BB history,
@@ -643,7 +707,26 @@ struct GpState {
   std::vector<double>
       routing_utilization; // last RUDY sample, for macro pressure
   std::vector<AlignmentPair> align_pairs;
+  std::optional<PinTiming> pin_timing;
+  std::vector<DensityReservation> density_reservations;
+  bool reservation_accounting = false;
 };
+
+// Validates identities/physical bindings and returns nominal charge. Inflation,
+// when supplied, prices bound nodes at their actual current density charge.
+ReservationCharge reservation_charge(const Design &,
+                                     const std::vector<double> &inflation = {});
+namespace detail {
+// Deposit only virtual reservations through the ordinary native density kernel.
+// No capacity is subtracted and no virtual node enters maps/netlists or RUDY.
+void reservation_density_map(const Design &, int bins_x, int bins_y,
+                             bool exact_cells, int threads,
+                             std::vector<double> &map);
+// Full reservation/physical charge displaces equal filler charge, independently
+// of the user's filler fraction. Insufficient filler budget is explicit.
+double reservation_filler_area(double unreserved_budget, double rounding_loss,
+                               const ReservationCharge &);
+} // namespace detail
 
 // Throws invalid_argument for bad inputs and runtime_error if legalization
 // cannot produce a legal result. Failed calls leave the caller's design intact.
@@ -655,6 +738,11 @@ double hpwl(const Design &design);
 double density_overflow(const Design &, int bins_x, int bins_y,
                         double target_density,
                         bool scale_macro_density = false);
+// Solver-compatible overflow with virtual reservations counted as movable
+// charge once. Physical-only density_overflow above retains its old meaning.
+double reservation_density_overflow(const Design &, int bins_x, int bins_y,
+                                    double target_density,
+                                    bool scale_macro_density = false);
 bool is_legal(const Design &design, std::string *reason = nullptr);
 bool macros_are_legal(const Design &design, std::string *reason = nullptr);
 
@@ -684,6 +772,13 @@ struct Gradient {
   double value = 0;
   std::vector<double> x, y;
 };
+// Sum coefficient*w[p]*(dx*tanh(dx/(2*gamma))+dy*tanh(dy/(2*gamma)))
+// between each weighted sink and its declared driver: exactly the two-pin
+// weighted-average wirelength smoothing. Gamma uses layout units;
+// weights/coefficient are dimensionless. Gradients include both endpoint nodes.
+// No density charge or physical topology is added.
+void validate_pin_timing(const Design &);
+Gradient pin_timing_force(const Design &, double gamma);
 // Raw gradients compensate the GP preconditioner so equal target offsets
 // produce equal pull-induced center steps across physical macro sizes.
 struct MacroPullForce {
