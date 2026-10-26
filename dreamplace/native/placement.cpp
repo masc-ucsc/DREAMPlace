@@ -100,6 +100,10 @@ int count(size_t n) {
           "array exceeds 32-bit kernel indices");
   return static_cast<int>(n);
 }
+// URoute without a usable context runs, and is reported, as RSMT.
+RouteModel available_route_model(RouteModel model, bool has_context) {
+  return model == RouteModel::uroute && !has_context ? RouteModel::rsmt : model;
+}
 // Stage-wide route-switch decisions. Result, GpState and the magnet runtime
 // carry them under the same names; copy all of them in one place.
 template <class To, class From>
@@ -1982,14 +1986,16 @@ Result place(Design &design, const Options &options, GpState *state) {
             o.macro_transparency.cycles;
     bool transparent = false;
     double exclusion_scale = 1;
-    RouteModel active_route =
-        warm ? state->route_model
-        : rigid_route
-            ? rigid_route->model
-            : (o.route.model == RouteModel::uroute
-                   ? (o.uroute ? RouteModel::uroute : RouteModel::rsmt)
-                   : (o.route.model == RouteModel::rsmt ? RouteModel::rsmt
-                                                        : RouteModel::rudy));
+    // An explicit RSMT or usable URoute model starts there; the rest start on
+    // RUDY (automatic latches later).
+    const auto requested_route =
+        available_route_model(o.route.model, o.uroute != nullptr);
+    RouteModel active_route = warm          ? state->route_model
+                              : rigid_route ? rigid_route->model
+                              : requested_route == RouteModel::uroute ||
+                                      requested_route == RouteModel::rsmt
+                                  ? requested_route
+                                  : RouteModel::rudy;
     if (!o.routability) {
       active_route = RouteModel::off;
     }
@@ -3931,9 +3937,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         if (route_candidate && o.routability) {
           auto route = estimate_route(physical, global_iter + 1);
           const auto probe_model =
-              o.route.probe_model == RouteModel::uroute && !o.uroute
-                  ? RouteModel::rsmt
-                  : o.route.probe_model;
+              available_route_model(o.route.probe_model, o.uroute != nullptr);
           if (o.route.probe && !r.route_probed && geometry_ready &&
               convergence.timing_satisfied &&
               active_route != RouteModel::uroute &&
