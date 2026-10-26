@@ -99,14 +99,8 @@ Gradient LocalDensity::gradient(const Design &d, bool macros_only,
       if (d.node_macro[i] && !(ignore_fixed_macros && i >= d.num_movable)) {
         const auto [x, y, w, h] =
             scaled_footprint(d, i, i >= d.num_movable ? fixed_macro_scale : 1);
-        const int x0 =
-            std::clamp(int(std::floor((x - d.layout.xl) / dx_)), 0, bins_);
-        const int x1 =
-            std::clamp(int(std::ceil((x + w - d.layout.xl) / dx_)), 0, bins_);
-        const int y0 =
-            std::clamp(int(std::floor((y - d.layout.yl) / dy_)), 0, bins_);
-        const int y1 =
-            std::clamp(int(std::ceil((y + h - d.layout.yl) / dy_)), 0, bins_);
+        const auto [x0, x1] = clamped_span(x, x + w, d.layout.xl, dx_, bins_);
+        const auto [y0, y1] = clamped_span(y, y + h, d.layout.yl, dy_, bins_);
         for (int a = x0; a < x1; ++a) {
           for (int b = y0; b < y1; ++b) {
             const double ox =
@@ -141,14 +135,8 @@ Gradient LocalDensity::gradient(const Design &d, bool macros_only,
       }
       const double x = d.node_x[i], y = d.node_y[i], w = d.node_size_x[i],
                    h = d.node_size_y[i];
-      const int x0 =
-          std::clamp(int(std::floor((x - d.layout.xl) / dx_)), 0, bins_);
-      const int x1 =
-          std::clamp(int(std::ceil((x + w - d.layout.xl) / dx_)), 0, bins_);
-      const int y0 =
-          std::clamp(int(std::floor((y - d.layout.yl) / dy_)), 0, bins_);
-      const int y1 =
-          std::clamp(int(std::ceil((y + h - d.layout.yl) / dy_)), 0, bins_);
+      const auto [x0, x1] = clamped_span(x, x + w, d.layout.xl, dx_, bins_);
+      const auto [y0, y1] = clamped_span(y, y + h, d.layout.yl, dy_, bins_);
       for (int a = x0; a < x1; ++a) {
         for (int b = y0; b < y1; ++b) {
           const double ox =

@@ -793,6 +793,19 @@ inline int clamped_bin(double p, double lo, double step, int count) {
   return static_cast<int>(
       std::clamp(std::floor((p - lo) / step), 0., double(count - 1)));
 }
+// Half-open cell range [first, last) touched by [p0, p1] on the same grid.
+// Clamps before the int conversion, so far-outside extents are well defined.
+struct BinSpan {
+  int first, last;
+};
+inline BinSpan clamped_span(double p0, double p1, double lo, double step,
+                            int count) {
+  const auto cell = [count](double v) {
+    return static_cast<int>(std::clamp(v, 0., double(count)));
+  };
+  return {cell(std::floor((p0 - lo) / step)),
+          cell(std::ceil((p1 - lo) / step))};
+}
 // Fixed-macro exclusion footprint: node i scaled by `scale` about its center.
 // Physical pins are unchanged.
 struct Footprint {

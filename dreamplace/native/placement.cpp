@@ -154,13 +154,8 @@ double overflow(const Design &d, int bx, int by, double target_density,
   // may lie far outside the core.
   const auto deposit = [&](std::vector<double> &map, double x, double y,
                            double w, double h, double charge) {
-    const auto cell = [](double v, int count) {
-      return static_cast<int>(std::clamp(v, 0., double(count)));
-    };
-    const int x0 = cell(std::floor((x - l.xl) / dx), bx);
-    const int x1 = cell(std::ceil((x + w - l.xl) / dx), bx);
-    const int y0 = cell(std::floor((y - l.yl) / dy), by);
-    const int y1 = cell(std::ceil((y + h - l.yl) / dy), by);
+    const auto [x0, x1] = detail::clamped_span(x, x + w, l.xl, dx, bx);
+    const auto [y0, y1] = detail::clamped_span(y, y + h, l.yl, dy, by);
     for (int k = x0; k < x1; ++k) {
       for (int j = y0; j < y1; ++j) {
         const double a = std::max(0., std::min(x + w, l.xl + (k + 1) * dx) -

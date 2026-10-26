@@ -312,12 +312,8 @@ MagnetDensity::MagnetDensity(const Design &d, int bx, int by)
     b.xh = std::clamp(b.xh, layout_.xl, layout_.xh);
     b.yl = std::clamp(b.yl, layout_.yl, layout_.yh);
     b.yh = std::clamp(b.yh, layout_.yl, layout_.yh);
-    const int x0 =
-        std::clamp(int(std::floor((b.xl - layout_.xl) / dx_)), 0, bx);
-    const int x1 = std::clamp(int(std::ceil((b.xh - layout_.xl) / dx_)), 0, bx);
-    const int y0 =
-        std::clamp(int(std::floor((b.yl - layout_.yl) / dy_)), 0, by);
-    const int y1 = std::clamp(int(std::ceil((b.yh - layout_.yl) / dy_)), 0, by);
+    const auto [x0, x1] = detail::clamped_span(b.xl, b.xh, layout_.xl, dx_, bx);
+    const auto [y0, y1] = detail::clamped_span(b.yl, b.yh, layout_.yl, dy_, by);
     for (int x = x0; x < x1; ++x)
       for (int y = y0; y < y1; ++y)
         rho_[x * by + y] +=
@@ -365,14 +361,10 @@ double MagnetDensity::region_density(const MagnetRegion &region) const {
   if (std::abs(area - overlap_area(box, {layout_.xl, layout_.yl, layout_.xh,
                                          layout_.yh})) <= area * 1e-12)
     return density(box);
-  const int x0 =
-      std::clamp(int(std::floor((box.xl - layout_.xl) / dx_)), 0, bx_);
-  const int x1 =
-      std::clamp(int(std::ceil((box.xh - layout_.xl) / dx_)), 0, bx_);
-  const int y0 =
-      std::clamp(int(std::floor((box.yl - layout_.yl) / dy_)), 0, by_);
-  const int y1 =
-      std::clamp(int(std::ceil((box.yh - layout_.yl) / dy_)), 0, by_);
+  const auto [x0, x1] =
+      detail::clamped_span(box.xl, box.xh, layout_.xl, dx_, bx_);
+  const auto [y0, y1] =
+      detail::clamped_span(box.yl, box.yh, layout_.yl, dy_, by_);
   double occupied = 0;
   for (int x = x0; x < x1; ++x)
     for (int y = y0; y < y1; ++y) {
