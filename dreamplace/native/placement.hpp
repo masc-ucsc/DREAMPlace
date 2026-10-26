@@ -793,6 +793,16 @@ inline int clamped_bin(double p, double lo, double step, int count) {
   return static_cast<int>(
       std::clamp(std::floor((p - lo) / step), 0., double(count - 1)));
 }
+// Fixed-macro exclusion footprint: node i scaled by `scale` about its center.
+// Physical pins are unchanged.
+struct Footprint {
+  double x, y, w, h;
+};
+inline Footprint scaled_footprint(const Design &d, int i, double scale) {
+  const double w = d.node_size_x[i] * scale, h = d.node_size_y[i] * scale;
+  return {d.node_x[i] + (d.node_size_x[i] - w) / 2,
+          d.node_y[i] + (d.node_size_y[i] - h) / 2, w, h};
+}
 // Sum coefficient*w[p]*(dx*tanh(dx/(2*gamma))+dy*tanh(dy/(2*gamma)))
 // between each weighted sink and its declared driver: exactly the two-pin
 // weighted-average wirelength smoothing. Gamma uses layout units;

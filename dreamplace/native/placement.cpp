@@ -2658,13 +2658,10 @@ Result place(Design &design, const Options &options, GpState *state) {
           if (d.node_macro.empty() || !d.node_macro[i]) {
             continue;
           }
-          const double w = d.node_size_x[i] * exclusion_scale;
-          const double h = d.node_size_y[i] * exclusion_scale;
-          const double mx = d.node_x[i] + (d.node_size_x[i] - w) / 2;
-          const double my = d.node_y[i] + (d.node_size_y[i] - h) / 2;
+          const auto m = detail::scaled_footprint(d, i, exclusion_scale);
           excluded_macro_area +=
-              std::max(0., std::min(l.xh, mx + w) - std::max(l.xl, mx)) *
-              std::max(0., std::min(l.yh, my + h) - std::max(l.yl, my));
+              std::max(0., std::min(l.xh, m.x + m.w) - std::max(l.xl, m.x)) *
+              std::max(0., std::min(l.yh, m.y + m.h) - std::max(l.yl, m.y));
         }
       }
       // Whitespace charge left for fillers. Keep total charge consistent with
