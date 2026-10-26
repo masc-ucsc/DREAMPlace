@@ -2135,8 +2135,35 @@ void gp_ab_search() {
   rejects([&] { place(bad, o); });
   check(bad.node_x == base.node_x, "invalid A/B search changed caller state");
 }
+void route_policy_helpers() {
+  for (auto model : {RouteModel::off, RouteModel::rudy, RouteModel::rsmt,
+                     RouteModel::automatic, RouteModel::uroute})
+    check(route_model_from_name(route_model_name(model)) == model,
+          "route model name does not round-trip");
+  rejects([] { route_model_from_name("automatic"); });
+  RoutePolicy p;
+  validate_route_policy(p);
+  check(!route_latches(p) && !uroute_requested(p), "default policy latches");
+  p.probe = true;
+  check(route_latches(p) && !uroute_requested(p), "RUDY probe must latch");
+  p.model = RouteModel::rsmt;
+  check(!route_latches(p), "explicit RSMT probe must not latch");
+  p.probe_model = RouteModel::uroute;
+  check(route_latches(p) && uroute_requested(p), "URoute probe must latch");
+  p = {};
+  p.uroute_ladder = true;
+  check(!uroute_requested(p), "ladder needs the automatic model");
+  p.model = RouteModel::automatic;
+  check(route_latches(p) && uroute_requested(p), "automatic ladder");
+  p.uroute_switch_overflow = p.switch_overflow * 2;
+  rejects([&] { validate_route_policy(p); });
+  p = {};
+  p.probe_model = RouteModel::rudy;
+  rejects([&] { validate_route_policy(p); });
+}
 int main() {
   try {
+    route_policy_helpers();
     size_neutral_macro_pull();
     macro_sized_virtual_fillers();
     gp_ab_search();

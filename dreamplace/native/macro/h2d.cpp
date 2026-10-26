@@ -87,11 +87,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
   RouteModel active_route = cell_options.route.model == RouteModel::rsmt
                                 ? RouteModel::rsmt
                                 : RouteModel::rudy;
-  const bool latches_route =
-      cell_options.route.model == RouteModel::automatic ||
-      (cell_options.route.probe &&
-       (cell_options.route.model == RouteModel::rudy ||
-        cell_options.route.probe_model == RouteModel::uroute));
+  const bool latches_route = route_latches(cell_options.route);
   bool route_probed = false;
   DreamPlace::native::Result route_progress;
   auto route_score = [&](const Design &d) {

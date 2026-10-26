@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -245,6 +246,18 @@ struct RoutePolicy {
   // still request a one-shot URoute convergence probe.
   bool uroute_ladder = false;
 };
+// Inverse of route_model_name. Throws invalid_argument for an unknown name.
+RouteModel route_model_from_name(std::string_view name);
+// The checks Options validation applies to Options::route, for hosts that
+// resolve stage policies before placement. Throws invalid_argument.
+void validate_route_policy(const RoutePolicy &);
+// The policy can evaluate the learned model: an explicit URoute rung, the
+// automatic ladder or a URoute convergence probe. A missing context is the
+// caller's skip/fallback decision.
+bool uroute_requested(const RoutePolicy &);
+// The active model can change within the stage (automatic switch or probe
+// latch), so stage reports and caches record the model actually used.
+bool route_latches(const RoutePolicy &);
 // Optimizer-only absolute center targets. No physical nodes/pins/nets are
 // added. Targets survive magnet-round restarts within one macro stage, but
 // never enter GpState or the final cell-placement handoff.

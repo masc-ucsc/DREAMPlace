@@ -361,26 +361,7 @@ void options_check(const Options &o) {
               finite(o.order_growth) && o.order_growth > 0 &&
               o.schedule_iterations >= 0,
           "invalid H2D GP hook options");
-  require(
-      finite(o.route.switch_overflow) && finite(o.route.target_overflow) &&
-          o.route.target_overflow >= 0 &&
-          o.route.switch_overflow >= o.route.target_overflow &&
-          o.route.hold >= 1 && o.route.hold <= 1000 && o.route.degree >= 2 &&
-          o.route.degree <= 1000 && o.route.accuracy >= 1 &&
-          o.route.accuracy <= 10 && o.route.probe_iterations >= 1 &&
-          o.route.probe_iterations <= 10000,
-      "invalid route switch, target, hold, degree, accuracy or probe budget");
-  route_model_name(o.route.model);
-  require(o.route.probe_model == RouteModel::rsmt ||
-              o.route.probe_model == RouteModel::uroute,
-          "route probe model must be rsmt or uroute");
-  require(
-      finite(o.route.uroute_switch_overflow) &&
-          o.route.uroute_switch_overflow >= 0 && o.route.uroute_hold >= 1 &&
-          o.route.uroute_hold <= 1000 &&
-          (!(o.route.model == RouteModel::automatic && o.route.uroute_ladder) ||
-           o.route.uroute_switch_overflow <= o.route.switch_overflow),
-      "invalid URoute switch or hold");
+  validate_route_policy(o.route);
   require(!o.routability ||
               (finite(o.route_capacity_h) && o.route_capacity_h > 0 &&
                finite(o.route_capacity_v) && o.route_capacity_v > 0),
@@ -1092,6 +1073,42 @@ const char *route_model_name(RouteModel model) {
   }
   throw std::invalid_argument("invalid route model");
 }
+RouteModel route_model_from_name(std::string_view name) {
+  for (auto model : {RouteModel::off, RouteModel::rudy, RouteModel::rsmt,
+                     RouteModel::automatic, RouteModel::uroute})
+    if (name == route_model_name(model))
+      return model;
+  throw std::invalid_argument("invalid route model: " + std::string(name));
+}
+void validate_route_policy(const RoutePolicy &p) {
+  require(finite(p.switch_overflow) && finite(p.target_overflow) &&
+              p.target_overflow >= 0 &&
+              p.switch_overflow >= p.target_overflow && p.hold >= 1 &&
+              p.hold <= 1000 && p.degree >= 2 && p.degree <= 1000 &&
+              p.accuracy >= 1 && p.accuracy <= 10 && p.probe_iterations >= 1 &&
+              p.probe_iterations <= 10000,
+          "invalid route switch, target, hold, degree, accuracy or probe "
+          "budget");
+  route_model_name(p.model);
+  require(p.probe_model == RouteModel::rsmt ||
+              p.probe_model == RouteModel::uroute,
+          "route probe model must be rsmt or uroute");
+  require(finite(p.uroute_switch_overflow) && p.uroute_switch_overflow >= 0 &&
+              p.uroute_hold >= 1 && p.uroute_hold <= 1000 &&
+              (!(p.model == RouteModel::automatic && p.uroute_ladder) ||
+               p.uroute_switch_overflow <= p.switch_overflow),
+          "invalid URoute switch or hold");
+}
+bool uroute_requested(const RoutePolicy &p) {
+  return p.model == RouteModel::uroute ||
+         (p.model == RouteModel::automatic && p.uroute_ladder) ||
+         (p.probe && p.probe_model == RouteModel::uroute);
+}
+bool route_latches(const RoutePolicy &p) {
+  return p.model == RouteModel::automatic ||
+         (p.probe &&
+          (p.model == RouteModel::rudy || p.probe_model == RouteModel::uroute));
+}
 Result place(Design &design, const Options &options, GpState *state) {
   design.validate();
   Options o = options;
@@ -1592,11 +1609,12 @@ Result place(Design &design, const Options &options, GpState *state) {
   r.uroute_skipped = o.uroute_skipped;
   if (o.uroute)
     r.uroute_sample_ids = o.uroute->sample_ids();
-  else if (r.uroute_skipped.empty() &&
-           (o.route.model == RouteModel::uroute ||
-            (o.route.model == RouteModel::automatic && o.route.uroute_ladder) ||
-            (o.route.probe && o.route.probe_model == RouteModel::uroute)))
+  else if (r.uroute_skipped.empty() && uroute_requested(o.route))
     r.uroute_skipped = "no usable URoute context";
+  // The automatic third rung: RSMT may latch to URoute after its own hold.
+  const bool learned_ladder = o.routability &&
+                              o.route.model == RouteModel::automatic &&
+                              o.route.uroute_ladder && o.uroute;
   r.bins_x = o.bins_x;
   r.bins_y = o.bins_y;
   r.initial_hpwl = hpwl(design);
@@ -2078,9 +2096,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
       // Do not count the first-rung switch sample toward the second hold.
       // Consecutive samples are measured on RSMT before a one-way URoute latch.
-      else if (active_route == RouteModel::rsmt &&
-               o.route.model == RouteModel::automatic &&
-               o.route.uroute_ladder && o.uroute) {
+      else if (active_route == RouteModel::rsmt && learned_ladder) {
         uroute_hold = result.overflow <= o.route.uroute_switch_overflow
                           ? uroute_hold + 1
                           : 0;
@@ -3966,9 +3982,6 @@ Result place(Design &design, const Options &options, GpState *state) {
           convergence.previous_hpwl = current_hpwl;
           convergence.previous_inflation = inflated_ratio;
         }
-        const bool learned_ladder = o.routability &&
-                                    o.route.model == RouteModel::automatic &&
-                                    o.route.uroute_ladder && o.uroute;
         const bool route_candidate =
             o.post_density_factor
                 ? convergence.stable_samples >= 2
@@ -4228,8 +4241,7 @@ Result place(Design &design, const Options &options, GpState *state) {
                    [](const auto &sample) { return sample.invoked; })) &&
       (!gp_ran ||
        (!o.post_density_factor && r.route_model != RouteModel::uroute &&
-        !(o.routability && o.route.model == RouteModel::automatic &&
-          o.route.uroute_ladder && o.uroute)) ||
+        !learned_ladder) ||
        r.objective_converged) &&
       r.overflow <= o.stop_overflow &&
       (!separate_circles || r.centroid.circles_converged) &&
