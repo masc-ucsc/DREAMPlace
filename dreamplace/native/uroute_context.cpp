@@ -56,11 +56,12 @@ UrouteContext::UrouteContext(std::shared_ptr<const UrouteWeights> weights,
         std::find(ids_.begin(), ids_.end(), sample.id) != ids_.end())
       throw std::invalid_argument("empty/duplicate URoute support id");
     ids_.push_back(sample.id);
-    validate_map(sample.features, 4, true, bins_x_, bins_y_);
-    validate_map(sample.labels, 3, false, bins_x_, bins_y_);
+    validate_map(sample.features, uroute_feature_channels, true, bins_x_,
+                 bins_y_);
+    validate_map(sample.labels, uroute_label_channels, false, bins_x_, bins_y_);
     for (int metric = 0; metric < 2; ++metric) {
       auto pair = sample.features;
-      pair.channels = 5;
+      pair.channels = uroute_feature_channels + 1; // normalized label last
       const auto [lo, hi] = sample.labels.ranges[metric];
       ranges[2 * metric].push_back(lo);
       ranges[2 * metric + 1].push_back(hi);
@@ -85,7 +86,7 @@ UrouteContext::UrouteContext(std::shared_ptr<const UrouteWeights> weights,
     drc_ = std::make_shared<const UrouteNetwork>(*weights_, drc);
 }
 UroutePrediction UrouteContext::predict(const UrouteMaps &query) const {
-  validate_map(query, 4, true, bins_x_, bins_y_);
+  validate_map(query, uroute_feature_channels, true, bins_x_, bins_y_);
   UroutePrediction result{bins_x_, bins_y_, {}, {}};
   auto predict = [&](const auto &network, const auto &range) {
     // Constant support calibration fixes the physical answer independently of

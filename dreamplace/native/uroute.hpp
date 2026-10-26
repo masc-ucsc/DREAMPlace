@@ -12,6 +12,9 @@ struct Design;
 inline constexpr std::uint32_t uroute_feature_version = 1;
 inline constexpr std::uint32_t uroute_label_version = 1;
 inline constexpr std::uint32_t uroute_arch_version = 1;
+// Architecture v1 network contract: support/query grids and channel counts.
+inline constexpr int uroute_network_bins = 256;
+inline constexpr int uroute_feature_channels = 4, uroute_label_channels = 3;
 
 // Channel-major, then x-major: (channel * bins_x + x) * bins_y + y.
 // Features are normalized independently per channel. Labels stay absolute.
@@ -27,7 +30,8 @@ struct UrouteMaps {
 // Compute on the route grid, area-resample to the network grid, then normalize.
 // Degenerate net boxes contribute zero, as in legacy bounding-box RUDY.
 UrouteMaps uroute_features(const Design &, int route_bins_x, int route_bins_y,
-                           int output_bins_x = 256, int output_bins_y = 256);
+                           int output_bins_x = uroute_network_bins,
+                           int output_bins_y = uroute_network_bins);
 // Piecewise-constant area averaging on coincident rectangular grids.
 std::vector<double> uroute_resample(std::span<const double>, int from_x,
                                     int from_y, int to_x, int to_y);

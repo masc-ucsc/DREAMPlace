@@ -68,7 +68,7 @@ UrouteMaps uroute_features(const Design &d, int nx, int ny, int ox, int oy) {
   if (!std::isfinite(dx * dy) || dx * dy <= 0)
     throw std::invalid_argument("invalid URoute core area");
   const size_t area = size_t(nx) * ny;
-  std::array<std::vector<double>, 4> raw;
+  std::array<std::vector<double>, uroute_feature_channels> raw;
   for (auto &v : raw)
     v.resize(area);
   auto box = [&](double xl, double yl, double xh, double yh, auto visit) {
@@ -142,8 +142,8 @@ UrouteMaps uroute_features(const Design &d, int nx, int ny, int ox, int oy) {
         raw[3][j] += a;
     });
   }
-  UrouteMaps result{4, ox, oy, true, {}, {}};
-  result.values.reserve(size_t(4) * ox * oy);
+  UrouteMaps result{uroute_feature_channels, ox, oy, true, {}, {}};
+  result.values.reserve(size_t(uroute_feature_channels) * ox * oy);
   for (const auto &channel : raw) {
     const auto values = uroute_resample(channel, nx, ny, ox, oy);
     const auto [low, high] = std::minmax_element(values.begin(), values.end());
