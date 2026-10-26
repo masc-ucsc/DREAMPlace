@@ -2,7 +2,11 @@
 #pragma once
 #include "dreamplace/native/macro/seed.hpp"
 #include "dreamplace/native/macro/toposearch.hpp"
+#include "dreamplace/native/rudy.hpp"
 namespace DreamPlace::native::macro {
+// Macro merit scores RSMT and URoute stages with RSMT RUDY, others with the
+// bounding-box model. Hosts recomputing the merit must use the same mapping.
+RudyModel route_score_model(RouteModel active);
 struct Iteration {
   std::map<std::string, double> phases;
   double gp_overflow = 0;

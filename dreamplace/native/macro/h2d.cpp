@@ -10,6 +10,11 @@
 #include <optional>
 #include <stdexcept>
 namespace DreamPlace::native::macro {
+RudyModel route_score_model(RouteModel active) {
+  return active == RouteModel::rsmt || active == RouteModel::uroute
+             ? RudyModel::rsmt
+             : RudyModel::bbox;
+}
 Result place_h2d(Design &design, std::span<const NodeInfo> info,
                  const Parameters &parameters, const Topology &input,
                  const Options &cell_options) {
@@ -94,10 +99,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     if (cell_options.route.model == RouteModel::off)
       return 0.;
     RudyOptions opts{p.bins, p.bins, p.route_cap_h, p.route_cap_v};
-    opts.model =
-        active_route == RouteModel::rsmt || active_route == RouteModel::uroute
-            ? RudyModel::rsmt
-            : RudyModel::bbox;
+    opts.model = route_score_model(active_route);
     opts.degree = cell_options.route.degree;
     opts.accuracy = cell_options.route.accuracy;
     opts.initialize = cell_options.route_initialize;
