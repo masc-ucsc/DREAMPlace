@@ -245,10 +245,7 @@ Result magnet_place(Design &design, const Options &options) {
   }
   Options control = options;
   control.magnet.enabled = false;
-  if (options.uroute && (options.route.model == RouteModel::uroute ||
-                         options.route.uroute_ladder ||
-                         (options.route.probe &&
-                          options.route.probe_model == RouteModel::uroute))) {
+  if (options.uroute && uroute_requested(options.route)) {
     control.route_physical_snapshot = [&](const Design &snapshot) {
       const auto unpadded = unpad_snapshot(snapshot, grouped);
       auto expanded = expand_macros(unpadded, source, mapping);
