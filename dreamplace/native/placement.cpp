@@ -2285,31 +2285,33 @@ Result place(Design &design, const Options &options, GpState *state) {
       return s;
     };
     // Inverse of save_state for optimizer, objective and routing decisions.
-    // Callers own design, filler geometry and reservation bookkeeping.
-    const auto restore_state = [&](GpState s) {
-      x = std::move(s.x);
-      y = std::move(s.y);
-      prev_x = std::move(s.prev_x);
-      prev_y = std::move(s.prev_y);
-      old_gx = std::move(s.old_gx);
-      old_gy = std::move(s.old_gy);
-      old_ex = std::move(s.old_ex);
-      old_ey = std::move(s.old_ey);
-      density_weight = s.density_weight;
-      density_initialized = s.density_initialized;
-      previous_overflow = s.previous_overflow;
-      previous_hpwl = s.previous_hpwl;
-      t = s.momentum;
-      alpha = s.step;
-      convergence = s.convergence;
-      inflation = std::move(s.inflation);
-      routing_utilization = std::move(s.routing_utilization);
-      active_route = s.route_model;
-      route_hold = s.route_hold;
-      uroute_hold = s.route_uroute_hold;
-      probe_deadline = s.route_probe_deadline;
-      copy_route_switch(r, s);
-      align_pairs = std::move(s.align_pairs);
+    // Callers own design, filler geometry and reservation bookkeeping. An
+    // rvalue state is moved from; a retained one is copied member by member
+    // (each member is forwarded once).
+    const auto restore_state = [&]<class State>(State &&saved) {
+      x = std::forward<State>(saved).x;
+      y = std::forward<State>(saved).y;
+      prev_x = std::forward<State>(saved).prev_x;
+      prev_y = std::forward<State>(saved).prev_y;
+      old_gx = std::forward<State>(saved).old_gx;
+      old_gy = std::forward<State>(saved).old_gy;
+      old_ex = std::forward<State>(saved).old_ex;
+      old_ey = std::forward<State>(saved).old_ey;
+      density_weight = saved.density_weight;
+      density_initialized = saved.density_initialized;
+      previous_overflow = saved.previous_overflow;
+      previous_hpwl = saved.previous_hpwl;
+      t = saved.momentum;
+      alpha = saved.step;
+      convergence = saved.convergence;
+      inflation = std::forward<State>(saved).inflation;
+      routing_utilization = std::forward<State>(saved).routing_utilization;
+      active_route = saved.route_model;
+      route_hold = saved.route_hold;
+      uroute_hold = saved.route_uroute_hold;
+      probe_deadline = saved.route_probe_deadline;
+      copy_route_switch(r, saved);
+      align_pairs = std::forward<State>(saved).align_pairs;
     };
     struct RetainedCheckpoint {
       Design design, model;
