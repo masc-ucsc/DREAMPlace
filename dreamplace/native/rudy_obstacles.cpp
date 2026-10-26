@@ -104,12 +104,10 @@ static RudyResult obstacle_rudy_impl(const Design &d, const RudyOptions &o,
   const double gx = std::min(dx, l.site_width), gy = std::min(dy, l.row_height);
   const int count = o.bins_x * o.bins_y;
   auto bx = [&](double x) {
-    return int(
-        std::clamp(std::floor((x - l.xl) / dx), 0., double(o.bins_x - 1)));
+    return detail::clamped_bin(x, l.xl, dx, o.bins_x);
   };
   auto by = [&](double y) {
-    return int(
-        std::clamp(std::floor((y - l.yl) / dy), 0., double(o.bins_y - 1)));
+    return detail::clamped_bin(y, l.yl, dy, o.bins_y);
   };
   auto bins = [&](Rect a, const auto &visit) {
     for (int x = bx(a.xl); x <= bx(a.xh); ++x)

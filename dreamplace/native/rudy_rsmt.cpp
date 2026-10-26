@@ -89,12 +89,10 @@ RudyResult rsmt_rudy(const Design &d, const RudyOptions &o) {
   const double dx = (l.xh - l.xl) / o.bins_x, dy = (l.yh - l.yl) / o.bins_y;
   const double gx = std::min(dx, l.site_width), gy = std::min(dy, l.row_height);
   auto bx = [&](double x) {
-    return int(
-        std::clamp(std::floor((x - l.xl) / dx), 0., double(o.bins_x - 1)));
+    return detail::clamped_bin(x, l.xl, dx, o.bins_x);
   };
   auto by = [&](double y) {
-    return int(
-        std::clamp(std::floor((y - l.yl) / dy), 0., double(o.bins_y - 1)));
+    return detail::clamped_bin(y, l.yl, dy, o.bins_y);
   };
   if (o.pin_access)
     for (int p = 0; p < int(d.pin2node.size()); ++p) {

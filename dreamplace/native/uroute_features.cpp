@@ -20,10 +20,7 @@ void grid(int x, int y) {
   if (x < 1 || y < 1 || x > 1024 || y > 1024)
     throw std::invalid_argument("URoute grid dimensions must be in 1..1024");
 }
-int bin(double p, double lo, double step, int count) {
-  return static_cast<int>(
-      std::clamp(std::floor((p - lo) / step), 0., double(count - 1)));
-}
+using detail::clamped_bin;
 } // namespace
 std::vector<double> uroute_resample(std::span<const double> input, int fx,
                                     int fy, int tx, int ty) {
@@ -78,10 +75,12 @@ UrouteMaps uroute_features(const Design &d, int nx, int ny, int ox, int oy) {
     if (xh <= l.xl || yh <= l.yl || xl >= l.xh || yl >= l.yh || xh <= xl ||
         yh <= yl)
       return;
-    for (int x = bin(xl, l.xl, dx, nx); x <= bin(xh, l.xl, dx, nx); ++x) {
+    for (int x = clamped_bin(xl, l.xl, dx, nx);
+         x <= clamped_bin(xh, l.xl, dx, nx); ++x) {
       const double a = std::max(0., std::min(xh, l.xl + multiply(x + 1, dx)) -
                                         std::max(xl, l.xl + multiply(x, dx)));
-      for (int y = bin(yl, l.yl, dy, ny); y <= bin(yh, l.yl, dy, ny); ++y) {
+      for (int y = clamped_bin(yl, l.yl, dy, ny);
+           y <= clamped_bin(yh, l.yl, dy, ny); ++y) {
         const double b = std::max(0., std::min(yh, l.yl + multiply(y + 1, dy)) -
                                           std::max(yl, l.yl + multiply(y, dy)));
         if (a > 0 && b > 0)
@@ -122,8 +121,8 @@ UrouteMaps uroute_features(const Design &d, int nx, int ny, int ox, int oy) {
                    y = d.node_y[node] + d.pin_offset_y[p];
       // Include boundary IOs in the adjacent core tile; exclude outside pins.
       if (x >= l.xl && x <= l.xh && y >= l.yl && y <= l.yh)
-        raw[1][size_t(bin(x, l.xl, dx, nx)) * ny + bin(y, l.yl, dy, ny)] +=
-            demand;
+        raw[1][size_t(clamped_bin(x, l.xl, dx, nx)) * ny +
+               clamped_bin(y, l.yl, dy, ny)] += demand;
     }
   }
   for (size_t i = 0; i < d.node_x.size(); ++i) {

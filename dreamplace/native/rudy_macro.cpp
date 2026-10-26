@@ -36,12 +36,8 @@ MacroRoutingPressure macro_routing_pressure(const Design &d, int bx, int by,
   MacroRoutingPressure r;
   r.x.resize(d.node_x.size());
   r.y.resize(d.node_y.size());
-  auto ix = [&](double x) {
-    return int(std::clamp(std::floor((x - l.xl) / dx), 0., double(bx - 1)));
-  };
-  auto iy = [&](double y) {
-    return int(std::clamp(std::floor((y - l.yl) / dy), 0., double(by - 1)));
-  };
+  auto ix = [&](double x) { return detail::clamped_bin(x, l.xl, dx, bx); };
+  auto iy = [&](double y) { return detail::clamped_bin(y, l.yl, dy, by); };
   auto bins = [&](double xl, double yl, double xh, double yh,
                   const auto &visit) {
     for (int x = ix(xl); x <= ix(xh); ++x)

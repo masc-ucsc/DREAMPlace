@@ -166,10 +166,7 @@ Gradient fixed_macro_overlap(const Design &d, int bx, int by, double weight,
       max_h = std::max(max_h, d.node_size_y[i]);
     }
   }
-  const auto bin = [](double pos, double low, double pitch, int count) {
-    return int(
-        std::clamp(std::floor((pos - low) / pitch), 0., double(count - 1)));
-  };
+  const auto bin = detail::clamped_bin;
   std::vector<std::vector<int>> grid(bx * by);
   // Fillers appended past node_macro are never obstacles.
   const int obstacles = std::min<int>(n, d.node_macro.size());

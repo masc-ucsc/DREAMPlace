@@ -3,6 +3,8 @@
 #define DREAMPLACE_NATIVE_PIN_TIMING_API 3
 #define DREAMPLACE_NATIVE_DENSITY_RESERVATION_API 2
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -785,6 +787,12 @@ struct Gradient {
   double value = 0;
   std::vector<double> x, y;
 };
+// Cell of p on count uniform cells of width step starting at lo. Clamps
+// before the int conversion, so far-outside points land in an edge cell.
+inline int clamped_bin(double p, double lo, double step, int count) {
+  return static_cast<int>(
+      std::clamp(std::floor((p - lo) / step), 0., double(count - 1)));
+}
 // Sum coefficient*w[p]*(dx*tanh(dx/(2*gamma))+dy*tanh(dy/(2*gamma)))
 // between each weighted sink and its declared driver: exactly the two-pin
 // weighted-average wirelength smoothing. Gamma uses layout units;
