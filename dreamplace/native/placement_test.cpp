@@ -1897,7 +1897,7 @@ void macro_sized_virtual_fillers() {
   options.filler_cell_space = true;
   for (const double density : {.2, .5}) {
     options.target_density = density;
-    for (const double fraction : {1., .75, .5}) {
+    for (const double fraction : {1.5, 1., .75, .5}) {
       options.filler_area_fraction = fraction;
       auto input = design;
       const auto budgeted = place(input, options);

@@ -131,7 +131,8 @@ void csr_check(const std::vector<int> &flat, const std::vector<int> &start,
 // Exact physical overflow, excluding fillers; fixed area reduces bin capacity.
 double overflow(const Design &d, int bx, int by, double target_density,
                 bool scale_macro = false, bool ignore_fixed_macros = false,
-                double fixed_macro_scale = 1) {
+                double fixed_macro_scale = 1,
+                bool include_reservations = true) {
   const auto &l = d.layout;
   double dx = (l.xh - l.xl) / bx, dy = (l.yh - l.yl) / by;
   std::vector<double> movable(bx * by), fixed(bx * by);
@@ -175,6 +176,29 @@ double overflow(const Design &d, int bx, int by, double target_density,
                                     std::max(y, l.yl + j * dy));
         map[k * by + j] += charge * a * b;
       }
+    }
+  }
+  if (include_reservations) {
+    for (const auto &r : d.density_reservations) {
+      if (r.materialized_node >= 0)
+        continue;
+      total += r.width * r.height;
+      const int x0 = std::clamp(int(std::floor((r.x - l.xl) / dx)), 0, bx);
+      const int x1 =
+          std::clamp(int(std::ceil((r.x + r.width - l.xl) / dx)), 0, bx);
+      const int y0 = std::clamp(int(std::floor((r.y - l.yl) / dy)), 0, by);
+      const int y1 =
+          std::clamp(int(std::ceil((r.y + r.height - l.yl) / dy)), 0, by);
+      for (int x = x0; x < x1; ++x)
+        for (int y = y0; y < y1; ++y) {
+          const double w =
+              std::max(0., std::min(r.x + r.width, l.xl + (x + 1) * dx) -
+                               std::max(r.x, l.xl + x * dx));
+          const double h =
+              std::max(0., std::min(r.y + r.height, l.yl + (y + 1) * dy) -
+                               std::max(r.y, l.yl + y * dy));
+          movable[x * by + y] += w * h;
+        }
     }
   }
   double excess = 0;
@@ -296,7 +320,7 @@ void options_check(const Options &o) {
               finite(o.filler_cell_scale) && o.filler_cell_scale > 0 &&
               finite(o.filler_bin_fraction) && o.filler_bin_fraction > 0 &&
               o.filler_bin_fraction <= 1 && finite(o.filler_area_fraction) &&
-              o.filler_area_fraction > 0 && o.filler_area_fraction <= 1,
+              o.filler_area_fraction > 0 && o.filler_area_fraction <= 2,
           "invalid virtual filler budget");
   require(o.num_threads > 0 && o.num_threads <= 128,
           "thread count must be 1..128");
@@ -834,6 +858,8 @@ void Design::validate() const {
                 flat_net2pin_start[i + 1] - flat_net2pin_start[i] >= 2,
             "active net needs at least two pins");
   }
+  detail::validate_pin_timing(*this);
+  reservation_charge(*this);
 }
 
 double density_overflow(const Design &d, int bx, int by, double density,
@@ -843,7 +869,17 @@ double density_overflow(const Design &d, int bx, int by, double density,
           "invalid density metric bins");
   require(finite(density) && density > 0 && density <= 1,
           "invalid density metric target");
-  return overflow(d, bx, by, density, scale_macro);
+  return overflow(d, bx, by, density, scale_macro, false, 1, false);
+}
+
+double reservation_density_overflow(const Design &d, int bx, int by,
+                                    double density, bool scale_macro) {
+  d.validate();
+  require(bx > 0 && by > 0 && bx <= 4096 && by <= 4096,
+          "invalid density metric bins");
+  require(finite(density) && density > 0 && density <= 1,
+          "invalid density metric target");
+  return overflow(d, bx, by, density, scale_macro, false, 1, true);
 }
 double hpwl(const Design &d) {
   d.validate();
@@ -1108,6 +1144,27 @@ Result place(Design &design, const Options &options, GpState *state) {
                              [](auto v) { return v != 0; }),
             "GP A/B search cannot move macros");
   }
+  if (o.checkpoint_rollback) {
+    require(o.checkpoint && o.checkpoint_interval > 0 && !state &&
+                !o.gp_search.enabled && !o.trial_tuning && !o.magnet_runtime &&
+                !o.macro_transparency.enabled() && !o.vanished_memory &&
+                !o.terminal_update && !o.movable_update &&
+                !o.macro_pull_update && !o.routability &&
+                !o.post_density_factor && o.local_density_weight == 0 &&
+                o.centroid_weight == 0 && o.centroid_parent_weight == 0 &&
+                o.centroid_align_weight == 0 && o.macro_align_weight == 0 &&
+                o.macro_cell_density_weight == 0 &&
+                o.macro_density_pull_weight == 0 && o.order_weight == 0 &&
+                o.cohesion_weight == 0 && !o.macro_motion_observer &&
+                !o.macro_step_observer,
+            "GP rollback requires a fixed-footprint checkpoint solve without "
+            "mutable auxiliary policies");
+    require(design.node_macro.empty() ||
+                std::none_of(design.node_macro.begin(),
+                             design.node_macro.begin() + design.num_movable,
+                             [](auto v) { return v != 0; }),
+            "GP rollback cannot move macros");
+  }
   if (o.trial_tuning) {
     require(state && state->signature &&
                 state->iteration >=
@@ -1187,6 +1244,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         if (o.checkpoint && o.checkpoint_interval > 0) {
           physical.net_weights = snapshot.net_weights;
+          physical.pin_timing = snapshot.pin_timing;
           physical.pin_offset_x = snapshot.pin_offset_x;
           physical.pin_offset_y = snapshot.pin_offset_y;
           for (int i = 0; i < count(physical.node_x.size()); ++i) {
@@ -1526,6 +1584,10 @@ Result place(Design &design, const Options &options, GpState *state) {
   if (warm && state->signature != signature) {
     throw std::invalid_argument("GP continuation options changed");
   }
+  require(!warm || state->pin_timing == design.pin_timing,
+          "GP continuation pin timing changed outside a checkpoint");
+  require(!warm || state->density_reservations == design.density_reservations,
+          "GP continuation density reservations changed outside a checkpoint");
   Result r;
   r.uroute_skipped = o.uroute_skipped;
   if (o.uroute)
@@ -1607,6 +1669,9 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
     cell_space = std::max(0., cell_space);
   }
+  bool reservation_accounting =
+      warm ? state->reservation_accounting : !d.density_reservations.empty();
+  double filler_rounding_loss = 0;
   const auto gp_start = std::chrono::steady_clock::now();
   if (d.num_movable && o.max_iterations) {
     auto active = [&](int i) { return i < d.num_movable || i >= original; };
@@ -1661,6 +1726,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     if (o.add_fillers) {
       double target_area =
           std::max(0., o.target_density * (width * height - fixed_area) - area +
+                           reservation_charge(d).materialized_area +
                            (o.scale_macro_density
                                 ? (1 - o.target_density) * macro_area
                                 : 0)) *
@@ -1758,6 +1824,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       int fillers = desired;
       r.filler_count = fillers;
       r.filler_area = fillers * fw * fh;
+      filler_rounding_loss = std::max(0., target_area - r.filler_area);
       r.filler_size_x = fw;
       r.filler_size_y = fh;
       for (int i = 0; i < fillers; ++i) {
@@ -1877,7 +1944,8 @@ Result place(Design &design, const Options &options, GpState *state) {
           model, o.local_density_bins, o.local_density_range, local_target,
           o.num_threads);
     }
-    std::vector<double> map, phi, fx, fy;
+    std::vector<double> map, phi, fx, fy, reserved_map;
+    bool reservation_map_dirty = true;
     auto x = d.node_x, y = d.node_y, prev_x = x, prev_y = y;
     std::vector<double> old_gx(n), old_gy(n), old_ex(n), old_ey(n);
     double density_weight = o.initial_density_weight, t = 1, alpha = 0;
@@ -2078,6 +2146,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         !o.macro_align_weight && !macro_routing &&
         !(o.macro_pull_update && o.macro_pull_interval > 0);
     double best_feasible_hpwl = std::numeric_limits<double>::infinity();
+    bool pin_timing_seen = d.pin_timing && d.pin_timing->enabled();
     std::vector<MacroPull> macro_pulls = o.magnet_runtime
                                              ? o.magnet_runtime->macro_pulls
                                              : std::vector<MacroPull>{};
@@ -2182,6 +2251,9 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
     const auto save_state = [&](int iteration) {
       GpState s;
+      s.pin_timing = d.pin_timing;
+      s.density_reservations = d.density_reservations;
+      s.reservation_accounting = reservation_accounting;
       s.convergence = convergence;
       s.signature = signature;
       s.iteration = iteration;
@@ -2216,6 +2288,16 @@ Result place(Design &design, const Options &options, GpState *state) {
       s.align_pairs = align_pairs;
       return s;
     };
+    struct RetainedCheckpoint {
+      Design design, model;
+      GpState state;
+      bool restart = false, pin_timing_seen = false;
+      double overflow = 0;
+      std::vector<double> sx, sy, ox, oy, ratio;
+      double effective_filler_area = 0;
+    };
+    std::optional<RetainedCheckpoint> retained_checkpoint;
+    int restored_selection = 0;
     GpTrialTuning tuning = o.trial_tuning.value_or(
         GpTrialTuning{1, o.vanished_memory ? o.vanished_memory_local_floor
                                            : o.local_density_weight});
@@ -2223,6 +2305,8 @@ Result place(Design &design, const Options &options, GpState *state) {
     bool tuned = o.trial_tuning.has_value();
     for (int iter = 0; iter < o.max_iterations; ++iter) {
       const int global_iter = offset + iter;
+      bool retain_checkpoint = false;
+      restored_selection = 0;
       if (o.gp_search.enabled && global_iter >= o.checkpoint_start &&
           global_iter >= o.gp_search.start &&
           (global_iter - o.gp_search.start) % o.gp_search.interval == 0 &&
@@ -2483,6 +2567,16 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
       }
       auto wg = detail::wirelength(d, gamma, o.num_threads);
+      double pin_timing_cost = 0;
+      if (d.pin_timing && d.pin_timing->enabled()) {
+        const auto timing = detail::pin_timing_force(d, gamma);
+        pin_timing_cost = timing.value;
+        wg.value += timing.value;
+        for (int i = 0; i < n; ++i) {
+          wg.x[i] += timing.x[i];
+          wg.y[i] += timing.y[i];
+        }
+      }
       const double lambda =
           o.order_weight * std::pow(o.order_growth, global_iter);
       require(finite(lambda), "relative-order schedule overflow");
@@ -2622,6 +2716,38 @@ Result place(Design &design, const Options &options, GpState *state) {
           ratio[i] *= tuning.filler_charge;
         }
       }
+      const auto apply_reservation_fillers = [&](double current_target) {
+        require(o.add_fillers,
+                "density reservations require enabled filler accounting");
+        const auto charge = reservation_charge(d, inflation);
+        const double real_charge =
+            area * inflated_ratio -
+            (o.scale_macro_density ? (1 - current_target) * macro_area : 0);
+        const double freed = o.vanished_memory
+                                 ? fixed_macro_area - excluded_macro_area
+                                 : (transparent ? fixed_macro_area : 0);
+        const double budget =
+            o.filler_cell_space
+                ? (1 - o.target_density) * cell_space * o.filler_area_fraction
+                : std::max(0., current_target *
+                                       (width * height - fixed_area + freed) -
+                                   (real_charge - charge.materialized_area)) *
+                      o.filler_area_fraction;
+        const double effective = detail::reservation_filler_area(
+            budget * (tuned ? tuning.filler_charge : 1), filler_rounding_loss,
+            charge);
+        require(r.filler_area > 0 || effective == 0,
+                "density reservations require available filler particles");
+        filler_scale = r.filler_area > 0 ? effective / r.filler_area : 0;
+        for (int i = original; i < n; ++i)
+          ratio[i] = filler_scale * d.node_size_x[i] * d.node_size_y[i] /
+                     (sx[i] * sy[i]);
+        r.effective_filler_area = effective;
+      };
+      if (reservation_accounting)
+        apply_reservation_fillers(target);
+
+      r.effective_filler_area = r.filler_area * filler_scale;
       if (o.macro_transparency.always ||
           (cycling && global_iter >= o.macro_transparency.warmup)) {
         for (int i = d.num_movable; i < original; ++i) {
@@ -2665,6 +2791,16 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
       detail::density_map(d, o.bins_x, o.bins_y, o.num_threads, sx, sy, ox, oy,
                           ratio, map);
+      if (reservation_accounting) {
+        if (reservation_map_dirty) {
+          detail::reservation_density_map(d, o.bins_x, o.bins_y,
+                                          o.exact_cell_density, o.num_threads,
+                                          reserved_map);
+          reservation_map_dirty = false;
+        }
+        for (size_t k = 0; k < map.size(); ++k)
+          map[k] += reserved_map[k];
+      }
       for (auto &v : map) {
         v = v / (dx * dy) - target;
         if (o.density_upper_bound) {
@@ -3320,6 +3456,75 @@ Result place(Design &design, const Options &options, GpState *state) {
             o.magnet_runtime->event(global_iter + 1, MagnetEvent::timing);
           }
         }
+        require(update.action == GpCheckpointAction::update ||
+                    o.checkpoint_rollback,
+                "GP checkpoint transaction requires checkpoint_rollback");
+        if (o.checkpoint_rollback) {
+          require(
+              !update.replacement && update.previous_node.empty() &&
+                  update.node_size_x.empty() && update.node_size_y.empty() &&
+                  update.pin_offset_x.empty() && update.pin_offset_y.empty(),
+              "GP rollback requires unchanged topology and footprint");
+        }
+        if (update.action == GpCheckpointAction::restore) {
+          require(retained_checkpoint.has_value(),
+                  "GP rollback has no retained checkpoint");
+          require(!update.stop_movable_updates && !update.timing_violation &&
+                      update.net_weights.empty() && !update.pin_timing &&
+                      !update.density_reservations,
+                  "GP restore cannot carry objective updates");
+          const auto &saved = *retained_checkpoint;
+          const auto &s = saved.state;
+          d = saved.design;
+          model = saved.model;
+          reservation_accounting = s.reservation_accounting;
+          reservation_map_dirty = true;
+          sx = saved.sx;
+          sy = saved.sy;
+          ox = saved.ox;
+          oy = saved.oy;
+          ratio = saved.ratio;
+          r.effective_filler_area = saved.effective_filler_area;
+          x = s.x;
+          y = s.y;
+          prev_x = s.prev_x;
+          prev_y = s.prev_y;
+          old_gx = s.old_gx;
+          old_gy = s.old_gy;
+          old_ex = s.old_ex;
+          old_ey = s.old_ey;
+          density_weight = s.density_weight;
+          density_initialized = s.density_initialized;
+          previous_overflow = s.previous_overflow;
+          previous_hpwl = s.previous_hpwl;
+          t = s.momentum;
+          alpha = s.step;
+          convergence = s.convergence;
+          inflation = s.inflation;
+          routing_utilization = s.routing_utilization;
+          active_route = s.route_model;
+          route_hold = s.route_hold;
+          probe_deadline = s.route_probe_deadline;
+          r.route_probed = s.route_probed;
+          r.route_switch_iteration = s.route_switch_iteration;
+          r.route_switch_rudy = s.route_switch_rudy;
+          r.route_switch_rsmt = s.route_switch_rsmt;
+          align_pairs = s.align_pairs;
+          restart = saved.restart;
+          pin_timing_seen = saved.pin_timing_seen;
+          spread_mobility = make_spread_mobility();
+          r.overflow = saved.overflow;
+          r.objective_converged = r.converged = false;
+          restored_selection = s.iteration;
+          r.rollback_history.push_back({global_iter + 1, s.iteration});
+          // Policy clocks and the iteration cap are monotonic. Suppress
+          // convergence on this rejected observation without changing the
+          // restored optimizer, fillers, weights or density normalization.
+          last_checkpoint = global_iter + 1;
+          continue;
+        }
+        retain_checkpoint =
+            invoke && update.action == GpCheckpointAction::retain;
         if (update.stop_movable_updates) {
           movable_updates_active = false;
         }
@@ -3341,9 +3546,11 @@ Result place(Design &design, const Options &options, GpState *state) {
           require(update.net_weights.empty() && update.node_size_x.empty() &&
                       update.node_size_y.empty() &&
                       update.pin_offset_x.empty() &&
-                      update.pin_offset_y.empty(),
+                      update.pin_offset_y.empty() && !update.pin_timing &&
+                      !update.density_reservations,
                   "GP replacement cannot be combined with field updates");
           Design candidate = std::move(*update.replacement);
+          candidate.pin_timing.reset();
           candidate.validate();
           const auto &a = d.layout;
           const auto &b = candidate.layout;
@@ -3461,6 +3668,10 @@ Result place(Design &design, const Options &options, GpState *state) {
             }
           };
           assign(candidate.net_weights, update.net_weights);
+          if (update.pin_timing)
+            candidate.pin_timing = update.pin_timing;
+          if (update.density_reservations)
+            candidate.density_reservations = *update.density_reservations;
           assign(candidate.node_size_x, update.node_size_x);
           assign(candidate.node_size_y, update.node_size_y);
           assign(candidate.pin_offset_x, update.pin_offset_x);
@@ -3485,13 +3696,27 @@ Result place(Design &design, const Options &options, GpState *state) {
                         candidate.node_size_y[i] <= height,
                     "GP checkpoint cell does not fit layout");
           }
-          const bool changed = candidate.net_weights != d.net_weights ||
+          const bool pin_timing_changed = candidate.pin_timing != d.pin_timing;
+          const bool reservations_changed =
+              candidate.density_reservations != d.density_reservations;
+          const bool changed = reservations_changed ||
+                               candidate.net_weights != d.net_weights ||
+                               pin_timing_changed ||
                                candidate.node_size_x != model.node_size_x ||
                                candidate.node_size_y != model.node_size_y ||
                                candidate.pin_offset_x != d.pin_offset_x ||
                                candidate.pin_offset_y != d.pin_offset_y;
           if (changed) {
             d.net_weights = candidate.net_weights;
+            d.pin_timing = candidate.pin_timing;
+            d.density_reservations = candidate.density_reservations;
+            pin_timing_seen =
+                pin_timing_seen || (d.pin_timing && d.pin_timing->enabled());
+            if (pin_timing_changed || reservations_changed) {
+              best_feasible_x.clear();
+              best_feasible_y.clear();
+              best_feasible_hpwl = std::numeric_limits<double>::infinity();
+            }
             std::copy_n(candidate.node_size_x.begin(), original,
                         d.node_size_x.begin());
             std::copy_n(candidate.node_size_y.begin(), original,
@@ -3502,6 +3727,9 @@ Result place(Design &design, const Options &options, GpState *state) {
           objective_changed = changed;
         }
         if (objective_changed) {
+          reservation_accounting =
+              reservation_accounting || !d.density_reservations.empty();
+          reservation_map_dirty = true;
           spread_mobility = make_spread_mobility();
           area = 0;
           double inflated = 0;
@@ -3554,6 +3782,8 @@ Result place(Design &design, const Options &options, GpState *state) {
               }
             }
           }
+          if (reservation_accounting)
+            apply_reservation_fillers(capacity);
           model = d;
           model.node_x.assign(x.begin(), x.begin() + original);
           model.node_y.assign(y.begin(), y.begin() + original);
@@ -3611,8 +3841,9 @@ Result place(Design &design, const Options &options, GpState *state) {
                                                fixed_macro_weight)
                        .value
                  : 0);
-        if (keep_feasible && opacity_settled && global_iter >= 39 &&
-            inflated_ratio == 1 && (!fixed_macro_weight || progress >= 1) &&
+        if (keep_feasible && !pin_timing_seen && opacity_settled &&
+            global_iter >= 39 && inflated_ratio == 1 &&
+            (!fixed_macro_weight || progress >= 1) &&
             r.overflow <= o.stop_overflow &&
             selection_cost < best_feasible_hpwl) {
           best_feasible_hpwl = selection_cost;
@@ -3641,6 +3872,16 @@ Result place(Design &design, const Options &options, GpState *state) {
         r.history.back().macro_exclusion_scale =
             transparent ? 0 : exclusion_scale;
         r.history.back().local_density_weight = local_weight;
+        r.history.back().pin_timing_cost = pin_timing_cost;
+        const auto sampled_charge = reservation_charge(d, inflation);
+        r.history.back().reserved_area = sampled_charge.virtual_area;
+        r.history.back().materialized_reserved_area =
+            sampled_charge.materialized_area;
+        r.history.back().effective_filler_area = r.effective_filler_area;
+        r.history.back().filler_count = r.filler_count;
+        r.history.back().filler_area = r.filler_area;
+        r.history.back().filler_size_x = r.filler_size_x;
+        r.history.back().filler_size_y = r.filler_size_y;
         if (align_centroids) {
           detail::centroid_alignment(physical, 0, 0, o.centroid_align_sigma,
                                      o.target_density, &centroid_align_pairs,
@@ -3863,6 +4104,20 @@ Result place(Design &design, const Options &options, GpState *state) {
           density_weight = std::min(density_weight * growth, 1e12);
         }
       }
+      if (retain_checkpoint) {
+        retained_checkpoint = RetainedCheckpoint{d,
+                                                 model,
+                                                 save_state(global_iter + 1),
+                                                 restart,
+                                                 pin_timing_seen,
+                                                 r.overflow,
+                                                 sx,
+                                                 sy,
+                                                 ox,
+                                                 oy,
+                                                 ratio,
+                                                 r.effective_filler_area};
+      }
     }
     r.centroid.completed = r.centroid.started;
     if (o.magnet_runtime) {
@@ -3895,6 +4150,9 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
     }
     if (state) {
+      next.pin_timing = d.pin_timing;
+      next.density_reservations = d.density_reservations;
+      next.reservation_accounting = reservation_accounting;
       next.convergence = convergence;
       next.signature = signature;
       next.iteration = offset + r.iterations;
@@ -3928,8 +4186,10 @@ Result place(Design &design, const Options &options, GpState *state) {
       next.route_probe_overflow = r.route_probe_overflow;
       next.align_pairs = align_pairs;
     }
-    r.selected_iteration = offset + r.iterations;
-    if (keep_feasible && inflated_ratio == 1 && !best_feasible_x.empty()) {
+    r.selected_iteration =
+        restored_selection ? restored_selection : offset + r.iterations;
+    if (keep_feasible && !pin_timing_seen && inflated_ratio == 1 &&
+        !best_feasible_x.empty()) {
       x = std::move(best_feasible_x);
       y = std::move(best_feasible_y);
       r.selected_iteration = best_feasible_iteration;
@@ -4033,6 +4293,13 @@ Result place(Design &design, const Options &options, GpState *state) {
   }
   r.legal = is_legal(d);
   r.hpwl = hpwl(d);
+  const auto final_charge = reservation_charge(d);
+  r.reserved_area = final_charge.virtual_area;
+  r.materialized_reserved_area = final_charge.materialized_area;
+  r.physical_overflow = reservation_accounting
+                            ? overflow(d, o.bins_x, o.bins_y, o.target_density,
+                                       o.scale_macro_density, false, 1, false)
+                            : r.overflow;
   for (int i = d.num_movable; i < original; ++i) {
     if (d.node_x[i] != model.node_x[i] || d.node_y[i] != model.node_y[i]) {
       throw std::runtime_error("kernel moved a fixed node");
