@@ -150,6 +150,27 @@ double overflow(const Design &d, int bx, int by, double target_density,
   double dx = (l.xh - l.xl) / bx, dy = (l.yh - l.yl) / by;
   std::vector<double> movable(bx * by), fixed(bx * by);
   double total = 0;
+  // Exact rectangle/bin overlap. Clamp before the int conversion: fixed nodes
+  // may lie far outside the core.
+  const auto deposit = [&](std::vector<double> &map, double x, double y,
+                           double w, double h, double charge) {
+    const auto cell = [](double v, int count) {
+      return static_cast<int>(std::clamp(v, 0., double(count)));
+    };
+    const int x0 = cell(std::floor((x - l.xl) / dx), bx);
+    const int x1 = cell(std::ceil((x + w - l.xl) / dx), bx);
+    const int y0 = cell(std::floor((y - l.yl) / dy), by);
+    const int y1 = cell(std::ceil((y + h - l.yl) / dy), by);
+    for (int k = x0; k < x1; ++k) {
+      for (int j = y0; j < y1; ++j) {
+        const double a = std::max(0., std::min(x + w, l.xl + (k + 1) * dx) -
+                                          std::max(x, l.xl + k * dx));
+        const double b = std::max(0., std::min(y + h, l.yl + (j + 1) * dy) -
+                                          std::max(y, l.yl + j * dy));
+        map[k * by + j] += charge * a * b;
+      }
+    }
+  };
   for (int i = 0; i < count(d.node_x.size()); ++i) {
     if (ignore_fixed_macros && i >= d.num_movable && !d.node_macro.empty() &&
         d.node_macro[i]) {
@@ -171,47 +192,14 @@ double overflow(const Design &d, int bx, int by, double target_density,
     if (i < d.num_movable) {
       total += charge * w * h;
     }
-    // Clamp before the int conversion: fixed nodes may lie far outside the
-    // core.
-    const auto cell = [](double v, int count) {
-      return static_cast<int>(std::clamp(v, 0., double(count)));
-    };
-    int x0 = cell(std::floor((x - l.xl) / dx), bx);
-    int x1 = cell(std::ceil((x + w - l.xl) / dx), bx);
-    int y0 = cell(std::floor((y - l.yl) / dy), by);
-    int y1 = cell(std::ceil((y + h - l.yl) / dy), by);
-    auto &map = i < d.num_movable ? movable : fixed;
-    for (int k = x0; k < x1; ++k) {
-      for (int j = y0; j < y1; ++j) {
-        double a = std::max(0., std::min(x + w, l.xl + (k + 1) * dx) -
-                                    std::max(x, l.xl + k * dx));
-        double b = std::max(0., std::min(y + h, l.yl + (j + 1) * dy) -
-                                    std::max(y, l.yl + j * dy));
-        map[k * by + j] += charge * a * b;
-      }
-    }
+    deposit(i < d.num_movable ? movable : fixed, x, y, w, h, charge);
   }
   if (include_reservations) {
     for (const auto &r : d.density_reservations) {
       if (r.materialized_node >= 0)
         continue;
       total += r.width * r.height;
-      const int x0 = std::clamp(int(std::floor((r.x - l.xl) / dx)), 0, bx);
-      const int x1 =
-          std::clamp(int(std::ceil((r.x + r.width - l.xl) / dx)), 0, bx);
-      const int y0 = std::clamp(int(std::floor((r.y - l.yl) / dy)), 0, by);
-      const int y1 =
-          std::clamp(int(std::ceil((r.y + r.height - l.yl) / dy)), 0, by);
-      for (int x = x0; x < x1; ++x)
-        for (int y = y0; y < y1; ++y) {
-          const double w =
-              std::max(0., std::min(r.x + r.width, l.xl + (x + 1) * dx) -
-                               std::max(r.x, l.xl + x * dx));
-          const double h =
-              std::max(0., std::min(r.y + r.height, l.yl + (y + 1) * dy) -
-                               std::max(r.y, l.yl + y * dy));
-          movable[x * by + y] += w * h;
-        }
+      deposit(movable, r.x, r.y, r.width, r.height, 1);
     }
   }
   double excess = 0;
