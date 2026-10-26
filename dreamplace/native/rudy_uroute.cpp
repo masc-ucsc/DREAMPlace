@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 #if defined(__aarch64__) && defined(__ARM_NEON)
@@ -115,13 +116,20 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
 // contract. ReLU/sigmoid also remove any intermediate zero-sign distinction.
 // The largest v1 tile is 72 KiB, rather than a full-grid im2col allocation.
 Tensor conv(const UrouteWeights &w, const std::string &name,
-            const Tensor &input, int outputs, int kernel) {
+            const Tensor &input, int outputs, int kernel,
+            const Tensor *seed = nullptr, int weight_channels = 0,
+            int channel_offset = 0) {
 #if defined(__aarch64__) && defined(__ARM_NEON)
 
-  if (outputs < 4 || outputs % 4)
+  if (outputs < 4 || outputs % 4) {
+    // The spatial fallback has no seeded/partial-channel form.
+    if (seed || weight_channels || channel_offset)
+      throw std::invalid_argument("seeded URoute convolution needs 4-way outputs");
     return conv_spatial(w, name, input, outputs, kernel);
+  }
   using Pack = float32x4_t;
-  const std::array<int, 4> shape{outputs, input.c, kernel, kernel};
+  const std::array<int, 4> shape{
+      outputs, weight_channels ? weight_channels : input.c, kernel, kernel};
   const std::array<int, 1> bs{outputs};
   const auto weights = w.tensor(name + ".weight", shape);
   const auto bias = w.tensor(name + ".bias", bs);
@@ -130,6 +138,8 @@ Tensor conv(const UrouteWeights &w, const std::string &name,
   const int pad = kernel / 2;
   constexpr int tile = 16;
   const int stride = input.c * kernel * kernel;
+  const int full_stride =
+      (weight_channels ? weight_channels : input.c) * kernel * kernel;
   std::vector<float> packed(size_t(stride) * tile);
   for (int x = 0; x < input.x; ++x)
     for (int y = 0; y < input.y; y += tile) {
@@ -140,28 +150,57 @@ Tensor conv(const UrouteWeights &w, const std::string &name,
             const int k = (ic * kernel + kx) * kernel + ky, ix = x + kx - pad,
                       iy = y + ky - pad;
             auto *dest = packed.data() + size_t(k) * tile;
-            std::fill_n(dest, tile, 0.f);
-            const int lo = std::max(0, -iy), hi = std::min(count, input.y - iy);
-            if (ix >= 0 && ix < input.x && hi > lo) {
+            // Interior tiles overwrite every lane: avoid zero filling and
+            // use a fixed-size copy. Boundary tiles retain exact zero padding.
+            if (ix >= 0 && ix < input.x && count == tile && iy >= 0 &&
+                iy + tile <= input.y) {
               const auto *src = input.data.data() + size_t(ic) * area +
-                                size_t(ix) * input.y + size_t(iy + lo);
-              std::memcpy(dest + lo, src, size_t(hi - lo) * sizeof(float));
+                                size_t(ix) * input.y + size_t(iy);
+              std::memcpy(dest, src, size_t(tile) * sizeof(float));
+            } else {
+              std::fill_n(dest, tile, 0.f);
+              const int lo = std::max(0, -iy),
+                        hi = std::min(count, input.y - iy);
+              if (ix >= 0 && ix < input.x && hi > lo) {
+                const auto *src = input.data.data() + size_t(ic) * area +
+                                  size_t(ix) * input.y + size_t(iy + lo);
+                std::memcpy(dest + lo, src, size_t(hi - lo) * sizeof(float));
+              }
             }
           }
       for (int oc = 0; oc < outputs; oc += 4) {
-        Pack a00{bias[oc], bias[oc], bias[oc], bias[oc]}, a01 = a00, a02 = a00,
-                                                          a03 = a00;
-        Pack a10{bias[oc + 1], bias[oc + 1], bias[oc + 1], bias[oc + 1]},
-            a11 = a10, a12 = a10, a13 = a10;
-        Pack a20{bias[oc + 2], bias[oc + 2], bias[oc + 2], bias[oc + 2]},
-            a21 = a20, a22 = a20, a23 = a20;
-        Pack a30{bias[oc + 3], bias[oc + 3], bias[oc + 3], bias[oc + 3]},
-            a31 = a30, a32 = a30, a33 = a30;
+        auto initial = [&](int output, int spatial) {
+          Pack value = vdupq_n_f32(seed ? 0.f : bias[output]);
+          if (seed && count > spatial) {
+            const auto offset =
+                size_t(output) * area + size_t(x) * input.y + y + spatial;
+            std::memcpy(&value, seed->data.data() + offset,
+                        size_t(std::min(4, count - spatial)) * sizeof(float));
+          }
+          return value;
+        };
+        Pack a00 = initial(oc + 0, 0);
+        Pack a01 = initial(oc + 0, 4);
+        Pack a02 = initial(oc + 0, 8);
+        Pack a03 = initial(oc + 0, 12);
+        Pack a10 = initial(oc + 1, 0);
+        Pack a11 = initial(oc + 1, 4);
+        Pack a12 = initial(oc + 1, 8);
+        Pack a13 = initial(oc + 1, 12);
+        Pack a20 = initial(oc + 2, 0);
+        Pack a21 = initial(oc + 2, 4);
+        Pack a22 = initial(oc + 2, 8);
+        Pack a23 = initial(oc + 2, 12);
+        Pack a30 = initial(oc + 3, 0);
+        Pack a31 = initial(oc + 3, 4);
+        Pack a32 = initial(oc + 3, 8);
+        Pack a33 = initial(oc + 3, 12);
         for (int k = 0; k < stride; ++k) {
-          const size_t index = size_t(oc) * stride + k;
-          const float w0 = weights[index], w1 = weights[index + stride],
-                      w2 = weights[index + 2 * stride],
-                      w3 = weights[index + 3 * stride];
+          const size_t index =
+              size_t(oc) * full_stride + channel_offset * kernel * kernel + k;
+          const float w0 = weights[index], w1 = weights[index + full_stride],
+                      w2 = weights[index + 2 * full_stride],
+                      w3 = weights[index + 3 * full_stride];
 
           Pack v0;
           std::memcpy(&v0, packed.data() + size_t(k) * tile + 0, sizeof(Pack));
@@ -279,6 +318,8 @@ Tensor conv(const UrouteWeights &w, const std::string &name,
       throw std::runtime_error("URoute convolution overflow");
   return result;
 #else
+  if (seed || weight_channels || channel_offset)
+    throw std::invalid_argument("seeded URoute convolution requires NEON");
   return conv_spatial(w, name, input, outputs, kernel);
 #endif
 }
@@ -397,8 +438,24 @@ Tensor matching(const UrouteWeights &w, const std::string &name,
                 const Tensor &query, const std::vector<Tensor> &support) {
   Tensor total(64, query.x, query.y);
   const auto area = query.area();
+#if defined(__aarch64__) && defined(__ARM_NEON)
+  // Concatenation visits all query channels before any support channel. Reuse
+  // that exact f32 prefix, then continue each support's original FMA sequence.
+  // Do not split off and add an independently reduced support convolution:
+  // that would change rounding at cancellation-sensitive matching gates.
+  // The fixed .z weight shape already forces one support channel count.
+  std::optional<Tensor> prefix;
+  const int joined = support.empty() ? 0 : query.c + support.front().c;
+  if (support.size() > 1)
+    prefix.emplace(conv(w, name + ".z", query, 64, 3, nullptr, joined, 0));
+#endif
   for (const auto &s : support) {
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    auto z = prefix ? conv(w, name + ".z", s, 64, 3, &*prefix, joined, query.c)
+                    : conv(w, name + ".z", concat(query, s), 64, 3);
+#else
     auto z = conv(w, name + ".z", concat(query, s), 64, 3);
+#endif
     relu(z);
     Tensor mean(1, z.x, z.y);
     // CPU channel means sum contiguous blocks of 16 before combining them.
