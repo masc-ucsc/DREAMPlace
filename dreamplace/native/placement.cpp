@@ -100,6 +100,19 @@ int count(size_t n) {
           "array exceeds 32-bit kernel indices");
   return static_cast<int>(n);
 }
+// Stage-wide route-switch decisions. Result, GpState and the magnet runtime
+// carry them under the same names; copy all of them in one place.
+template <class To, class From>
+void copy_route_switch(To &to, const From &from) {
+  to.route_probed = from.route_probed;
+  to.route_switch_iteration = from.route_switch_iteration;
+  to.route_switch_rudy = from.route_switch_rudy;
+  to.route_switch_rsmt = from.route_switch_rsmt;
+  to.route_uroute_switch_iteration = from.route_uroute_switch_iteration;
+  to.route_switch_uroute_rsmt = from.route_switch_uroute_rsmt;
+  to.route_switch_uroute = from.route_switch_uroute;
+  to.route_probe_overflow = from.route_probe_overflow;
+}
 double placement_preconditioner(const Design &d, int i, double density_weight) {
   const double degree =
       i < int(d.flat_node2pin_start.size()) - 1
@@ -2002,25 +2015,10 @@ Result place(Design &design, const Options &options, GpState *state) {
     int probe_deadline = warm          ? state->route_probe_deadline
                          : rigid_route ? rigid_route->probe_deadline
                                        : 0;
-    if (warm) {
-      r.route_switch_iteration = state->route_switch_iteration;
-      r.route_switch_rudy = state->route_switch_rudy;
-      r.route_switch_rsmt = state->route_switch_rsmt;
-      r.route_probed = state->route_probed;
-      r.route_uroute_switch_iteration = state->route_uroute_switch_iteration;
-      r.route_switch_uroute_rsmt = state->route_switch_uroute_rsmt;
-      r.route_switch_uroute = state->route_switch_uroute;
-      r.route_probe_overflow = state->route_probe_overflow;
-    } else if (rigid_route) {
-      r.route_switch_iteration = rigid_route->switch_iteration;
-      r.route_switch_rudy = rigid_route->switch_rudy;
-      r.route_switch_rsmt = rigid_route->switch_rsmt;
-      r.route_probed = rigid_route->probed;
-      r.route_uroute_switch_iteration = rigid_route->uroute_switch_iteration;
-      r.route_switch_uroute_rsmt = rigid_route->switch_uroute_rsmt;
-      r.route_switch_uroute = rigid_route->switch_uroute;
-      r.route_probe_overflow = rigid_route->probe_overflow;
-    }
+    if (warm)
+      copy_route_switch(r, *state);
+    else if (rigid_route)
+      copy_route_switch(r, *rigid_route);
     double route_sample_seconds = 0, route_peak_utilization = 0;
     bool route_sampled = false;
     int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
@@ -2293,16 +2291,36 @@ Result place(Design &design, const Options &options, GpState *state) {
       s.route_hold = route_hold;
       s.route_uroute_hold = uroute_hold;
       s.route_probe_deadline = probe_deadline;
-      s.route_probed = r.route_probed;
-      s.route_switch_iteration = r.route_switch_iteration;
-      s.route_switch_rudy = r.route_switch_rudy;
-      s.route_switch_rsmt = r.route_switch_rsmt;
-      s.route_uroute_switch_iteration = r.route_uroute_switch_iteration;
-      s.route_switch_uroute_rsmt = r.route_switch_uroute_rsmt;
-      s.route_switch_uroute = r.route_switch_uroute;
-      s.route_probe_overflow = r.route_probe_overflow;
+      copy_route_switch(s, r);
       s.align_pairs = align_pairs;
       return s;
+    };
+    // Inverse of save_state for optimizer, objective and routing decisions.
+    // Callers own design, filler geometry and reservation bookkeeping.
+    const auto restore_state = [&](GpState s) {
+      x = std::move(s.x);
+      y = std::move(s.y);
+      prev_x = std::move(s.prev_x);
+      prev_y = std::move(s.prev_y);
+      old_gx = std::move(s.old_gx);
+      old_gy = std::move(s.old_gy);
+      old_ex = std::move(s.old_ex);
+      old_ey = std::move(s.old_ey);
+      density_weight = s.density_weight;
+      density_initialized = s.density_initialized;
+      previous_overflow = s.previous_overflow;
+      previous_hpwl = s.previous_hpwl;
+      t = s.momentum;
+      alpha = s.step;
+      convergence = s.convergence;
+      inflation = std::move(s.inflation);
+      routing_utilization = std::move(s.routing_utilization);
+      active_route = s.route_model;
+      route_hold = s.route_hold;
+      uroute_hold = s.route_uroute_hold;
+      probe_deadline = s.route_probe_deadline;
+      copy_route_switch(r, s);
+      align_pairs = std::move(s.align_pairs);
     };
     struct RetainedCheckpoint {
       Design design, model;
@@ -2443,37 +2461,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         auto &winner = trials[sample.selected];
         tuning = sample.settings[sample.selected];
         tuned = true;
-        auto &s = winner.state;
-        x = std::move(s.x);
-        y = std::move(s.y);
-        prev_x = std::move(s.prev_x);
-        prev_y = std::move(s.prev_y);
-        old_gx = std::move(s.old_gx);
-        old_gy = std::move(s.old_gy);
-        old_ex = std::move(s.old_ex);
-        old_ey = std::move(s.old_ey);
-        density_weight = s.density_weight;
-        density_initialized = s.density_initialized;
-        previous_overflow = s.previous_overflow;
-        previous_hpwl = s.previous_hpwl;
-        t = s.momentum;
-        alpha = s.step;
-        convergence = s.convergence;
-        inflation = std::move(s.inflation);
-        routing_utilization = std::move(s.routing_utilization);
-        active_route = s.route_model;
-        route_hold = s.route_hold;
-        uroute_hold = s.route_uroute_hold;
-        probe_deadline = s.route_probe_deadline;
-        r.route_probed = s.route_probed;
-        r.route_switch_iteration = s.route_switch_iteration;
-        r.route_switch_rudy = s.route_switch_rudy;
-        r.route_switch_rsmt = s.route_switch_rsmt;
-        r.route_uroute_switch_iteration = s.route_uroute_switch_iteration;
-        r.route_switch_uroute_rsmt = s.route_switch_uroute_rsmt;
-        r.route_switch_uroute = s.route_switch_uroute;
-        r.route_probe_overflow = s.route_probe_overflow;
-        align_pairs = std::move(s.align_pairs);
+        restore_state(std::move(winner.state));
         model = std::move(winner.physical);
         double inflated = 0;
         for (int i = 0; i < d.num_movable; ++i) {
@@ -3501,31 +3489,8 @@ Result place(Design &design, const Options &options, GpState *state) {
           oy = saved.oy;
           ratio = saved.ratio;
           r.effective_filler_area = saved.effective_filler_area;
-          x = s.x;
-          y = s.y;
-          prev_x = s.prev_x;
-          prev_y = s.prev_y;
-          old_gx = s.old_gx;
-          old_gy = s.old_gy;
-          old_ex = s.old_ex;
-          old_ey = s.old_ey;
-          density_weight = s.density_weight;
-          density_initialized = s.density_initialized;
-          previous_overflow = s.previous_overflow;
-          previous_hpwl = s.previous_hpwl;
-          t = s.momentum;
-          alpha = s.step;
-          convergence = s.convergence;
-          inflation = s.inflation;
-          routing_utilization = s.routing_utilization;
-          active_route = s.route_model;
-          route_hold = s.route_hold;
-          probe_deadline = s.route_probe_deadline;
-          r.route_probed = s.route_probed;
-          r.route_switch_iteration = s.route_switch_iteration;
-          r.route_switch_rudy = s.route_switch_rudy;
-          r.route_switch_rsmt = s.route_switch_rsmt;
-          align_pairs = s.align_pairs;
+          // Rollback excludes routability: its saved route decisions are inert.
+          restore_state(s);
           restart = saved.restart;
           pin_timing_seen = saved.pin_timing_seen;
           spread_mobility = make_spread_mobility();
@@ -4135,17 +4100,10 @@ Result place(Design &design, const Options &options, GpState *state) {
     r.centroid.completed = r.centroid.started;
     if (o.magnet_runtime) {
       o.magnet_runtime->density_initialized = density_initialized;
-      o.magnet_runtime->routing =
-          detail::MagnetRuntime::RouteProgress{active_route,
-                                               probe_deadline,
-                                               r.route_switch_iteration,
-                                               r.route_switch_rudy,
-                                               r.route_switch_rsmt,
-                                               r.route_probed,
-                                               r.route_uroute_switch_iteration,
-                                               r.route_switch_uroute_rsmt,
-                                               r.route_switch_uroute,
-                                               r.route_probe_overflow};
+      auto &routing = o.magnet_runtime->routing.emplace();
+      routing.model = active_route;
+      routing.probe_deadline = probe_deadline;
+      copy_route_switch(routing, r);
       o.magnet_runtime->convergence = convergence;
       o.magnet_runtime->checkpoint_invoked = checkpoint_invoked;
       o.magnet_runtime->macro_pulls = std::move(macro_pulls);
@@ -4163,41 +4121,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
     }
     if (state) {
-      next.pin_timing = d.pin_timing;
-      next.density_reservations = d.density_reservations;
-      next.reservation_accounting = reservation_accounting;
-      next.convergence = convergence;
-      next.signature = signature;
-      next.iteration = offset + r.iterations;
-      next.x = x;
-      next.y = y;
-      next.prev_x = prev_x;
-      next.prev_y = prev_y;
-      next.old_gx = old_gx;
-      next.old_gy = old_gy;
-      next.old_ex = old_ex;
-      next.old_ey = old_ey;
-      next.density_weight = density_weight;
-      next.density_initialized = density_initialized;
-      next.previous_overflow = previous_overflow;
-      next.previous_hpwl = previous_hpwl;
-      next.momentum = t;
-      next.step = alpha;
-      next.inflation = inflation;
-      next.routing_utilization = routing_utilization;
-      next.route_model = active_route;
-      next.route_hold = route_hold;
-      next.route_uroute_hold = uroute_hold;
-      next.route_probe_deadline = probe_deadline;
-      next.route_probed = r.route_probed;
-      next.route_switch_iteration = r.route_switch_iteration;
-      next.route_switch_rudy = r.route_switch_rudy;
-      next.route_switch_rsmt = r.route_switch_rsmt;
-      next.route_uroute_switch_iteration = r.route_uroute_switch_iteration;
-      next.route_switch_uroute_rsmt = r.route_switch_uroute_rsmt;
-      next.route_switch_uroute = r.route_switch_uroute;
-      next.route_probe_overflow = r.route_probe_overflow;
-      next.align_pairs = align_pairs;
+      next = save_state(offset + r.iterations);
     }
     r.selected_iteration =
         restored_selection ? restored_selection : offset + r.iterations;

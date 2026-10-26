@@ -172,14 +172,15 @@ public:
   bool density_initialized = false;
   // Stage-wide routing decisions survive a geometry contraction. The hold
   // counter and geometry-dependent utilization maps intentionally restart.
+  // Field names match Result/GpState so the solver copies them uniformly.
   struct RouteProgress {
     RouteModel model = RouteModel::rudy;
-    int probe_deadline = 0, switch_iteration = -1;
-    double switch_rudy = -1, switch_rsmt = -1;
-    bool probed = false;
-    int uroute_switch_iteration = -1;
-    double switch_uroute_rsmt = -1, switch_uroute = -1;
-    double probe_overflow = -1;
+    int probe_deadline = 0, route_switch_iteration = -1;
+    double route_switch_rudy = -1, route_switch_rsmt = -1;
+    bool route_probed = false;
+    int route_uroute_switch_iteration = -1;
+    double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
+    double route_probe_overflow = -1;
   };
   std::optional<RouteProgress> routing;
 
