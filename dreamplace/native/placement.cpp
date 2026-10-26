@@ -2679,6 +2679,27 @@ Result place(Design &design, const Options &options, GpState *state) {
               std::max(0., std::min(l.yh, my + h) - std::max(l.yl, my));
         }
       }
+      // Whitespace charge left for fillers. Keep total charge consistent with
+      // the effective capacity; a uniform target shift is the discarded DC
+      // mode and cannot change forces. Materialized reservations already
+      // carry their cells' charge.
+      const auto filler_budget = [&](double current_target,
+                                     double materialized_area) {
+        const double real_charge =
+            area * inflated_ratio -
+            (o.scale_macro_density ? (1 - current_target) * macro_area : 0);
+        const double freed_macro_area =
+            o.vanished_memory ? fixed_macro_area - excluded_macro_area
+                              : (transparent ? fixed_macro_area : 0);
+        return o.filler_cell_space
+                   ? (1 - o.target_density) * cell_space *
+                         o.filler_area_fraction
+                   : std::max(0.,
+                              current_target * (width * height - fixed_area +
+                                                freed_macro_area) -
+                                  (real_charge - materialized_area)) *
+                         o.filler_area_fraction;
+      };
       if ((o.gp_search.enabled || o.trial_tuning || o.vanished_memory ||
            (o.improved_routability && o.routability_charge_compensation) ||
            (o.macro_transparency.always ||
@@ -2688,22 +2709,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         for (int i = original; i < n; ++i) {
           filler_area += d.node_size_x[i] * d.node_size_y[i];
         }
-        // Keep total charge consistent with the effective capacity. A uniform
-        // target shift is the discarded DC mode and cannot change forces.
-        const double real_charge =
-            area * inflated_ratio -
-            (o.scale_macro_density ? (1 - target) * macro_area : 0);
-        const double freed_macro_area =
-            o.vanished_memory ? fixed_macro_area - excluded_macro_area
-                              : (transparent ? fixed_macro_area : 0);
-        const double budget =
-            o.filler_cell_space
-                ? (1 - o.target_density) * cell_space * o.filler_area_fraction
-                : std::max(0., target * (width * height - fixed_area +
-                                         freed_macro_area) -
-                                   real_charge) *
-                      o.filler_area_fraction;
-        filler_scale = filler_area ? budget / filler_area : 0;
+        filler_scale = filler_area ? filler_budget(target, 0) / filler_area : 0;
         for (int i = original; i < n; ++i) {
           ratio[i] = filler_scale * d.node_size_x[i] * d.node_size_y[i] /
                      (sx[i] * sy[i]);
@@ -2724,19 +2730,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         require(o.add_fillers,
                 "density reservations require enabled filler accounting");
         const auto charge = reservation_charge(d, inflation);
-        const double real_charge =
-            area * inflated_ratio -
-            (o.scale_macro_density ? (1 - current_target) * macro_area : 0);
-        const double freed = o.vanished_memory
-                                 ? fixed_macro_area - excluded_macro_area
-                                 : (transparent ? fixed_macro_area : 0);
         const double budget =
-            o.filler_cell_space
-                ? (1 - o.target_density) * cell_space * o.filler_area_fraction
-                : std::max(0., current_target *
-                                       (width * height - fixed_area + freed) -
-                                   (real_charge - charge.materialized_area)) *
-                      o.filler_area_fraction;
+            filler_budget(current_target, charge.materialized_area);
         const double effective = detail::reservation_filler_area(
             budget * (tuned ? tuning.filler_charge : 1), filler_rounding_loss,
             charge);
