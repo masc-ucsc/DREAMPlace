@@ -165,13 +165,7 @@ RudyResult rsmt_rudy(const Design &d, const RudyOptions &o) {
         }
     }
   }
-  for (int k = 0; k < count; ++k) {
-    double u = std::max({r.horizontal[k], r.vertical[k], r.pin_utilization[k]});
-    if (!std::isfinite(u))
-      throw std::invalid_argument("RSMT-RUDY demand overflow");
-    r.max_utilization = std::max(r.max_utilization, u);
-    r.overflow += std::max(0., u - 1) / count;
-  }
+  detail::accumulate_overflow(r);
   if (!std::isfinite(r.overflow))
     throw std::invalid_argument("RSMT-RUDY overflow");
   return r;

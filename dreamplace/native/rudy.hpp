@@ -83,6 +83,9 @@ private:
 };
 namespace detail {
 void validate_rudy(const Design &, const RudyOptions &);
+// Adds the mean excess of max(horizontal, vertical, pin_utilization) over 1
+// and the peak, in bin order. Model-specific penalties are added afterwards.
+void accumulate_overflow(RudyResult &);
 struct MacroRoutingPressure {
   // Objective gradients: descent opens congested channels. Fixed nodes stay
   // zero.

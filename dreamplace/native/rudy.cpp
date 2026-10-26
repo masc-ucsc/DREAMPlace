@@ -37,6 +37,17 @@ void detail::validate_rudy(const Design &d, const RudyOptions &o) {
     throw std::invalid_argument("RUDY bin capacity overflow or underflow");
   }
 }
+void detail::accumulate_overflow(RudyResult &r) {
+  const auto count = r.horizontal.size();
+  for (size_t k = 0; k < count; ++k) {
+    const double u =
+        std::max({r.horizontal[k], r.vertical[k], r.pin_utilization[k]});
+    if (!std::isfinite(u))
+      throw std::invalid_argument("RUDY demand overflow");
+    r.max_utilization = std::max(r.max_utilization, u);
+    r.overflow += std::max(0., u - 1) / count;
+  }
+}
 RudyResult rudy(const Design &d, const RudyOptions &o) {
   detail::validate_rudy(d, o);
   if (o.model == RudyModel::uroute)
@@ -57,8 +68,6 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
     return static_cast<int>(
         std::clamp(std::floor((coordinate - lo) / pitch), 0., double(count)));
   };
-  std::vector<double> available_h(o.bins_x * o.bins_y, o.horizontal_capacity);
-  std::vector<double> available_v(o.bins_x * o.bins_y, o.vertical_capacity);
   if (o.pin_access) {
     for (int p = 0; p < static_cast<int>(d.pin2node.size()); ++p) {
       const int node = d.pin2node[p];
@@ -78,7 +87,8 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
           std::min(bin(y, l.yl, dy, o.bins_y), o.bins_y - 1);
       // Access sites scale with tracks crossing bin edges, not bin area.
       r.pin_utilization[k] +=
-          1 / ((dx + dy) * std::sqrt(available_h[k] * available_v[k]));
+          1 /
+          ((dx + dy) * std::sqrt(o.horizontal_capacity * o.vertical_capacity));
     }
   }
   for (int n = 0; n < static_cast<int>(d.net_weights.size()); ++n) {
@@ -133,14 +143,7 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
       }
     }
   }
-  for (size_t i = 0; i < r.horizontal.size(); ++i) {
-    r.horizontal[i] *= o.horizontal_capacity / available_h[i];
-    r.vertical[i] *= o.vertical_capacity / available_v[i];
-    const double u =
-        std::max({r.horizontal[i], r.vertical[i], r.pin_utilization[i]});
-    r.max_utilization = std::max(r.max_utilization, u);
-    r.overflow += std::max(0., u - 1) / r.horizontal.size();
-  }
+  detail::accumulate_overflow(r);
   if (!std::isfinite(r.overflow)) {
     throw std::invalid_argument("RUDY overflow metric overflow");
   }

@@ -70,14 +70,20 @@ struct RudyMaskSnapshot::Data {
   std::vector<Net> nets;
   std::vector<Pin> pins;
 };
+// Replay cached events exactly as obstacle_rudy_impl applied them.
+static void replay(RudyResult &r, const RudyMaskSnapshot::Data::Pin &pin) {
+  if (pin.blocked)
+    r.pin_utilization[pin.bin] = std::max(r.pin_utilization[pin.bin], 2.);
+  r.pin_utilization[pin.bin] += pin.access;
+}
+static void replay(RudyResult &r,
+                   const RudyMaskSnapshot::Data::Deposit &deposit) {
+  r.horizontal[deposit.bin] += deposit.horizontal;
+  r.vertical[deposit.bin] += deposit.vertical;
+}
 static void finish_obstacle_result(RudyResult &r) {
   const auto count = r.horizontal.size();
-  for (size_t k = 0; k < count; ++k) {
-    const double u =
-        std::max({r.horizontal[k], r.vertical[k], r.pin_utilization[k]});
-    r.max_utilization = std::max(r.max_utilization, u);
-    r.overflow += std::max(0., u - 1) / count;
-  }
+  detail::accumulate_overflow(r);
   r.overflow += double(r.unroutable_nets + r.blocked_pins) / count;
   if (r.unroutable_nets || r.blocked_pins)
     r.max_utilization = std::max(r.max_utilization, 2.);
@@ -514,11 +520,8 @@ RudyResult RudyMaskSnapshot::measure(std::span<const std::uint8_t> mask) const {
   for (const auto &pin : data_->pins) {
     if (!mask[pin.net])
       continue;
-    if (pin.blocked) {
-      ++r.blocked_pins;
-      r.pin_utilization[pin.bin] = std::max(r.pin_utilization[pin.bin], 2.);
-    }
-    r.pin_utilization[pin.bin] += pin.access;
+    r.blocked_pins += pin.blocked;
+    replay(r, pin);
   }
   for (size_t n = 0; n < mask.size(); ++n) {
     if (!mask[n])
@@ -528,10 +531,8 @@ RudyResult RudyMaskSnapshot::measure(std::span<const std::uint8_t> mask) const {
     r.degenerate_nets += net.degenerate;
     r.unroutable_nets += net.unroutable;
     r.detour_wirelength += net.detour;
-    for (const auto &p : net.deposits) {
-      r.horizontal[p.bin] += p.horizontal;
-      r.vertical[p.bin] += p.vertical;
-    }
+    for (const auto &deposit : net.deposits)
+      replay(r, deposit);
   }
   finish_obstacle_result(r);
   return r;
@@ -603,16 +604,12 @@ RudyResult RudyMaskCursor::without(size_t net) const {
       const auto &pin = s.data->pins[i];
       if (size_t(pin.net) == net || !s.mask[pin.net])
         continue;
-      if (pin.blocked)
-        r.pin_utilization[bin] = std::max(r.pin_utilization[bin], 2.);
-      r.pin_utilization[bin] += pin.access;
+      replay(r, pin);
     }
     for (auto ref : s.deposits[bin]) {
       if (ref.net == net || !s.mask[ref.net])
         continue;
-      const auto &deposit = s.data->nets[ref.net].deposits[ref.deposit];
-      r.horizontal[bin] += deposit.horizontal;
-      r.vertical[bin] += deposit.vertical;
+      replay(r, s.data->nets[ref.net].deposits[ref.deposit]);
     }
   }
   r.overflow = r.max_utilization = 0;
