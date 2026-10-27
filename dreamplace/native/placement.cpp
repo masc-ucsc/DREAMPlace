@@ -332,6 +332,9 @@ void options_check(const Options &o) {
   require(finite(o.stop_overflow) && o.stop_overflow >= 0 &&
               o.stop_overflow <= 1,
           "invalid overflow threshold");
+  require(!o.density_weight_seed ||
+              (finite(*o.density_weight_seed) && *o.density_weight_seed > 0),
+          "invalid normalized density weight seed");
   require(finite(o.initial_density_weight) && o.initial_density_weight > 0,
           "invalid density weight");
   require(finite(o.max_step) && o.max_step > 0 && o.max_step <= 1,
@@ -400,6 +403,18 @@ void options_check(const Options &o) {
   require(o.movable_interval >= 0, "negative movable update interval");
   require(o.checkpoint_interval >= 0, "negative GP checkpoint interval");
   require(o.checkpoint_start >= 0, "negative GP checkpoint start");
+  double previous_milestone = std::numeric_limits<double>::infinity();
+  for (double milestone : o.checkpoint_overflow_milestones) {
+    require(finite(milestone) && milestone >= 0 &&
+                milestone < previous_milestone,
+            "GP checkpoint overflow milestones must be nonnegative and "
+            "strictly descending");
+    previous_milestone = milestone;
+  }
+  require(o.checkpoint_overflow_milestones.empty() ||
+              !o.checkpoint_after_density,
+          "GP checkpoint milestones and checkpoint_after_density are separate "
+          "policies");
   require(!o.observer || o.observer_interval > 0,
           "observer interval must be positive");
 }
@@ -1455,8 +1470,12 @@ Result place(Design &design, const Options &options, GpState *state) {
   }
   if (o.post_density_factor) {
     salt(0x706f737464656e73ULL);
-    salt(o.post_density_factor);
+    salt(std::bit_cast<std::uint64_t>(o.post_density_factor));
     salt(std::bit_cast<std::uint64_t>(o.convergence_tolerance));
+  }
+  if (o.density_weight_seed) {
+    salt(0x64656e7369747973ULL);
+    salt(std::bit_cast<std::uint64_t>(*o.density_weight_seed));
   }
   if (o.wirelength_gamma_end != 0.05) {
     salt(std::bit_cast<std::uint64_t>(o.wirelength_gamma_end));
@@ -1966,10 +1985,13 @@ Result place(Design &design, const Options &options, GpState *state) {
     bool reservation_map_dirty = true;
     auto x = d.node_x, y = d.node_y, prev_x = x, prev_y = y;
     std::vector<double> old_gx(n), old_gy(n), old_ex(n), old_ey(n);
-    double density_weight = o.initial_density_weight, t = 1, alpha = 0;
+    double density_weight =
+               o.density_weight_seed.value_or(o.initial_density_weight),
+           t = 1, alpha = 0;
     bool density_initialized =
         warm ? state->density_initialized
-             : (o.magnet_runtime && o.magnet_runtime->density_initialized);
+             : (o.density_weight_seed.has_value() ||
+                (o.magnet_runtime && o.magnet_runtime->density_initialized));
     const int offset = warm ? state->iteration : o.iteration_offset;
     double previous_overflow = warm ? state->previous_overflow : -1;
     int macro_pull_changed =
@@ -2801,7 +2823,7 @@ Result place(Design &design, const Options &options, GpState *state) {
                                .count();
       auto dg = detail::density_force(d, o.bins_x, o.bins_y, o.num_threads, sx,
                                       sy, ox, oy, ratio, fx, fy);
-      if ((!o.density_upper_bound && !global_iter) ||
+      if ((!o.density_upper_bound && !global_iter && !o.density_weight_seed) ||
           (o.density_upper_bound && !density_initialized)) {
         double wsum = 0, dsum = 0;
         for (int i = 0; i < d.num_movable; ++i) {
@@ -3414,7 +3436,12 @@ Result place(Design &design, const Options &options, GpState *state) {
           density_gated_checkpoints &&
           (iter + 1 == o.max_iterations ||
            (convergence.deadline && global_iter + 1 == convergence.deadline));
+      const bool milestone_checkpoints =
+          !o.checkpoint_overflow_milestones.empty();
       if (o.checkpoint && o.checkpoint_interval > 0 &&
+          (!milestone_checkpoints ||
+           convergence.checkpoint_milestone <
+               o.checkpoint_overflow_milestones.size()) &&
           global_iter + 1 >= o.checkpoint_start &&
           ((global_iter + 1) % o.checkpoint_interval == 0 ||
            forced_checkpoint ||
@@ -3423,12 +3450,23 @@ Result place(Design &design, const Options &options, GpState *state) {
         std::copy_n(x.begin(), original, snapshot.node_x.begin());
         std::copy_n(y.begin(), original, snapshot.node_y.begin());
         bool invoke = true;
-        if (density_gated_checkpoints) {
+        if (density_gated_checkpoints || milestone_checkpoints) {
           const double measured =
               overflow(snapshot, o.bins_x, o.bins_y, o.target_density,
                        o.scale_macro_density, o.macro_transparency.always,
                        exclusion_scale);
           invoke = forced_checkpoint || measured <= o.stop_overflow;
+          if (milestone_checkpoints) {
+            invoke = false;
+            // Coalesce thresholds crossed since the last sample into one STA.
+            while (convergence.checkpoint_milestone <
+                       o.checkpoint_overflow_milestones.size() &&
+                   measured <= o.checkpoint_overflow_milestones
+                                   [convergence.checkpoint_milestone]) {
+              ++convergence.checkpoint_milestone;
+              invoke = true;
+            }
+          }
           r.checkpoint_history.push_back(
               {global_iter + 1, measured, invoke, forced_checkpoint});
           if (o.checkpoint_observer) {
@@ -3663,14 +3701,14 @@ Result place(Design &design, const Options &options, GpState *state) {
           const bool pin_timing_changed = candidate.pin_timing != d.pin_timing;
           const bool reservations_changed =
               candidate.density_reservations != d.density_reservations;
-          const bool changed = reservations_changed ||
-                               candidate.net_weights != d.net_weights ||
-                               pin_timing_changed ||
-                               candidate.node_size_x != model.node_size_x ||
-                               candidate.node_size_y != model.node_size_y ||
-                               candidate.pin_offset_x != d.pin_offset_x ||
-                               candidate.pin_offset_y != d.pin_offset_y;
-          if (changed) {
+          const bool weights_changed = candidate.net_weights != d.net_weights;
+          const bool geometry_changed =
+              reservations_changed || pin_timing_changed ||
+              candidate.node_size_x != model.node_size_x ||
+              candidate.node_size_y != model.node_size_y ||
+              candidate.pin_offset_x != d.pin_offset_x ||
+              candidate.pin_offset_y != d.pin_offset_y;
+          if (geometry_changed || weights_changed) {
             d.net_weights = candidate.net_weights;
             d.pin_timing = candidate.pin_timing;
             d.density_reservations = candidate.density_reservations;
@@ -3688,7 +3726,20 @@ Result place(Design &design, const Options &options, GpState *state) {
             d.pin_offset_x = candidate.pin_offset_x;
             d.pin_offset_y = candidate.pin_offset_y;
           }
-          objective_changed = changed;
+          objective_changed = geometry_changed;
+          if (weights_changed && !geometry_changed) {
+            // A new gradient needs a fresh BB step estimate, but neither the
+            // density normalization nor Nesterov momentum should restart.
+            model.net_weights = d.net_weights;
+            spread_mobility = make_spread_mobility();
+            restart = true;
+            convergence.previous_hpwl = -1;
+            convergence.stable_samples = 0;
+            previous_hpwl = -1;
+            best_feasible_x.clear();
+            best_feasible_y.clear();
+            best_feasible_hpwl = std::numeric_limits<double>::infinity();
+          }
         }
         if (objective_changed) {
           reservation_accounting =
@@ -3790,7 +3841,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         o.observer(physical, PlacementStage::global_placement,
                    offset + r.iterations);
       }
-      if ((global_iter + 1) % 20 == 0) {
+      if ((global_iter + 1) % 20 == 0 ||
+          (convergence.deadline && global_iter + 1 == convergence.deadline)) {
         Design physical = model;
         std::copy_n(x.begin(), original, physical.node_x.begin());
         std::copy_n(y.begin(), original, physical.node_y.begin());
@@ -3908,9 +3960,9 @@ Result place(Design &design, const Options &options, GpState *state) {
           const int iteration = global_iter + 1;
           if (geometry_feasible && !convergence.density_iteration) {
             convergence.density_iteration = iteration;
-            convergence.deadline = static_cast<int>(std::min<std::int64_t>(
+            convergence.deadline = static_cast<int>(std::min<double>(
                 std::numeric_limits<int>::max(),
-                std::int64_t(iteration) * (1 + o.post_density_factor)));
+                std::floor(iteration * (1 + o.post_density_factor))));
             convergence.previous_hpwl = -1;
             convergence.previous_inflation = -1;
             convergence.stable_samples = 0;
@@ -3941,7 +3993,6 @@ Result place(Design &design, const Options &options, GpState *state) {
           const auto probe_model =
               available_route_model(o.route.probe_model, o.uroute != nullptr);
           if (o.route.probe && !r.route_probed && geometry_ready &&
-              convergence.timing_satisfied &&
               active_route != RouteModel::uroute &&
               (probe_model == RouteModel::uroute ||
                active_route == RouteModel::rudy)) {
@@ -3995,8 +4046,7 @@ Result place(Design &design, const Options &options, GpState *state) {
               convergence.stable_samples >= (o.post_density_factor ? 2 : 0) &&
               (!o.routability || route_overflow <= o.route.target_overflow ||
                (r.route_probed && r.route_probe_overflow >= 0 &&
-                r.route_probe_overflow <= o.route.target_overflow)) &&
-              convergence.timing_satisfied;
+                r.route_probe_overflow <= o.route.target_overflow));
           r.continuation_limit =
               probe_deadline ? global_iter + 1 >= probe_deadline
                              : (convergence.deadline &&
@@ -4030,6 +4080,51 @@ Result place(Design &design, const Options &options, GpState *state) {
             magnet_ready) {
           break;
         }
+        // A fixed grid can impose a residual overflow floor on small cells.
+        // Once both geometry metrics plateau despite substantially stronger
+        // density pressure, more GP steps only amplify that penalty. Hand the
+        // current cell placement to legalization without calling it converged.
+        // Restrict this to static cell solves: continuation, moving macros and
+        // scheduled objectives must finish their own transitions first.
+        if (o.adaptive_density && o.post_density_factor && !o.dynamic_bins &&
+            !state && !o.magnet_runtime && !o.trial_tuning && !centroids &&
+            !o.movable_update && !o.macro_pull_update && !pin_timing_seen &&
+            !o.macro_align_weight && !fixed_macro_weight &&
+            !o.cohesion_weight && !o.order_weight && !macro_routing &&
+            !o.route.probe && !learned_ladder && opacity_settled &&
+            macro_pulls_ready &&
+            std::none_of(movable_holds.begin(), movable_holds.end(),
+                         [](int hold) { return hold > 0; }) &&
+            global_iter + 1 >= o.min_iterations &&
+            r.overflow > o.stop_overflow && r.history.size() >= 6 &&
+            (!o.routability || route_overflow <= o.route.target_overflow) &&
+            std::none_of(d.node_macro.begin(),
+                         d.node_macro.begin() + std::min(d.node_macro.size(),
+                                                         size_t(d.num_movable)),
+                         [](auto macro) { return macro != 0; })) {
+          const auto first = r.history.end() - 6;
+          double min_hpwl = first->hpwl, max_hpwl = first->hpwl;
+          double min_overflow = first->overflow, max_overflow = first->overflow;
+          bool unchanged = first->iteration > last_checkpoint;
+          for (auto sample = first; sample != r.history.end(); ++sample) {
+            min_hpwl = std::min(min_hpwl, sample->hpwl);
+            max_hpwl = std::max(max_hpwl, sample->hpwl);
+            min_overflow = std::min(min_overflow, sample->overflow);
+            max_overflow = std::max(max_overflow, sample->overflow);
+            unchanged &= sample->inflation_area_ratio == 1;
+          }
+          // Use the whole window's range, not adjacent deltas: slow drift and
+          // oscillation must not masquerade as convergence. One percent is an
+          // internal stagnation threshold, independent of requested accuracy.
+          if (unchanged && first->iteration + 100 <= global_iter + 1 &&
+              first->density_weight > 0 &&
+              density_weight >= 4 * first->density_weight &&
+              max_hpwl - min_hpwl <= .01 * std::max(max_hpwl, 1e-12) &&
+              max_overflow - min_overflow <= .01 * max_overflow) {
+            r.density_stalled = true;
+            break;
+          }
+        }
         if (separate_circles && global_iter + 1 >= o.centroid_ramp &&
             !r.centroid.circles_converged) {
           const double improvement =
@@ -4048,7 +4143,14 @@ Result place(Design &design, const Options &options, GpState *state) {
               previous_overflow > 0
                   ? (previous_overflow - r.overflow) / previous_overflow
                   : 1;
-          growth = improvement < .05 ? 1.4 : 1.05;
+          // This update runs once per twenty solver iterations. A compact
+          // quadratic seed can normalize the first density weight orders of
+          // magnitude below a dispersed seed; weak updates then spend most
+          // of the iteration budget waiting for density to matter. Double
+          // the penalty while stalled and continue a gentler ramp while
+          // spreading, retaining the wirelength-growth brake below.
+          growth = o.density_upper_bound ? (improvement < .05 ? 1.4 : 1.05)
+                                         : (improvement < .05 ? 2.0 : 1.2);
           if (previous_hpwl > 0 && current_hpwl > previous_hpwl * 1.2) {
             growth = std::min(growth, 1.05);
           }
@@ -4078,6 +4180,7 @@ Result place(Design &design, const Options &options, GpState *state) {
                                                  r.effective_filler_area};
       }
     }
+    r.density_weight = density_weight;
     r.centroid.completed = r.centroid.started;
     if (o.magnet_runtime) {
       o.magnet_runtime->density_initialized = density_initialized;
@@ -4097,9 +4200,6 @@ Result place(Design &design, const Options &options, GpState *state) {
       r.density_iteration = convergence.density_iteration;
       r.continuation_deadline =
           probe_deadline ? probe_deadline : convergence.deadline;
-      if (!convergence.timing_satisfied) {
-        r.objective_converged = false;
-      }
     }
     if (state) {
       next = save_state(offset + r.iterations);
@@ -4139,6 +4239,7 @@ Result place(Design &design, const Options &options, GpState *state) {
   // otherwise only the overflow test applies.
   const bool gp_ran = d.num_movable && o.max_iterations;
   r.converged =
+      !r.density_stalled &&
       (!gp_ran || !o.checkpoint_after_density || !o.checkpoint ||
        !o.checkpoint_interval ||
        (o.magnet_runtime && o.magnet_runtime->checkpoint_invoked) ||

@@ -389,6 +389,11 @@ struct Options {
   std::function<std::vector<MovablePosition>(const Design &, int)>
       movable_update;
   int checkpoint_interval = 0;
+  // Descending density thresholds, each consumed once per stage. In this mode
+  // interval bounds cheap density sampling only; no forced off-threshold STA.
+  // Final legal timing belongs to the host. Empty preserves periodic callbacks.
+  std::vector<double> checkpoint_overflow_milestones;
+
   // No in-loop checkpoint or A/B timing evaluation before this global step.
   // Host final-placement reporting callbacks are independent of this gate.
   int checkpoint_start = 0;
@@ -495,9 +500,13 @@ struct Options {
   // Zero preserves density-only stopping. Otherwise allow factor * first
   // density-feasible iteration ADDITIONAL iterations, bounded by
   // max_iterations.
-  int post_density_factor = 0;
+  double post_density_factor = 0;
   double convergence_tolerance = .01; // relative weighted-HPWL/inflation change
   double initial_density_weight = 0.01;
+  // Already normalized coefficient from a previous converged placement.
+  // Coordinate-only refinement keeps this coefficient but starts new momentum.
+  std::optional<double> density_weight_seed;
+
   double max_step = 0.5; // fraction of a bin
   // Optional H2D hooks. Zero/default controls preserve the original GP.
   double filler_width = 0;
@@ -638,6 +647,7 @@ struct DetailedSample {
   std::string legality_issue;
 };
 struct GpConvergence {
+  size_t checkpoint_milestone = 0;
   int density_iteration = 0, deadline = 0, stable_samples = 0;
   double previous_hpwl = -1, previous_inflation = -1;
   bool timing_observed = false, timing_satisfied = true;
@@ -657,6 +667,9 @@ struct Result {
   std::vector<GpCheckpointSample> checkpoint_history;
   int density_iteration = 0, continuation_deadline = 0;
   bool objective_converged = false, continuation_limit = false;
+  // A static cell solve stopped improving despite increasing density pressure.
+  // This permits the caller to legalize, but never certifies GP convergence.
+  bool density_stalled = false;
   bool timing_observed = false, timing_satisfied = true;
   CentroidReport centroid;
   AlignmentReport alignment;
@@ -693,6 +706,7 @@ struct Result {
   double local_density_grid_seconds = 0;
   int timing_spread_cells = 0; // last weight update, eligible cells with m < 1
   double timing_spread_min_mobility = 1;
+  double density_weight = 0;
   double initial_hpwl = 0, hpwl = 0, overflow = 0;
   bool converged = false;
   bool legal = false;

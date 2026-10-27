@@ -41,6 +41,123 @@ template <typename F> void rejects(F f) {
   }
   check(rejected, "expected rejection");
 }
+void density_plateau_hands_off_without_claiming_convergence() {
+  Design initial;
+  initial.layout = {0, 0, 2, 2, 1, 2};
+  initial.num_movable = 1;
+  initial.node_x = initial.node_y = {0};
+  initial.node_size_x = initial.node_size_y = {2};
+  initial.flat_net2pin_start = {0};
+  initial.build_maps();
+  Options options;
+  options.bins_x = options.bins_y = 8;
+  options.max_iterations = 400;
+  options.min_iterations = 200;
+  options.target_density = .5;
+  options.stop_overflow = .1;
+  options.post_density_factor = 4;
+  options.adaptive_density = true;
+  options.add_fillers = false;
+  options.detailed_place = false;
+  // One legal cell fills the entire core: no movement can satisfy 50% density.
+  auto cells = initial;
+  const auto stalled = place(cells, options);
+  check(stalled.density_stalled && !stalled.converged && stalled.legal,
+        "density plateau did not hand off to legal placement honestly");
+  check(stalled.iterations >= options.min_iterations &&
+            stalled.iterations < options.max_iterations,
+        "density plateau ignored its minimum or exhausted its maximum");
+  auto fixed_budget = initial;
+  options.min_iterations = options.max_iterations;
+  const auto full = place(fixed_budget, options);
+  check(full.iterations == options.max_iterations,
+        "density plateau shortened an explicit minimum iteration budget");
+  auto macros = initial;
+  macros.node_macro = {1};
+  options.min_iterations = 200;
+  const auto macro_result = place(macros, options);
+  check(!macro_result.density_stalled &&
+            macro_result.iterations == options.max_iterations,
+        "cell plateau policy interrupted a macro solve");
+}
+
+void setup_timing_does_not_veto_convergence() {
+  Design initial;
+  initial.layout = {0, 0, 100, 20, 1, 1};
+  initial.num_movable = 2;
+  initial.node_x = {40, 50, 0, 100};
+  initial.node_y = {10, 10, 10, 10};
+  initial.node_size_x = initial.node_size_y = {1, 1, 0, 0};
+  initial.pin2node = {2, 0, 0, 1, 1, 3};
+  initial.pin_offset_x = initial.pin_offset_y = {0, 0, 0, 0, 0, 0};
+  initial.flat_net2pin = {0, 1, 2, 3, 4, 5};
+  initial.flat_net2pin_start = {0, 2, 4, 6};
+  initial.build_maps();
+  Options options;
+  options.bins_x = options.bins_y = 8;
+  options.max_iterations = 400;
+  options.min_iterations = 20;
+  options.stop_overflow = .1;
+  options.post_density_factor = 4;
+  options.convergence_tolerance = 1;
+  options.checkpoint_interval = 20;
+  options.legalize = options.detailed_place = false;
+  auto positive = initial;
+  options.checkpoint = [](const Design &, int) {
+    GpUpdate update;
+    update.timing_violation = 0;
+    return update;
+  };
+  const auto reference = place(positive, options);
+  auto negative = initial;
+  options.checkpoint = [](const Design &, int) {
+    GpUpdate update;
+    update.timing_violation = 1000;
+    return update;
+  };
+  const auto failing_timing = place(negative, options);
+  check(reference.converged && failing_timing.converged,
+        "setup timing vetoed feasible placement");
+  check(reference.iterations < options.max_iterations &&
+            reference.iterations == failing_timing.iterations,
+        "setup timing extended the GP iteration budget");
+  check(positive.node_x == negative.node_x &&
+            positive.node_y == negative.node_y,
+        "timing-only observation changed placement");
+  check(failing_timing.timing_observed && !failing_timing.timing_satisfied,
+        "convergence erased a failing timing observation");
+  auto seeded = initial;
+  auto seed_options = options;
+  seed_options.max_iterations = seed_options.min_iterations = 1;
+  seed_options.density_weight_seed = 3;
+  const auto seed_result = place(seeded, seed_options);
+  near(seed_result.density_weight, 3, 1e-12,
+       "refinement renormalized its density seed");
+  seed_options.density_weight_seed = 0;
+  rejects([&] { place(seeded, seed_options); });
+  // Milestones coalesce when crossed together, and never repeat just because
+  // the sample clock ticks or the iteration cap is reached.
+  options.min_iterations = options.max_iterations = 100;
+  options.checkpoint_overflow_milestones = {1, .5};
+  options.checkpoint_final = true;
+  unsigned evaluations = 0;
+  options.checkpoint = [&](const Design &, int) {
+    ++evaluations;
+    return GpUpdate{};
+  };
+  auto milestones = initial;
+  place(milestones, options);
+  check(evaluations == 1, "crossed density milestones repeated timing");
+  options.checkpoint_overflow_milestones = {0};
+  options.target_density = .00001;
+  evaluations = 0;
+  auto infeasible = initial;
+  place(infeasible, options);
+  check(evaluations == 0,
+        "iteration cap forced timing on an overflowing placement");
+  options.checkpoint_overflow_milestones = {.1, .2};
+  rejects([&] { place(infeasible, options); });
+}
 void placement_masks() {
   // A full-height placement-only strip must not sever an estimated signal.
   Design d;
@@ -2163,6 +2280,8 @@ void route_policy_helpers() {
 }
 int main() {
   try {
+    density_plateau_hands_off_without_claiming_convergence();
+    setup_timing_does_not_veto_convergence();
     route_policy_helpers();
     size_neutral_macro_pull();
     macro_sized_virtual_fillers();

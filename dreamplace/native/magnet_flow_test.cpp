@@ -160,8 +160,9 @@ void timing_observation_survives_merges_and_snap_relaxation() {
     check(result.magnet && result.magnet->mapping.groups.size() == 1);
     check(observations > 1 && snapped && post_snap_gp);
     check(result.timing_observed && result.timing_satisfied == recovered);
-    check(result.objective_converged == recovered);
-    check(result.converged == recovered);
+    // Setup slack is an observation, never a placement feasibility condition.
+    check(result.objective_converged);
+    check(result.converged);
     // A new stage starts with its own timing observation lifetime.
     o = controls();
     o.magnet.enabled = false;

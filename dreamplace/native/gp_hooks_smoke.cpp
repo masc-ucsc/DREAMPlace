@@ -226,7 +226,19 @@ int main() {
     check(stable_result.iterations == 80 && stable_result.converged);
     check(stable_result.objective_converged &&
           !stable_result.continuation_limit);
-    // Unmet measured timing prevents early convergence, but cannot livelock.
+    // Fractional continuation is a hard iteration budget, including between
+    // ordinary 20-step convergence samples.
+    auto short_options = settle_options;
+    short_options.post_density_factor = .25;
+    short_options.routability = true;
+    short_options.route_capacity_h = short_options.route_capacity_v = 1e-6;
+    auto short_design = settling;
+    const auto short_result = place(short_design, short_options);
+    check(short_result.density_iteration == 40);
+    check(short_result.continuation_deadline == 50 &&
+          short_result.iterations == 50);
+    check(short_result.continuation_limit && !short_result.converged);
+    // Unmet timing is reported, but never vetoes geometric convergence.
     settle_options.checkpoint_interval = 20;
     settle_options.checkpoint = [](const Design &, int) {
       GpUpdate update;
@@ -235,8 +247,8 @@ int main() {
     };
     auto failing_timing = settling;
     const auto bounded = place(failing_timing, settle_options);
-    check(bounded.iterations == 200 && bounded.continuation_limit);
-    check(!bounded.converged && bounded.timing_observed &&
+    check(bounded.iterations == 80 && !bounded.continuation_limit);
+    check(bounded.converged && bounded.timing_observed &&
           !bounded.timing_satisfied);
     // Objective updates reset stability, never the continuation deadline.
     settle_options.checkpoint = [](const Design &d, int iteration) {
@@ -462,9 +474,9 @@ int main() {
     calls.clear();
     auto deadline = settling;
     const auto gate_deadline = place(deadline, gate_options);
-    check(calls == std::vector<int>({75, 150, 200}));
-    check(gate_deadline.continuation_limit && !gate_deadline.converged &&
-          gate_deadline.checkpoint_history.back().forced);
+    check(calls == std::vector<int>({75}));
+    check(!gate_deadline.continuation_limit && gate_deadline.converged &&
+          !gate_deadline.checkpoint_history.back().forced);
     auto off_sample_cap = settling;
     gate_options.max_iterations = 113;
     gate_options.checkpoint_interval = 200;
