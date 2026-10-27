@@ -81,6 +81,115 @@ void density_plateau_hands_off_without_claiming_convergence() {
         "cell plateau policy interrupted a macro solve");
 }
 
+void density_floor_accounts_for_fixed_capacity() {
+  Design d;
+  d.layout = {0, 0, 8, 8, 1, 1};
+  d.num_movable = 1;
+  // Two overlapping obstacles occupy the same two bin columns. The first
+  // crosses the core boundary; the last obstacle is entirely outside it.
+  d.node_x = {2, -2, 0, 20};
+  d.node_y = {0, 0, 0, 0};
+  d.node_size_x = {6, 4, 2, 4};
+  d.node_size_y = {8, 8, 8, 8};
+  d.build_maps();
+  Options o;
+  o.bins_x = o.bins_y = 8;
+  o.max_iterations = 0;
+  o.target_density = .5;
+  o.legalize = o.detailed_place = false;
+  const auto result = place(d, o);
+  near(result.overflow_floor, .5, 1e-12,
+       "density floor ignored clipping or double-counted full fixed bins");
+  near(result.overflow, .5, 1e-12,
+       "uniform remaining capacity should attain the computed floor");
+  d.node_macro = {1, 0, 0, 0};
+  o.scale_macro_density = true;
+  const auto macro = place(d, o);
+  near(macro.overflow_floor, 0, 1e-12,
+       "density floor disagrees with scaled macro charge");
+}
+
+void density_floor_checkpoint_and_resize() {
+  Design initial;
+  initial.layout = {0, 0, 2, 2, 1, 1};
+  initial.num_movable = 1;
+  initial.node_x = initial.node_y = {0};
+  initial.node_size_x = initial.node_size_y = {2};
+  initial.node_macro = {0};
+  initial.build_maps();
+  Options o;
+  o.bins_x = o.bins_y = 8;
+  o.max_iterations = 300;
+  o.min_iterations = 80;
+  o.target_density = .5;
+  o.stop_overflow = .1;
+  o.post_density_factor = 4;
+  o.adaptive_density = true;
+  o.add_fillers = o.detailed_place = false;
+  o.checkpoint_interval = 20;
+  o.checkpoint_overflow_milestones = {.1};
+  int checkpoint = 0;
+  o.checkpoint = [&](const Design &, int iteration) {
+    checkpoint = iteration;
+    return GpUpdate{};
+  };
+  auto unchanged = initial;
+  const auto handoff = place(unchanged, o);
+  check(checkpoint > 0 && checkpoint < o.max_iterations,
+        "impossible density starved the criticality checkpoint");
+  check(handoff.density_stalled && !handoff.converged && handoff.legal &&
+            handoff.iterations >= o.min_iterations &&
+            handoff.iterations < o.max_iterations,
+        "density floor handoff did not respect the convergence contract");
+  near(handoff.overflow_floor, .5, 1e-12, "wrong full-core density floor");
+  check(unchanged.node_size_x == initial.node_size_x &&
+            unchanged.node_size_y == initial.node_size_y &&
+            o.target_density == .5 && o.stop_overflow == .1,
+        "density floor handoff changed geometry or caller options");
+
+  // A legal checkpoint shrink makes the target attainable. The next sample
+  // must recompute charge, rather than inheriting the old floor/handoff state.
+  o.checkpoint = [&](const Design &, int iteration) {
+    checkpoint = iteration;
+    GpUpdate update;
+    update.node_size_x = {1};
+    update.node_size_y = {1};
+    return update;
+  };
+  auto resized = initial;
+  const auto changed = place(resized, o);
+  near(changed.overflow_floor, 0, 1e-12,
+       "checkpoint resizing left the density floor stale");
+  check(!changed.history.empty() && changed.history.front().overflow_floor == 0,
+        "checkpoint resizing did not refresh the next history sample");
+
+  o.checkpoint_overflow_milestones.clear();
+  o.checkpoint_after_density = true;
+  o.adaptive_density = false; // Disable the independent stagnation policy.
+  o.add_fillers = true;
+  o.filler_cell_space = true; // Explicit charge to back the virtual reservation.
+  o.checkpoint = [&](const Design &, int) {
+    GpUpdate update;
+    update.density_reservations =
+        std::vector<DensityReservation>{{"pending", 0, 0, 1, 1, -1}};
+    return update;
+  };
+  auto reserved = initial;
+  const auto pending = place(reserved, o);
+  check(!pending.density_stalled && pending.iterations == o.max_iterations,
+        "density floor bypassed a checkpoint's new virtual reservations");
+
+  o.checkpoint = {};
+  o.checkpoint_after_density = false;
+  o.density_upper_bound = true;
+  o.add_fillers = false;
+  o.filler_cell_space = false;
+  auto strict = initial;
+  const auto upper = place(strict, o);
+  check(!upper.density_stalled && upper.iterations == o.max_iterations,
+        "density floor weakened the strict upper-bound model");
+}
+
 void routing_plateau_hands_off_without_claiming_convergence() {
   Design initial;
   initial.layout = {0, 0, 100, 20, 1, 1};
@@ -2336,6 +2445,8 @@ void route_policy_helpers() {
 int main() {
   try {
     density_plateau_hands_off_without_claiming_convergence();
+    density_floor_accounts_for_fixed_capacity();
+    density_floor_checkpoint_and_resize();
     routing_plateau_hands_off_without_claiming_convergence();
     setup_timing_does_not_veto_convergence();
     route_policy_helpers();

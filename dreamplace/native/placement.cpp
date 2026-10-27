@@ -148,8 +148,8 @@ void csr_check(const std::vector<int> &flat, const std::vector<int> &start,
 // Exact physical overflow, excluding fillers; fixed area reduces bin capacity.
 double overflow(const Design &d, int bx, int by, double target_density,
                 bool scale_macro = false, bool ignore_fixed_macros = false,
-                double fixed_macro_scale = 1,
-                bool include_reservations = true) {
+                double fixed_macro_scale = 1, bool include_reservations = true,
+                double *floor = nullptr) {
   const auto &l = d.layout;
   double dx = (l.xh - l.xl) / bx, dy = (l.yh - l.yl) / by;
   std::vector<double> movable(bx * by), fixed(bx * by);
@@ -201,10 +201,16 @@ double overflow(const Design &d, int bx, int by, double target_density,
       deposit(movable, r.x, r.y, r.width, r.height, 1);
     }
   }
-  double excess = 0;
+  double excess = 0, capacity = 0;
   for (int i = 0; i < bx * by; ++i) {
-    excess += std::max(0., movable[i] - target_density *
-                                            std::max(0., dx * dy - fixed[i]));
+    const double available = target_density * std::max(0., dx * dy - fixed[i]);
+    excess += std::max(0., movable[i] - available);
+    capacity += available;
+  }
+  if (floor) {
+    // sum(max(0, charge-capacity)) >= max(0, total_charge-total_capacity).
+    // Use the same clipped fixed occupancy and charge as the overflow metric.
+    *floor = total ? std::max(0., (total - capacity) / total) : 0;
   }
   return total ? excess / total : 0;
 }
@@ -1686,6 +1692,23 @@ Result place(Design &design, const Options &options, GpState *state) {
       }
     }
   }
+  // A supplied core may make even the requested overflow tolerance impossible.
+  // For static cell solves, schedule the handoff against excess above that
+  // mathematical floor. Density forces and the requested target are unchanged;
+  // a handoff above the requested tolerance never certifies convergence.
+  // Continuation, strict upper bounds and scheduled geometry keep their
+  // contract.
+  const bool allow_density_floor =
+      !state && !o.density_upper_bound && !o.magnet_runtime &&
+      !o.trial_tuning && !centroids && !o.movable_update &&
+      !o.macro_pull_update && !o.macro_transparency.enabled() &&
+      !o.vanished_memory && !o.dynamic_bins && macro_area == 0;
+  const auto excess_overflow = [&](double value, double floor) {
+    return allow_density_floor && d.density_reservations.empty() &&
+                   floor > o.stop_overflow + 1e-12
+               ? std::max(0., value - floor)
+               : value;
+  };
   // Reserve physical macro bodies, not their halos or their current overlap
   // union: these bodies must eventually fit even when initial poses overlap.
   double cell_space = width * height;
@@ -3451,18 +3474,20 @@ Result place(Design &design, const Options &options, GpState *state) {
         std::copy_n(y.begin(), original, snapshot.node_y.begin());
         bool invoke = true;
         if (density_gated_checkpoints || milestone_checkpoints) {
+          double floor = 0;
           const double measured =
               overflow(snapshot, o.bins_x, o.bins_y, o.target_density,
                        o.scale_macro_density, o.macro_transparency.always,
-                       exclusion_scale);
-          invoke = forced_checkpoint || measured <= o.stop_overflow;
+                       exclusion_scale, true, &floor);
+          const double excess = excess_overflow(measured, floor);
+          invoke = forced_checkpoint || excess <= o.stop_overflow;
           if (milestone_checkpoints) {
             invoke = false;
             // Coalesce thresholds crossed since the last sample into one STA.
             while (convergence.checkpoint_milestone <
                        o.checkpoint_overflow_milestones.size() &&
-                   measured <= o.checkpoint_overflow_milestones
-                                   [convergence.checkpoint_milestone]) {
+                   excess <= o.checkpoint_overflow_milestones
+                                 [convergence.checkpoint_milestone]) {
               ++convergence.checkpoint_milestone;
               invoke = true;
             }
@@ -3846,9 +3871,11 @@ Result place(Design &design, const Options &options, GpState *state) {
         Design physical = model;
         std::copy_n(x.begin(), original, physical.node_x.begin());
         std::copy_n(y.begin(), original, physical.node_y.begin());
-        r.overflow = overflow(physical, o.bins_x, o.bins_y, o.target_density,
-                              o.scale_macro_density,
-                              o.macro_transparency.always, exclusion_scale);
+        r.overflow =
+            overflow(physical, o.bins_x, o.bins_y, o.target_density,
+                     o.scale_macro_density, o.macro_transparency.always,
+                     exclusion_scale, true, &r.overflow_floor);
+        const double excess = excess_overflow(r.overflow, r.overflow_floor);
         const double current_hpwl = hpwl(physical);
         const double selection_cost =
             current_hpwl +
@@ -3860,8 +3887,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         if (keep_feasible && !pin_timing_seen && opacity_settled &&
             global_iter >= 39 && inflated_ratio == 1 &&
             (!fixed_macro_weight || progress >= 1) &&
-            r.overflow <= o.stop_overflow &&
-            selection_cost < best_feasible_hpwl) {
+            excess <= o.stop_overflow && selection_cost < best_feasible_hpwl) {
           best_feasible_hpwl = selection_cost;
           best_feasible_x = x;
           best_feasible_y = y;
@@ -3884,6 +3910,7 @@ Result place(Design &design, const Options &options, GpState *state) {
              route_overflow, inflated_ratio, overlaps.first, overlaps.second,
              overflow(physical, o.bins_x, o.bins_y, o.target_density), target,
              filler_scale, align_pairs.size(), align_residual, align_ramp});
+        r.history.back().overflow_floor = r.overflow_floor;
         r.history.back().macro_opacity = transparent ? 0 : 1;
         r.history.back().macro_exclusion_scale =
             transparent ? 0 : exclusion_scale;
@@ -3940,7 +3967,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         const bool settled =
             opacity_settled && global_iter + 1 >= o.min_iterations &&
-            r.overflow <= o.stop_overflow &&
+            excess <= o.stop_overflow &&
             (!o.macro_align_weight || global_iter >= o.macro_align_full) &&
             (!align_centroids || global_iter >= o.centroid_align_full) &&
             (!fixed_macro_weight || progress >= 1);
@@ -4073,7 +4100,8 @@ Result place(Design &design, const Options &options, GpState *state) {
             ((!o.post_density_factor && !probe_deadline &&
               active_route != RouteModel::uroute && !learned_ladder) ||
              r.objective_converged)) {
-          r.converged = true;
+          r.density_stalled = r.overflow > o.stop_overflow;
+          r.converged = !r.density_stalled;
           break;
         }
         if (!o.trial_tuning && r.continuation_limit && macro_pulls_ready &&
@@ -4110,11 +4138,12 @@ Result place(Design &design, const Options &options, GpState *state) {
                 std::min(min_inflation, sample->inflation_area_ratio);
             max_inflation =
                 std::max(max_inflation, sample->inflation_area_ratio);
-            unchanged &= sample->overflow <= o.stop_overflow &&
-                         sample->route_sampled &&
-                         sample->route_model == active_route &&
-                         std::isfinite(sample->route_overflow) &&
-                         sample->route_overflow > o.route.target_overflow;
+            unchanged &=
+                excess_overflow(sample->overflow, sample->overflow_floor) <=
+                    o.stop_overflow &&
+                sample->route_sampled && sample->route_model == active_route &&
+                std::isfinite(sample->route_overflow) &&
+                sample->route_overflow > o.route.target_overflow;
             auto &best = sample - first < 3 ? early_route : late_route;
             best = std::min(best, sample->route_overflow);
           }
@@ -4207,7 +4236,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         // already-satisfied density constraint. Resume if density rises again.
         if ((!separate_circles && !o.density_upper_bound &&
              !o.post_density_factor) ||
-            r.overflow > o.stop_overflow) {
+            excess > o.stop_overflow) {
           density_weight = std::min(density_weight * growth, 1e12);
         }
       }
@@ -4273,8 +4302,9 @@ Result place(Design &design, const Options &options, GpState *state) {
   r.global_placement_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - gp_start)
           .count();
-  r.overflow = overflow(d, o.bins_x, o.bins_y, o.target_density,
-                        o.scale_macro_density, o.macro_transparency.always);
+  r.overflow =
+      overflow(d, o.bins_x, o.bins_y, o.target_density, o.scale_macro_density,
+               o.macro_transparency.always, 1, true, &r.overflow_floor);
   if (separate_circles) {
     const auto circles = detail::centroid_circle_overlaps(d, o.target_density);
     r.centroid.circle_overlaps = circles.overlaps;

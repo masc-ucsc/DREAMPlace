@@ -913,6 +913,26 @@ circle overlaps. Final legal HPWL is 6.578 m versus 4.595 m for the reused R8H3
 reference (+43.15%). Extra refinement GP and snapping change together in this
 comparison. Keep off by default; no new routing/timing result is claimed.
 
+### Infeasible density targets on supplied cores
+
+A static cell solve can hand off to legalization when the supplied core cannot
+meet the requested overflow tolerance. The lower bound is
+`max(0, movable_charge - available_bin_capacity) / movable_charge`, using the
+same clipped fixed occupancy and macro charge scaling as physical overflow.
+When this bound exceeds `stop_overflow`, checkpoint milestones, density-weight
+updates and settling use overflow above the bound. The requested density,
+physical overflow and convergence criterion remain unchanged: the result sets
+`density_stalled`, leaves `converged=false`, and reports `overflow_floor` in both
+the result and history. Minimum iterations, objective settling and routing
+requirements still apply. Checkpoint resizing recomputes the bound.
+
+This handoff does not apply to external continuation, strict upper-bound density,
+movable macros/centroids, dynamic grids, scheduled geometry or virtual density
+reservations. Designs whose bound fits the requested tolerance keep their
+existing trajectory. This handles an impossible capacity target; it does not
+claim the local bin distribution is optimal or the placement is legal before
+legalization.
+
 ### Bounded continuation after density convergence
 
 `Options::post_density_factor` is opt-in (zero preserves the legacy path). After
@@ -921,8 +941,8 @@ solver allows factor × N additional iterations, still bounded by
 `max_iterations`. Weighted HPWL and inflation must settle over two consecutive
 20-iteration samples within `convergence_tolerance` (default 1%), and current
 RUDY overflow must be zero when enabled. Host checkpoints can supply a
-nonnegative `GpUpdate::timing_violation`; a positive setup violation prevents
-early convergence. Without host timing, weighted HPWL is only a timing proxy.
+nonnegative `GpUpdate::timing_violation`; a positive setup violation remains
+reported but does not veto geometric convergence. Without host timing, weighted HPWL is only a timing proxy.
 
 Weight/topology updates reset stability but never the deadline. External
 `GpState` continuation retains the deadline and sample history. The result

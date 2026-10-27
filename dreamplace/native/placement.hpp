@@ -629,6 +629,7 @@ struct GpSample {
   double pin_timing_cost = 0;
   double reserved_area = 0, materialized_reserved_area = 0;
   double effective_filler_area = 0;
+  double overflow_floor = 0;
 };
 struct CentroidReport {
   bool started = false, completed = false;
@@ -667,7 +668,10 @@ struct Result {
   std::vector<GpCheckpointSample> checkpoint_history;
   int density_iteration = 0, continuation_deadline = 0;
   bool objective_converged = false, continuation_limit = false;
-  // A static cell solve stopped improving despite increasing density pressure.
+  // Lower bound from total movable charge minus available bin capacity.
+  double overflow_floor = 0;
+  // A static cell solve reached its unavoidable overflow floor (within the
+  // requested tolerance), or stalled despite increasing density pressure.
   // This permits the caller to legalize, but never certifies GP convergence.
   bool density_stalled = false;
   // Density is feasible, but a sustained routing plateau warrants handing the
