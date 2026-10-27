@@ -26,6 +26,35 @@ constexpr bool scalar_gemm_order = false;
 #else
 constexpr bool scalar_gemm_order = true;
 #endif
+#if defined(__x86_64__) && defined(__linux__) && defined(__GNUC__)
+// std::fma is correctly rounded in software and in hardware, so every clone
+// returns identical bits. A hardware FMA clone lets the row loops vectorize;
+// the baseline x86-64 one calls libm fmaf per element (7x slower).
+#define UROUTE_FMA_CLONES __attribute__((target_clones("fma", "default")))
+#else
+// NEON builds keep their own loops and leave these helpers unused.
+#define UROUTE_FMA_CLONES [[maybe_unused]]
+#endif
+// One kernel tap over a row segment for four output planes: d[y] += w * v[y]
+// with a single rounding. Lanes are independent pixels; no reduction.
+UROUTE_FMA_CLONES void
+fma_rows4(float *__restrict d0, float *__restrict d1, float *__restrict d2,
+          float *__restrict d3, const float *__restrict row, float w0,
+          float w1, float w2, float w3, int n) {
+  for (int y = 0; y < n; ++y) {
+    const float value = row[y];
+    d0[y] = std::fma(w0, value, d0[y]);
+    d1[y] = std::fma(w1, value, d1[y]);
+    d2[y] = std::fma(w2, value, d2[y]);
+    d3[y] = std::fma(w3, value, d3[y]);
+  }
+}
+UROUTE_FMA_CLONES void
+fma_row(float *__restrict dest, const float *__restrict row, float weight,
+        int n) {
+  for (int y = 0; y < n; ++y)
+    dest[y] = std::fma(weight, row[y], dest[y]);
+}
 Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
                     const Tensor &input, int outputs, int kernel) {
   const std::array<int, 4> shape{outputs, input.c, kernel, kernel};
@@ -39,12 +68,6 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
   // then bias. Compiler-dependent contraction drifted at cancellation-sensitive
   // outputs. Keep the existing NEON backend's scalar-head rounding unchanged.
   // The contiguous loop needs no parallel reduction or external BLAS.
-  const auto accumulate = [](float weight, float value, float sum) {
-    if constexpr (scalar_gemm_order)
-      return std::fma(weight, value, sum);
-    else
-      return sum + weight * value;
-  };
   int oc = 0;
   // Reuse each input value across four independent output planes. The
   // ic/kx/ky accumulation order within every output is unchanged; there is
@@ -82,12 +105,17 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
               auto *d1 = out1 + size_t(x) * input.y;
               auto *d2 = out2 + size_t(x) * input.y;
               auto *d3 = out3 + size_t(x) * input.y;
-              for (int y = y0; y < y1; ++y) {
-                const float value = row[y + sy];
-                d0[y] = accumulate(w0, value, d0[y]);
-                d1[y] = accumulate(w1, value, d1[y]);
-                d2[y] = accumulate(w2, value, d2[y]);
-                d3[y] = accumulate(w3, value, d3[y]);
+              if constexpr (scalar_gemm_order) {
+                fma_rows4(d0 + y0, d1 + y0, d2 + y0, d3 + y0, row + y0 + sy,
+                          w0, w1, w2, w3, y1 - y0);
+              } else {
+                for (int y = y0; y < y1; ++y) {
+                  const float value = row[y + sy];
+                  d0[y] += w0 * value;
+                  d1[y] += w1 * value;
+                  d2[y] += w2 * value;
+                  d3[y] += w3 * value;
+                }
               }
             }
           }
@@ -111,8 +139,11 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
           for (int x = x0; x < x1; ++x) {
             const auto *row = in + size_t(x + sx) * input.y;
             auto *dest = out + size_t(x) * input.y;
-            for (int y = y0; y < y1; ++y)
-              dest[y] = accumulate(weight, row[y + sy], dest[y]);
+            if constexpr (scalar_gemm_order)
+              fma_row(dest + y0, row + y0 + sy, weight, y1 - y0);
+            else
+              for (int y = y0; y < y1; ++y)
+                dest[y] += weight * row[y + sy];
           }
         }
       }
