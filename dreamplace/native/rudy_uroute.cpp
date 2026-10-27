@@ -21,6 +21,11 @@ struct Tensor {
       : c(channels), x(nx), y(ny), data(size_t(c) * x * y) {}
   size_t area() const { return size_t(x) * y; }
 };
+#if defined(__aarch64__) && defined(__ARM_NEON)
+constexpr bool scalar_gemm_order = false;
+#else
+constexpr bool scalar_gemm_order = true;
+#endif
 Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
                     const Tensor &input, int outputs, int kernel) {
   const std::array<int, 4> shape{outputs, input.c, kernel, kernel};
@@ -30,8 +35,16 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
   Tensor result(outputs, input.x, input.y);
   const auto area = input.area();
   const int pad = kernel / 2;
-  // Serial OIHW summation. The contiguous spatial loop permits vectorization
-  // without parallel reductions, global scratch state or external BLAS.
+  // The scalar backend matches the f32 GEMM boundary: explicit FMA products,
+  // then bias. Compiler-dependent contraction drifted at cancellation-sensitive
+  // outputs. Keep the existing NEON backend's scalar-head rounding unchanged.
+  // The contiguous loop needs no parallel reduction or external BLAS.
+  const auto accumulate = [](float weight, float value, float sum) {
+    if constexpr (scalar_gemm_order)
+      return std::fma(weight, value, sum);
+    else
+      return sum + weight * value;
+  };
   int oc = 0;
   // Reuse each input value across four independent output planes. The
   // ic/kx/ky accumulation order within every output is unchanged; there is
@@ -42,10 +55,10 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
     auto *out1 = out0 + area;
     auto *out2 = out1 + area;
     auto *out3 = out2 + area;
-    std::fill(out0, out0 + area, bias[oc]);
-    std::fill(out1, out1 + area, bias[oc + 1]);
-    std::fill(out2, out2 + area, bias[oc + 2]);
-    std::fill(out3, out3 + area, bias[oc + 3]);
+    std::fill(out0, out0 + area, scalar_gemm_order ? 0.f : bias[oc]);
+    std::fill(out1, out1 + area, scalar_gemm_order ? 0.f : bias[oc + 1]);
+    std::fill(out2, out2 + area, scalar_gemm_order ? 0.f : bias[oc + 2]);
+    std::fill(out3, out3 + area, scalar_gemm_order ? 0.f : bias[oc + 3]);
     const auto stride = size_t(input.c) * kernel * kernel;
     // Keep four small output tiles resident while accumulating channels.
     // Every output still visits ic/kx/ky in the original order.
@@ -71,10 +84,10 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
               auto *d3 = out3 + size_t(x) * input.y;
               for (int y = y0; y < y1; ++y) {
                 const float value = row[y + sy];
-                d0[y] += w0 * value;
-                d1[y] += w1 * value;
-                d2[y] += w2 * value;
-                d3[y] += w3 * value;
+                d0[y] = accumulate(w0, value, d0[y]);
+                d1[y] = accumulate(w1, value, d1[y]);
+                d2[y] = accumulate(w2, value, d2[y]);
+                d3[y] = accumulate(w3, value, d3[y]);
               }
             }
           }
@@ -84,7 +97,7 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
   }
   for (; oc < outputs; ++oc) {
     auto *out = result.data.data() + oc * area;
-    std::fill(out, out + area, bias[oc]);
+    std::fill(out, out + area, scalar_gemm_order ? 0.f : bias[oc]);
     for (int ic = 0; ic < input.c; ++ic) {
       const auto *in = input.data.data() + ic * area;
       for (int kx = 0; kx < kernel; ++kx) {
@@ -99,12 +112,16 @@ Tensor conv_spatial(const UrouteWeights &w, const std::string &name,
             const auto *row = in + size_t(x + sx) * input.y;
             auto *dest = out + size_t(x) * input.y;
             for (int y = y0; y < y1; ++y)
-              dest[y] += weight * row[y + sy];
+              dest[y] = accumulate(weight, row[y + sy], dest[y]);
           }
         }
       }
     }
   }
+  if constexpr (scalar_gemm_order)
+    for (int c = 0; c < outputs; ++c)
+      for (size_t i = 0; i < area; ++i)
+        result.data[size_t(c) * area + i] += bias[c];
   for (float v : result.data)
     if (!std::isfinite(v))
       throw std::runtime_error("URoute convolution overflow");
@@ -124,7 +141,8 @@ Tensor conv(const UrouteWeights &w, const std::string &name,
   if (outputs < 4 || outputs % 4) {
     // The spatial fallback has no seeded/partial-channel form.
     if (seed || weight_channels || channel_offset)
-      throw std::invalid_argument("seeded URoute convolution needs 4-way outputs");
+      throw std::invalid_argument(
+          "seeded URoute convolution needs 4-way outputs");
     return conv_spatial(w, name, input, outputs, kernel);
   }
   using Pack = float32x4_t;
