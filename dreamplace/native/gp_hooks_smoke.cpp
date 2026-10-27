@@ -293,8 +293,11 @@ int main() {
     settle_options.routability = true;
     settle_options.route_capacity_h = settle_options.route_capacity_v = 1e-6;
     const auto congested = place(route_design, settle_options);
-    check(congested.iterations == 200 && congested.continuation_limit &&
-          !congested.converged);
+    // A static routing plateau may hand off before the continuation deadline;
+    // it must still report the unsatisfied objective without convergence.
+    check(congested.iterations < 200 && congested.route_stalled &&
+          !congested.continuation_limit && !congested.converged);
+    check(congested.continuation_deadline == 200);
     auto boxed = fixture();
     boxed.node_boxes.assign(5, {0, 0, 78, 39});
     boxed.node_boxes[0] = {4, 6, 4, 6};

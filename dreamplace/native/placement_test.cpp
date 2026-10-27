@@ -81,6 +81,61 @@ void density_plateau_hands_off_without_claiming_convergence() {
         "cell plateau policy interrupted a macro solve");
 }
 
+void routing_plateau_hands_off_without_claiming_convergence() {
+  Design initial;
+  initial.layout = {0, 0, 100, 20, 1, 1};
+  initial.num_movable = 1;
+  initial.node_x = {40, 0, 100};
+  initial.node_y = {10, 0, 20};
+  initial.node_size_x = initial.node_size_y = {1, 0, 0};
+  // Routing between fixed IOs cannot improve by moving the unrelated cell.
+  initial.pin2node = {1, 2};
+  initial.pin_offset_x = initial.pin_offset_y = {0, 0};
+  initial.flat_net2pin = {0, 1};
+  initial.flat_net2pin_start = {0, 2};
+  initial.build_maps();
+  Options options;
+  options.bins_x = options.bins_y = 8;
+  options.max_iterations = 400;
+  options.min_iterations = 200;
+  options.post_density_factor = 4;
+  options.add_fillers = false;
+  options.detailed_place = false;
+  options.routability = true;
+  options.route.model = RouteModel::rudy;
+  options.route_capacity_h = options.route_capacity_v = .0001;
+  auto cells = initial;
+  const auto stalled = place(cells, options);
+  check(stalled.route_stalled && !stalled.converged && stalled.legal,
+        "routing plateau did not hand off honestly to legal placement");
+  check(stalled.overflow <= options.stop_overflow &&
+            stalled.iterations >= options.min_iterations &&
+            stalled.iterations < options.max_iterations,
+        "routing plateau ignored density or iteration requirements");
+  auto bounded = initial;
+  options.min_iterations = options.max_iterations;
+  const auto full = place(bounded, options);
+  check(!full.route_stalled && full.iterations == options.max_iterations,
+        "routing plateau shortened the requested minimum iteration budget");
+  auto macros = initial;
+  macros.node_macro = {1, 0, 0};
+  options.min_iterations = 200;
+  const auto macro_result = place(macros, options);
+  check(!macro_result.route_stalled,
+        "cell routing plateau interrupted movable macro optimization");
+  auto changing = initial;
+  options.checkpoint_interval = 40;
+  options.checkpoint = [](const Design &d, int iteration) {
+    GpUpdate update;
+    update.net_weights.assign(d.flat_net2pin_start.size() - 1,
+                              iteration % 80 ? 2. : 1.);
+    return update;
+  };
+  const auto updated = place(changing, options);
+  check(!updated.route_stalled && updated.iterations == options.max_iterations,
+        "routing plateau reused samples preceding a timing-weight update");
+}
+
 void setup_timing_does_not_veto_convergence() {
   Design initial;
   initial.layout = {0, 0, 100, 20, 1, 1};
@@ -2281,6 +2336,7 @@ void route_policy_helpers() {
 int main() {
   try {
     density_plateau_hands_off_without_claiming_convergence();
+    routing_plateau_hands_off_without_claiming_convergence();
     setup_timing_does_not_veto_convergence();
     route_policy_helpers();
     size_neutral_macro_pull();

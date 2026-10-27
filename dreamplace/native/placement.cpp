@@ -4080,6 +4080,52 @@ Result place(Design &design, const Options &options, GpState *state) {
             magnet_ready) {
           break;
         }
+        // A routing estimate can retain irreducible congestion around fixed
+        // macros/IO even after cell density and wirelength have settled. A
+        // complete, unchanged window without meaningful route improvement
+        // is a phase handoff, never evidence that the route target was met.
+        if (o.routability && o.post_density_factor && geometry_ready &&
+            !state && !o.magnet_runtime && !o.trial_tuning && !centroids &&
+            !o.movable_update && !o.macro_pull_update && !pin_timing_seen &&
+            !o.macro_align_weight && !fixed_macro_weight &&
+            !o.cohesion_weight && !o.order_weight && !macro_routing &&
+            !o.route.probe && !learned_ladder && !o.dynamic_bins &&
+            global_iter + 1 < offset + o.max_iterations &&
+            route_overflow > o.route.target_overflow && r.history.size() >= 6 &&
+            std::none_of(d.node_macro.begin(),
+                         d.node_macro.begin() + std::min(d.node_macro.size(),
+                                                         size_t(d.num_movable)),
+                         [](auto macro) { return macro != 0; })) {
+          const auto first = r.history.end() - 6;
+          double min_hpwl = first->hpwl, max_hpwl = first->hpwl;
+          double min_inflation = first->inflation_area_ratio;
+          double max_inflation = min_inflation;
+          double early_route = std::numeric_limits<double>::infinity();
+          double late_route = early_route;
+          bool unchanged = first->iteration > last_checkpoint;
+          for (auto sample = first; sample != r.history.end(); ++sample) {
+            min_hpwl = std::min(min_hpwl, sample->hpwl);
+            max_hpwl = std::max(max_hpwl, sample->hpwl);
+            min_inflation =
+                std::min(min_inflation, sample->inflation_area_ratio);
+            max_inflation =
+                std::max(max_inflation, sample->inflation_area_ratio);
+            unchanged &= sample->overflow <= o.stop_overflow &&
+                         sample->route_sampled &&
+                         sample->route_model == active_route &&
+                         std::isfinite(sample->route_overflow) &&
+                         sample->route_overflow > o.route.target_overflow;
+            auto &best = sample - first < 3 ? early_route : late_route;
+            best = std::min(best, sample->route_overflow);
+          }
+          if (unchanged && first->iteration + 100 <= global_iter + 1 &&
+              max_hpwl - min_hpwl <= .01 * std::max(max_hpwl, 1e-12) &&
+              max_inflation - min_inflation <= .01 * max_inflation &&
+              late_route >= .99 * early_route) {
+            r.route_stalled = true;
+            break;
+          }
+        }
         // A fixed grid can impose a residual overflow floor on small cells.
         // Once both geometry metrics plateau despite substantially stronger
         // density pressure, more GP steps only amplify that penalty. Hand the
@@ -4239,7 +4285,7 @@ Result place(Design &design, const Options &options, GpState *state) {
   // otherwise only the overflow test applies.
   const bool gp_ran = d.num_movable && o.max_iterations;
   r.converged =
-      !r.density_stalled &&
+      !r.density_stalled && !r.route_stalled &&
       (!gp_ran || !o.checkpoint_after_density || !o.checkpoint ||
        !o.checkpoint_interval ||
        (o.magnet_runtime && o.magnet_runtime->checkpoint_invoked) ||

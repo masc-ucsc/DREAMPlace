@@ -670,6 +670,9 @@ struct Result {
   // A static cell solve stopped improving despite increasing density pressure.
   // This permits the caller to legalize, but never certifies GP convergence.
   bool density_stalled = false;
+  // Density is feasible, but a sustained routing plateau warrants handing the
+  // static cell solve to legalization. Routing convergence is still unproven.
+  bool route_stalled = false;
   bool timing_observed = false, timing_satisfied = true;
   CentroidReport centroid;
   AlignmentReport alignment;
