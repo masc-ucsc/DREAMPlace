@@ -145,6 +145,40 @@ void csr_check(const std::vector<int> &flat, const std::vector<int> &start,
   }
 }
 
+// Minimum excess of one rectangle over all translations on an infinite grid.
+// Along one axis it covers either n full bins plus two edges summing to r,
+// or n-1 full bins plus two edges summing to 1+r. For each case convexity
+// minimizes excess when the edges are equal. Applying that independently on
+// both axes leaves four combinations; ignoring fixed occupancy is conservative.
+double rectangle_overflow_floor(double w, double h, double dx, double dy,
+                                double density, double charge) {
+  const double area = dx * dy;
+  if (charge * std::min(w, dx) * std::min(h, dy) <= density * area) {
+    return 0;
+  }
+  const double nx = std::floor(w / dx), ny = std::floor(h / dy);
+  const double rx = w / dx - nx, ry = h / dy - ny;
+  const auto excess = [&](double overlap) {
+    return std::max(0., charge * overlap - density);
+  };
+  double best = charge * w * h;
+  for (int x = 0; x != 2; ++x) {
+    if (nx < x)
+      continue;
+    const double full_x = nx - x, edge_x = (rx + x) / 2;
+    for (int y = 0; y != 2; ++y) {
+      if (ny < y)
+        continue;
+      const double full_y = ny - y, edge_y = (ry + y) / 2;
+      const double value =
+          full_x * full_y * excess(1) + 2 * full_x * excess(edge_y) +
+          2 * full_y * excess(edge_x) + 4 * excess(edge_x * edge_y);
+      best = std::min(best, area * value);
+    }
+  }
+  return best;
+}
+
 // Exact physical overflow, excluding fillers; fixed area reduces bin capacity.
 double overflow(const Design &d, int bx, int by, double target_density,
                 bool scale_macro = false, bool ignore_fixed_macros = false,
@@ -153,7 +187,7 @@ double overflow(const Design &d, int bx, int by, double target_density,
   const auto &l = d.layout;
   double dx = (l.xh - l.xl) / bx, dy = (l.yh - l.yl) / by;
   std::vector<double> movable(bx * by), fixed(bx * by);
-  double total = 0;
+  double total = 0, grid_excess = 0;
   // Exact rectangle/bin overlap. Clamp before the int conversion: fixed nodes
   // may lie far outside the core.
   const auto deposit = [&](std::vector<double> &map, double x, double y,
@@ -190,6 +224,10 @@ double overflow(const Design &d, int bx, int by, double target_density,
                               : 1;
     if (i < d.num_movable) {
       total += charge * w * h;
+      if (floor) {
+        grid_excess +=
+            rectangle_overflow_floor(w, h, dx, dy, target_density, charge);
+      }
     }
     deposit(i < d.num_movable ? movable : fixed, x, y, w, h, charge);
   }
@@ -210,7 +248,12 @@ double overflow(const Design &d, int bx, int by, double target_density,
   if (floor) {
     // sum(max(0, charge-capacity)) >= max(0, total_charge-total_capacity).
     // Use the same clipped fixed occupancy and charge as the overflow metric.
-    *floor = total ? std::max(0., (total - capacity) / total) : 0;
+    // Also max(0, sum(charges)-capacity) >= sum(max(0, charge-capacity))
+    // in every bin. Sum each cell's independent minimum, then take the
+    // stronger of the grid-resolution and whole-core capacity bounds.
+    *floor = total
+                 ? std::max(grid_excess, std::max(0., total - capacity)) / total
+                 : 0;
   }
   return total ? excess / total : 0;
 }

@@ -668,7 +668,8 @@ struct Result {
   std::vector<GpCheckpointSample> checkpoint_history;
   int density_iteration = 0, continuation_deadline = 0;
   bool objective_converged = false, continuation_limit = false;
-  // Lower bound from total movable charge minus available bin capacity.
+  // Lower bound from available bin capacity and unavoidable per-cell bin
+  // excess.
   double overflow_floor = 0;
   // A static cell solve reached its unavoidable overflow floor (within the
   // requested tolerance), or stalled despite increasing density pressure.

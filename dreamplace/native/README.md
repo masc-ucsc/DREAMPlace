@@ -916,9 +916,17 @@ comparison. Keep off by default; no new routing/timing result is claimed.
 ### Infeasible density targets on supplied cores
 
 A static cell solve can hand off to legalization when the supplied core cannot
-meet the requested overflow tolerance. The lower bound is
-`max(0, movable_charge - available_bin_capacity) / movable_charge`, using the
-same clipped fixed occupancy and macro charge scaling as physical overflow.
+meet the requested overflow tolerance. The lower bound is the maximum of:
+
+- `max(0, movable_charge - available_bin_capacity) / movable_charge`, using the
+  same clipped fixed occupancy and macro charge scaling as physical overflow;
+- the sum of each movable rectangle's minimum possible bin excess, divided by
+  movable charge. This catches cells larger than the density bins even when
+  total core capacity is sufficient. Each rectangle is minimized independently
+  over its grid phase, ignoring fixed obstacles, so the bound is conservative.
+  Along each axis only two cases are needed: full bins with two balanced edge
+  fragments, or one fewer full bin with larger balanced edge fragments.
+
 When this bound exceeds `stop_overflow`, checkpoint milestones, density-weight
 updates and settling use overflow above the bound. The requested density,
 physical overflow and convergence criterion remain unchanged: the result sets
@@ -929,7 +937,7 @@ requirements still apply. Checkpoint resizing recomputes the bound.
 This handoff does not apply to external continuation, strict upper-bound density,
 movable macros/centroids, dynamic grids, scheduled geometry or virtual density
 reservations. Designs whose bound fits the requested tolerance keep their
-existing trajectory. This handles an impossible capacity target; it does not
+existing trajectory. This handles impossible capacity or grid-resolution targets; it does not
 claim the local bin distribution is optimal or the placement is legal before
 legalization.
 

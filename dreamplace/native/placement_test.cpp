@@ -109,6 +109,55 @@ void density_floor_accounts_for_fixed_capacity() {
        "density floor disagrees with scaled macro charge");
 }
 
+void density_floor_accounts_for_grid_resolution() {
+  Design initial;
+  initial.layout = {0, 0, 16, 16, .1, .1};
+  initial.num_movable = 1;
+  initial.node_x = initial.node_y = {2.5};
+  initial.node_size_x = initial.node_size_y = {2};
+  initial.build_maps();
+  Options o;
+  o.bins_x = o.bins_y = 16;
+  o.max_iterations = 0;
+  o.target_density = .5;
+  o.add_fillers = o.legalize = o.detailed_place = false;
+  auto d = initial;
+  const auto balanced = place(d, o);
+  // Plenty of total capacity, but one full bin is unavoidable. Balanced
+  // half-bin edges attain the minimum: 0.5 excess / 4 units of cell area.
+  near(balanced.overflow_floor, .125, 1e-12, "missing grid-resolution floor");
+  near(balanced.overflow, balanced.overflow_floor, 1e-12,
+       "balanced rectangle edges did not attain the floor");
+
+  for (const auto &size : {std::pair{.2, 3.4}, std::pair{1., 1.},
+                           std::pair{2.2, 2.7}, std::pair{7.8, 5.4}}) {
+    double bound = -1;
+    for (int x = 0; x != 5; ++x) {
+      for (int y = 0; y != 5; ++y) {
+        d = initial;
+        d.node_size_x = {size.first};
+        d.node_size_y = {size.second};
+        d.node_x = {2 + x * .2};
+        d.node_y = {2 + y * .2};
+        const auto result = place(d, o);
+        check(result.overflow_floor <= result.overflow + 1e-12,
+              "grid floor overestimated physical overflow at a grid phase");
+        if (bound < 0)
+          bound = result.overflow_floor;
+        near(result.overflow_floor, bound, 1e-12,
+             "grid floor depends on cell position");
+      }
+    }
+  }
+  d = initial;
+  d.layout.xh *= 2;
+  d.node_size_x[0] *= 2;
+  d.node_x[0] *= 2;
+  const auto stretched = place(d, o);
+  near(stretched.overflow_floor, balanced.overflow_floor, 1e-12,
+       "grid floor depends on bin aspect ratio or coordinate scale");
+}
+
 void density_floor_checkpoint_and_resize() {
   Design initial;
   initial.layout = {0, 0, 2, 2, 1, 1};
@@ -152,7 +201,7 @@ void density_floor_checkpoint_and_resize() {
   o.checkpoint = [&](const Design &, int iteration) {
     checkpoint = iteration;
     GpUpdate update;
-    update.node_size_x = {1};
+    update.node_size_x = {.25}; // One bin wide; retain a legal row height.
     update.node_size_y = {1};
     return update;
   };
@@ -167,7 +216,8 @@ void density_floor_checkpoint_and_resize() {
   o.checkpoint_after_density = true;
   o.adaptive_density = false; // Disable the independent stagnation policy.
   o.add_fillers = true;
-  o.filler_cell_space = true; // Explicit charge to back the virtual reservation.
+  o.filler_cell_space =
+      true; // Explicit charge to back the virtual reservation.
   o.checkpoint = [&](const Design &, int) {
     GpUpdate update;
     update.density_reservations =
@@ -2446,6 +2496,7 @@ int main() {
   try {
     density_plateau_hands_off_without_claiming_convergence();
     density_floor_accounts_for_fixed_capacity();
+    density_floor_accounts_for_grid_resolution();
     density_floor_checkpoint_and_resize();
     routing_plateau_hands_off_without_claiming_convergence();
     setup_timing_does_not_veto_convergence();
