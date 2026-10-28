@@ -41,6 +41,62 @@ template <typename F> void rejects(F f) {
   }
   check(rejected, "expected rejection");
 }
+void automatic_grid_matches_explicit_grid() {
+  for (double side : {32., 128., 256.}) {
+    Design initial;
+    initial.layout = {0, 0, side, side, 1, 1};
+    initial.num_movable = 16;
+    initial.node_size_x = initial.node_size_y = std::vector<double>(18, 1);
+    initial.node_x = initial.node_y = std::vector<double>(18, side / 2);
+    for (int i = 0; i < 16; ++i) {
+      initial.node_x[i] += i % 4;
+      initial.node_y[i] += i / 4;
+    }
+    initial.node_x[16] = 0;
+    initial.node_x[17] = side;
+    for (int i : {16, 17})
+      initial.node_size_x[i] = initial.node_size_y[i] = 0;
+    initial.flat_net2pin_start = {0};
+    for (int i = 0; i <= 16; ++i) {
+      for (int node : {i ? i - 1 : 16, i == 16 ? 17 : i}) {
+        initial.flat_net2pin.push_back(initial.pin2node.size());
+        initial.pin2node.push_back(node);
+        initial.pin_offset_x.push_back(0);
+        initial.pin_offset_y.push_back(0);
+      }
+      initial.flat_net2pin_start.push_back(initial.flat_net2pin.size());
+    }
+    initial.build_maps();
+    Options options;
+    options.target_density = .5;
+    options.max_iterations = 120;
+    options.post_density_factor = 4;
+    options.adaptive_density = true;
+    options.add_fillers = options.legalize = options.detailed_place = false;
+    const auto bins =
+        detail::dynamic_bins(initial, options.target_density, 256);
+    options.bins_x = bins.first;
+    options.bins_y = bins.second;
+    auto explicit_grid = initial;
+    const auto reference = place(explicit_grid, options);
+    options.dynamic_bins = true;
+    options.bin_max = 256;
+    options.bins_x = options.bins_y = 32;
+    auto automatic_grid = initial;
+    const auto selected = place(automatic_grid, options);
+    check(reference.bins_x == selected.bins_x &&
+              reference.bins_y == selected.bins_y,
+          "automatic grid did not resolve to the explicit reference");
+    check(explicit_grid.node_x == automatic_grid.node_x &&
+              explicit_grid.node_y == automatic_grid.node_y &&
+              reference.iterations == selected.iterations &&
+              reference.converged == selected.converged &&
+              reference.density_stalled == selected.density_stalled &&
+              reference.route_stalled == selected.route_stalled,
+          "grid selection changed the numerical solve or phase handoff");
+  }
+}
+
 void density_plateau_hands_off_without_claiming_convergence() {
   Design initial;
   initial.layout = {0, 0, 2, 2, 1, 2};
@@ -67,6 +123,25 @@ void density_plateau_hands_off_without_claiming_convergence() {
   check(stalled.iterations >= options.min_iterations &&
             stalled.iterations < options.max_iterations,
         "density plateau ignored its minimum or exhausted its maximum");
+  // Grid selection happens before the solve; it must not disable the floor
+  // or plateau policy for the same resolved grid.
+  auto selected_options = options;
+  const auto bins = detail::dynamic_bins(initial, options.target_density, 32);
+  selected_options.bins_x = bins.first;
+  selected_options.bins_y = bins.second;
+  auto explicit_grid = initial;
+  const auto reference = place(explicit_grid, selected_options);
+  selected_options.dynamic_bins = true;
+  selected_options.bin_max = 32;
+  auto automatic_grid = initial;
+  const auto selected = place(automatic_grid, selected_options);
+  check(selected.density_stalled && !selected.converged && selected.legal &&
+            reference.iterations == selected.iterations &&
+            reference.density_iteration == selected.density_iteration &&
+            reference.overflow_floor == selected.overflow_floor &&
+            explicit_grid.node_x == automatic_grid.node_x &&
+            explicit_grid.node_y == automatic_grid.node_y,
+        "automatic grid changed an infeasible density handoff");
   auto fixed_budget = initial;
   options.min_iterations = options.max_iterations;
   const auto full = place(fixed_budget, options);
@@ -2494,6 +2569,7 @@ void route_policy_helpers() {
 }
 int main() {
   try {
+    automatic_grid_matches_explicit_grid();
     density_plateau_hands_off_without_claiming_convergence();
     density_floor_accounts_for_fixed_capacity();
     density_floor_accounts_for_grid_resolution();

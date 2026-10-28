@@ -1193,6 +1193,10 @@ Result place(Design &design, const Options &options, GpState *state) {
     o.bins_x = bins.first;
     o.bins_y = bins.second;
   }
+  // Selecting a grid must not also select different arithmetic for the same
+  // grid. Retain the legacy transform through 64 bins; larger grids need the
+  // fast transform regardless of whether their dimensions were explicit.
+  const bool fast_density_transform = o.bins_x > 64 || o.bins_y > 64;
   if (o.gp_search.enabled && !o.schedule_iterations) {
     o.schedule_iterations = o.max_iterations;
   }
@@ -1745,7 +1749,7 @@ Result place(Design &design, const Options &options, GpState *state) {
       !state && !o.density_upper_bound && !o.magnet_runtime &&
       !o.trial_tuning && !centroids && !o.movable_update &&
       !o.macro_pull_update && !o.macro_transparency.enabled() &&
-      !o.vanished_memory && !o.dynamic_bins && macro_area == 0;
+      !o.vanished_memory && macro_area == 0;
   const auto excess_overflow = [&](double value, double floor) {
     return allow_density_floor && d.density_reservations.empty() &&
                    floor > o.stop_overflow + 1e-12
@@ -2017,8 +2021,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         ratio[i] *= o.target_density;
       }
     }
-    PoissonSolver solver(o.bins_x, o.bins_y, width, height, o.dynamic_bins, 0,
-                         o.num_threads);
+    PoissonSolver solver(o.bins_x, o.bins_y, width, height,
+                         fast_density_transform, 0, o.num_threads);
     std::unique_ptr<detail::LocalDensity> local_density;
     std::unique_ptr<detail::LocalDensity> macro_cell_density;
     double macro_cell_scale = -1;
@@ -4160,7 +4164,7 @@ Result place(Design &design, const Options &options, GpState *state) {
             !o.movable_update && !o.macro_pull_update && !pin_timing_seen &&
             !o.macro_align_weight && !fixed_macro_weight &&
             !o.cohesion_weight && !o.order_weight && !macro_routing &&
-            !o.route.probe && !learned_ladder && !o.dynamic_bins &&
+            !o.route.probe && !learned_ladder &&
             global_iter + 1 < offset + o.max_iterations &&
             route_overflow > o.route.target_overflow && r.history.size() >= 6 &&
             std::none_of(d.node_macro.begin(),
@@ -4204,8 +4208,8 @@ Result place(Design &design, const Options &options, GpState *state) {
         // current cell placement to legalization without calling it converged.
         // Restrict this to static cell solves: continuation, moving macros and
         // scheduled objectives must finish their own transitions first.
-        if (o.adaptive_density && o.post_density_factor && !o.dynamic_bins &&
-            !state && !o.magnet_runtime && !o.trial_tuning && !centroids &&
+        if (o.adaptive_density && o.post_density_factor && !state &&
+            !o.magnet_runtime && !o.trial_tuning && !centroids &&
             !o.movable_update && !o.macro_pull_update && !pin_timing_seen &&
             !o.macro_align_weight && !fixed_macro_weight &&
             !o.cohesion_weight && !o.order_weight && !macro_routing &&
