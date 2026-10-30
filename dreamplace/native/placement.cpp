@@ -1530,6 +1530,12 @@ Result place(Design &design, const Options &options, GpState *state) {
     salt(0x64656e7369747973ULL);
     salt(std::bit_cast<std::uint64_t>(*o.density_weight_seed));
   }
+  if (o.hold_overflow) {
+    salt(0x686f6c646f766572ULL);
+  }
+  if (o.fillers_in_whitespace) {
+    salt(0x77686974657370ULL);
+  }
   if (o.wirelength_gamma_end != 0.05) {
     salt(std::bit_cast<std::uint64_t>(o.wirelength_gamma_end));
   }
@@ -1934,9 +1940,54 @@ Result place(Design &design, const Options &options, GpState *state) {
       filler_rounding_loss = std::max(0., target_area - r.filler_area);
       r.filler_size_x = fw;
       r.filler_size_y = fh;
+      // fillers_in_whitespace: cumulative free capacity per bin (target density
+      // area minus the real nodes' overlap), sampled bin by bin
+      std::vector<double> room;
+      if (o.fillers_in_whitespace && fillers > 0) {
+        const int bx = o.bins_x, by = o.bins_y;
+        std::vector<double> used(size_t(bx) * by, 0);
+        for (int i = 0; i < original; ++i) {
+          const double x0 = d.node_x[i], x1 = x0 + d.node_size_x[i];
+          const double y0 = d.node_y[i], y1 = y0 + d.node_size_y[i];
+          const int ix0 = std::clamp(int((x0 - l.xl) / dx), 0, bx - 1);
+          const int ix1 = std::clamp(int((x1 - l.xl) / dx), 0, bx - 1);
+          const int iy0 = std::clamp(int((y0 - l.yl) / dy), 0, by - 1);
+          const int iy1 = std::clamp(int((y1 - l.yl) / dy), 0, by - 1);
+          for (int iy = iy0; iy <= iy1; ++iy) {
+            const double oy = std::min(y1, l.yl + (iy + 1) * dy) -
+                              std::max(y0, l.yl + iy * dy);
+            for (int ix = ix0; ix <= ix1; ++ix) {
+              const double ox = std::min(x1, l.xl + (ix + 1) * dx) -
+                                std::max(x0, l.xl + ix * dx);
+              used[size_t(iy) * bx + ix] += std::max(0., ox) * std::max(0., oy);
+            }
+          }
+        }
+        room.resize(used.size());
+        double sum = 0;
+        for (size_t k = 0; k < used.size(); ++k) {
+          sum += std::max(0., o.target_density * dx * dy - used[k]);
+          room[k] = sum;
+        }
+        if (sum <= 0) {
+          room.clear();
+        }
+      }
       for (int i = 0; i < fillers; ++i) {
-        d.node_x.push_back(l.xl + unit(rng) * (width - fw));
-        d.node_y.push_back(l.yl + unit(rng) * (height - fh));
+        if (!room.empty()) {
+          const auto k = size_t(
+              std::upper_bound(room.begin(), room.end(),
+                               unit(rng) * room.back()) -
+              room.begin());
+          const size_t bin = std::min(k, room.size() - 1);
+          const double cx = l.xl + (bin % o.bins_x + unit(rng)) * dx;
+          const double cy = l.yl + (bin / o.bins_x + unit(rng)) * dy;
+          d.node_x.push_back(std::clamp(cx - fw / 2, l.xl, l.xl + width - fw));
+          d.node_y.push_back(std::clamp(cy - fh / 2, l.yl, l.yl + height - fh));
+        } else {
+          d.node_x.push_back(l.xl + unit(rng) * (width - fw));
+          d.node_y.push_back(l.yl + unit(rng) * (height - fh));
+        }
         d.node_size_x.push_back(fw);
         d.node_size_y.push_back(fh);
       }
@@ -2058,6 +2109,7 @@ Result place(Design &design, const Options &options, GpState *state) {
     double density_weight =
                o.density_weight_seed.value_or(o.initial_density_weight),
            t = 1, alpha = 0;
+    double held_overflow = -1; // hold_overflow: the overflow to keep
     bool density_initialized =
         warm ? state->density_initialized
              : (o.density_weight_seed.has_value() ||
@@ -3913,6 +3965,22 @@ Result place(Design &design, const Options &options, GpState *state) {
         o.observer(physical, PlacementStage::global_placement,
                    offset + r.iterations);
       }
+      if (o.hold_overflow && (global_iter + 1) % 5 == 0) {
+        Design physical = model;
+        std::copy_n(x.begin(), original, physical.node_x.begin());
+        std::copy_n(y.begin(), original, physical.node_y.begin());
+        double floor = 0;
+        const double now =
+            overflow(physical, o.bins_x, o.bins_y, o.target_density,
+                     o.scale_macro_density, o.macro_transparency.always,
+                     exclusion_scale, true, &floor);
+        if (held_overflow < 0) {
+          held_overflow = std::max(now, 1e-6);
+        } else {
+          density_weight *=
+              std::clamp(std::pow(now / held_overflow, 2), .7, 1.4);
+        }
+      }
       if ((global_iter + 1) % 20 == 0 ||
           (convergence.deadline && global_iter + 1 == convergence.deadline)) {
         Design physical = model;
@@ -4281,9 +4349,10 @@ Result place(Design &design, const Options &options, GpState *state) {
         previous_hpwl = current_hpwl;
         // If only circle separation is pending, do not keep escalating an
         // already-satisfied density constraint. Resume if density rises again.
-        if ((!separate_circles && !o.density_upper_bound &&
-             !o.post_density_factor) ||
-            excess > o.stop_overflow) {
+        if (!o.hold_overflow &&
+            ((!separate_circles && !o.density_upper_bound &&
+              !o.post_density_factor) ||
+             excess > o.stop_overflow)) {
           density_weight = std::min(density_weight * growth, 1e12);
         }
       }

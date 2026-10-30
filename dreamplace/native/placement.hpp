@@ -506,6 +506,18 @@ struct Options {
   // Already normalized coefficient from a previous converged placement.
   // Coordinate-only refinement keeps this coefficient but starts new momentum.
   std::optional<double> density_weight_seed;
+  // Refinement of an already spread placement: GP stops while still spreading
+  // (at the overflow target, the density weight rising), so no fixed weight
+  // holds it -- the final one keeps spreading it, any smaller one lets
+  // wirelength pull it back. Instead, every 5 iterations the weight follows
+  // the overflow measured at the first check (raised above it, lowered
+  // below), and never escalates on its own.
+  bool hold_overflow = false;
+  // Refinement of an already spread placement: start the fillers in its free
+  // space (bins weighted by their room at target_density) instead of at
+  // random. Random fillers make a lumpy density field that pushes the real
+  // cells around (wirelength and overflow both degrade from the first steps).
+  bool fillers_in_whitespace = false;
 
   double max_step = 0.5; // fraction of a bin
   // Optional H2D hooks. Zero/default controls preserve the original GP.

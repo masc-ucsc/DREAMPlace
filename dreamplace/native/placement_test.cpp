@@ -587,6 +587,62 @@ void gradients() {
     x += 1e6;
   check(std::isfinite(detail::wirelength(d, 0.1, 1).value), "stable WA kernel");
 }
+// A refinement settle (seeded density weight) of a converged GP placement must
+// keep it: fillers in its free space and the weight following the starting
+// overflow. Random fillers push the cells around instead.
+void settle_keeps_converged_placement() {
+  const int n = 12;
+  Design d;
+  d.layout = {0, 0, 24, 24, 1, 1};
+  d.num_movable = n * n;
+  for (int i = 0; i < n * n; ++i) {
+    d.node_x.push_back(8 + (i % n) * .6);  // a compressed (overlapping) grid of distinct points
+    d.node_y.push_back(8 + (i / n) * .6);
+    d.node_size_x.push_back(1);
+    d.node_size_y.push_back(1);
+  }
+  int pin = 0;
+  for (int r = 0; r < n; ++r) {
+    for (int c = 0; c < n; ++c) {
+      for (const auto [dr, dc] : {std::pair{0, 1}, std::pair{1, 0}}) {
+        if (r + dr >= n || c + dc >= n) {
+          continue;
+        }
+        for (const int node : {r * n + c, (r + dr) * n + c + dc}) {
+          d.pin2node.push_back(node);
+          d.flat_net2pin.push_back(pin++);
+        }
+        d.flat_net2pin_start.push_back(pin - 2);
+      }
+    }
+  }
+  d.flat_net2pin_start.push_back(pin);
+  d.pin_offset_x.assign(pin, .5);
+  d.pin_offset_y.assign(pin, .5);
+  d.build_maps();
+  Options o;
+  o.bins_x = o.bins_y = 16;
+  o.num_threads = 1;
+  o.max_iterations = 2000;
+  o.legalize = o.detailed_place = false;
+  const auto gp = place(d, o);
+  check(gp.converged && gp.density_weight > 0, "the mesh GP converges");
+  const double converged = hpwl(d);
+  const auto settle = [&](bool whitespace) {
+    auto s = d;
+    Options so = o;
+    so.density_weight_seed = gp.density_weight;
+    so.max_iterations = so.min_iterations = so.schedule_iterations = 50;
+    so.wirelength_gamma_start = so.wirelength_gamma_end;
+    so.max_step = .05;
+    so.fillers_in_whitespace = so.hold_overflow = whitespace;
+    place(s, so);
+    return hpwl(s) / converged - 1;
+  };
+  const double kept = settle(true), random = settle(false);
+  check(std::abs(kept) < .05, "whitespace settle drifted the converged placement");
+  check(std::abs(kept) < std::abs(random), "whitespace fillers no steadier than random ones");
+}
 void native_flow() {
   auto d = design(), before = d;
   check(!is_legal(d), "overlapping input should be illegal");
@@ -2588,6 +2644,7 @@ int main() {
     threaded_determinism();
     gradients();
     hpwl_case();
+    settle_keeps_converged_placement();
     native_flow();
     transparent_macros();
     vanished_memories();
