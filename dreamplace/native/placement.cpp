@@ -3979,6 +3979,12 @@ Result place(Design &design, const Options &options, GpState *state) {
         } else {
           density_weight *=
               std::clamp(std::pow(now / held_overflow, 2), .7, 1.4);
+          // Feedback changes the objective. Momentum and the BB gradient
+          // history from its previous weight cannot extrapolate the new one.
+          t = 1;
+          prev_x = x;
+          prev_y = y;
+          restart = true;
         }
       }
       if ((global_iter + 1) % 20 == 0 ||

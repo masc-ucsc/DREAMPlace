@@ -604,7 +604,7 @@ void settle_keeps_converged_placement() {
   int pin = 0;
   for (int r = 0; r < n; ++r) {
     for (int c = 0; c < n; ++c) {
-      for (const auto [dr, dc] : {std::pair{0, 1}, std::pair{1, 0}}) {
+      for (const auto &[dr, dc] : {std::pair{0, 1}, std::pair{1, 0}}) {
         if (r + dr >= n || c + dc >= n) {
           continue;
         }
@@ -640,6 +640,10 @@ void settle_keeps_converged_placement() {
     return hpwl(s) / converged - 1;
   };
   const double kept = settle(true), random = settle(false);
+  if (!(std::abs(kept) < .05 && std::abs(kept) < std::abs(random))) {
+    std::cerr << "settle relative HPWL drift: whitespace=" << kept
+              << ", random=" << random << '\n';
+  }
   check(std::abs(kept) < .05, "whitespace settle drifted the converged placement");
   check(std::abs(kept) < std::abs(random), "whitespace fillers no steadier than random ones");
 }
