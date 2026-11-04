@@ -41,6 +41,141 @@ template <typename F> void rejects(F f) {
   }
   check(rejected, "expected rejection");
 }
+void feasible_density_does_not_escalate_during_recovery() {
+  Design d;
+  d.layout = {0, 0, 80, 40, 1, 1};
+  d.num_movable = 2;
+  d.node_x = {10, 50, 0, 80};
+  d.node_y = {10, 20, 10, 20};
+  d.node_size_x = {2, 2, 0, 0};
+  d.node_size_y = {1, 1, 0, 0};
+  d.pin2node = {2, 0, 1, 3};
+  d.pin_offset_x = d.pin_offset_y = {0, 0, 0, 0};
+  d.flat_net2pin = {0, 1, 2, 3};
+  d.flat_net2pin_start = {0, 2, 4};
+  d.build_maps();
+  Options o;
+  o.bins_x = o.bins_y = 8;
+  o.max_iterations = o.min_slice_iterations = o.schedule_iterations = 200;
+  o.min_iterations = 200;
+  o.adaptive_density = true;
+  o.add_fillers = o.legalize = o.detailed_place = false;
+  unsigned checkpoints = 0;
+  o.checkpoint_interval = 20;
+  o.checkpoint = [&](const Design &, int) {
+    ++checkpoints;
+    return GpUpdate{};
+  };
+  GpState state;
+  const auto result = place(d, o, &state);
+  check(result.iterations == 200 && checkpoints == 10,
+        "feasible recovery did not honor its timed work budget");
+  check(result.history.size() >= 2, "missing recovery history");
+  const auto weight = result.history.front().density_weight;
+  for (const auto &sample : result.history) {
+    check(sample.overflow <= o.stop_overflow,
+          "recovery fixture must remain density-feasible");
+    near(sample.density_weight, weight, 1e-20,
+         "adaptive penalty escalated an already-satisfied density constraint");
+  }
+}
+void external_route_inflates_only_its_local_bin() {
+  Design d;
+  d.layout = {0, 0, 80, 40, 1, 1};
+  d.num_movable = 2;
+  d.node_x = {10, 60, 0, 80};
+  d.node_y = {10, 20, 10, 20};
+  d.node_size_x = {2, 2, 0, 0};
+  d.node_size_y = {1, 1, 0, 0};
+  d.node_inflatable = {1, 1, 0, 0};
+  d.pin2node = {2, 0, 1, 3};
+  d.pin_offset_x = d.pin_offset_y = {0, 0, 0, 0};
+  d.flat_net2pin = {0, 1, 2, 3};
+  d.flat_net2pin_start = {0, 2, 4};
+  d.build_maps();
+  const auto original = d;
+  Options o;
+  o.bins_x = o.bins_y = 8;
+  o.max_iterations = o.min_slice_iterations = 1;
+  o.add_fillers = o.legalize = o.detailed_place = false;
+  o.routability = o.improved_routability = true;
+  o.route.model = RouteModel::external;
+  unsigned calls = 0;
+  o.route_external = [&](const Design &physical, int bx, int by) {
+    ++calls;
+    check(physical.node_size_x == original.node_size_x &&
+              physical.node_size_y == original.node_size_y &&
+              physical.pin_offset_x == original.pin_offset_x,
+          "external route callback must see physical cell/pin geometry");
+    check(bx == 8 && by == 8, "external route callback got wrong bins");
+    RudyResult result;
+    result.horizontal.assign(bx * by, 0);
+    result.vertical.assign(bx * by, 0);
+    result.pin_utilization.assign(bx * by, 0);
+    result.horizontal[1 * by + 2] = 3;
+    detail::accumulate_overflow(result);
+    return result;
+  };
+  GpState state;
+  const auto result = place(d, o, &state);
+  check(
+      calls == 1 && result.route_model == RouteModel::external &&
+          result.route_external_calls == 1,
+      "density gate starved the external model or silently used an estimator");
+  check(state.inflation[0] > 1 && state.inflation[1] == 1,
+        "external hot-bin pressure inflated a remote cell");
+  check(d.node_size_x == original.node_size_x &&
+            d.node_size_y == original.node_size_y,
+        "external route inflation changed physical dimensions");
+  check(route_model_from_name("external") == RouteModel::external &&
+            std::string(route_model_name(RouteModel::external)) == "external",
+        "external route model name does not round-trip");
+  for (int invalid = 0; invalid < 8; ++invalid) {
+    auto bad = o;
+    bad.route_external = [invalid](const Design &, int bx, int by) {
+      RudyResult result;
+      result.horizontal.assign(bx * by, 0);
+      result.vertical.assign(bx * by, 0);
+      result.pin_utilization.assign(bx * by, 0);
+      if (invalid == 0)
+        result.horizontal.pop_back();
+      if (invalid == 1)
+        result.vertical[0] = -1;
+      if (invalid == 2)
+        result.pin_utilization[0] = std::numeric_limits<double>::quiet_NaN();
+      if (invalid == 3)
+        result.overflow = std::numeric_limits<double>::infinity();
+      if (invalid == 4)
+        result.blocked_fraction.assign(bx * by, 1.1);
+      if (invalid == 5)
+        result.unroutable_nets = -1;
+      if (invalid == 6)
+        result.horizontal[0] = 2; // summary must not hide pressure
+      if (invalid == 7)
+        result.drc_density.assign(1, 0);
+      return result;
+    };
+    auto candidate = original;
+    GpState empty;
+    rejects([&] { place(candidate, bad, &empty); });
+    check(candidate.node_x == original.node_x &&
+              candidate.node_y == original.node_y && !empty.signature,
+          "invalid external map changed caller state");
+  }
+  auto missing = o;
+  missing.route_external = {};
+  auto candidate = original;
+  rejects([&] { place(candidate, missing); });
+  missing = o;
+  missing.route_external_interval = 0;
+  rejects([&] { place(candidate, missing); });
+  // The same provider must not receive padded macro/cell geometry.
+  auto padded = original;
+  padded.node_halo_x = {1, 1, 0, 0};
+  padded.node_halo_y = {1, 1, 0, 0};
+  place(padded, o);
+  check(calls == 2, "halo placement did not call the external provider");
+}
 void automatic_grid_matches_explicit_grid() {
   for (double side : {32., 128., 256.}) {
     Design initial;
@@ -596,7 +731,8 @@ void settle_keeps_converged_placement() {
   d.layout = {0, 0, 24, 24, 1, 1};
   d.num_movable = n * n;
   for (int i = 0; i < n * n; ++i) {
-    d.node_x.push_back(8 + (i % n) * .6);  // a compressed (overlapping) grid of distinct points
+    d.node_x.push_back(
+        8 + (i % n) * .6); // a compressed (overlapping) grid of distinct points
     d.node_y.push_back(8 + (i / n) * .6);
     d.node_size_x.push_back(1);
     d.node_size_y.push_back(1);
@@ -644,8 +780,10 @@ void settle_keeps_converged_placement() {
     std::cerr << "settle relative HPWL drift: whitespace=" << kept
               << ", random=" << random << '\n';
   }
-  check(std::abs(kept) < .05, "whitespace settle drifted the converged placement");
-  check(std::abs(kept) < std::abs(random), "whitespace fillers no steadier than random ones");
+  check(std::abs(kept) < .05,
+        "whitespace settle drifted the converged placement");
+  check(std::abs(kept) < std::abs(random),
+        "whitespace fillers no steadier than random ones");
 }
 void native_flow() {
   auto d = design(), before = d;
@@ -1805,7 +1943,9 @@ void moving_cells() {
   check(held_samples == 2 && released_samples == 1,
         "missing hold/release observations");
   GpState state;
-  rejects([&] { place(d, o, &state); });
+  place(d, o, &state);
+  check(state.iteration == o.max_iterations,
+        "movable callback did not export continuation state");
 }
 
 void moving_terminals() {
@@ -1893,7 +2033,9 @@ void moving_terminals() {
         "virtual filler budget or export");
   o.add_fillers = false;
   GpState state;
-  rejects([&] { place(base, o, &state); });
+  place(base, o, &state);
+  check(state.iteration == o.max_iterations,
+        "terminal callback did not export continuation state");
 }
 
 // Fixed nodes only need finite coordinates; one far above the core used to turn
@@ -2629,6 +2771,8 @@ void route_policy_helpers() {
 }
 int main() {
   try {
+    feasible_density_does_not_escalate_during_recovery();
+    external_route_inflates_only_its_local_bin();
     automatic_grid_matches_explicit_grid();
     density_plateau_hands_off_without_claiming_convergence();
     density_floor_accounts_for_fixed_capacity();

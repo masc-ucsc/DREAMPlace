@@ -58,8 +58,10 @@ UrouteContext::UrouteContext(std::shared_ptr<const UrouteWeights> weights,
     ids_.push_back(sample.id);
     validate_map(sample.features, uroute_feature_channels, true, bins_x_,
                  bins_y_);
-    validate_map(sample.labels, uroute_label_channels, false, bins_x_, bins_y_);
-    for (int metric = 0; metric < 2; ++metric) {
+    validate_map(sample.labels,
+                 sample.utilization_only ? 1 : uroute_label_channels, false,
+                 bins_x_, bins_y_);
+    for (int metric = 0; metric < (sample.utilization_only ? 1 : 2); ++metric) {
       auto pair = sample.features;
       pair.channels = uroute_feature_channels + 1; // normalized label last
       const auto [lo, hi] = sample.labels.ranges[metric];
@@ -76,13 +78,17 @@ UrouteContext::UrouteContext(std::shared_ptr<const UrouteWeights> weights,
     }
   }
   utilization_range_ = {median(ranges[0]), median(ranges[1])};
-  drc_range_ = {median(ranges[2]), median(ranges[3])};
+  has_drc_ = !drc.empty();
+  if (has_drc_)
+    drc_range_ = {median(ranges[2]), median(ranges[3])};
+  else if (level > 0)
+    throw std::invalid_argument("DRC feedback requires detailed DRC support");
   // Constant calibration needs no network. In particular, clean DRC maps must
   // not pay support-encoding time or retain an unused encoder pyramid.
   if (utilization_range_[0] != utilization_range_[1])
     utilization_ =
         std::make_shared<const UrouteNetwork>(*weights_, utilization);
-  if (drc_range_[0] != drc_range_[1])
+  if (has_drc_ && drc_range_[0] != drc_range_[1])
     drc_ = std::make_shared<const UrouteNetwork>(*weights_, drc);
 }
 UroutePrediction UrouteContext::predict(const UrouteMaps &query) const {
@@ -104,7 +110,8 @@ UroutePrediction UrouteContext::predict(const UrouteMaps &query) const {
     return values;
   };
   result.utilization = predict(utilization_, utilization_range_);
-  result.drc_density = predict(drc_, drc_range_);
+  if (has_drc_)
+    result.drc_density = predict(drc_, drc_range_);
   return result;
 }
 
@@ -123,9 +130,10 @@ RudyResult uroute_rudy(const Design &design, const RudyOptions &options) {
   const auto utilization =
       uroute_resample(prediction.utilization, prediction.bins_x,
                       prediction.bins_y, options.bins_x, options.bins_y);
-  result.drc_density =
-      uroute_resample(prediction.drc_density, prediction.bins_x,
-                      prediction.bins_y, options.bins_x, options.bins_y);
+  if (context.has_drc())
+    result.drc_density =
+        uroute_resample(prediction.drc_density, prediction.bins_x,
+                        prediction.bins_y, options.bins_x, options.bins_y);
   const auto count = utilization.size();
   result.overflow =
       double(result.blocked_pins + result.unroutable_nets) / count;

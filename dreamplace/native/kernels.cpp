@@ -22,7 +22,7 @@ int computeWeightedAverageWirelengthMergedLauncher(const T *, const T *,
                                                    int);
 template <typename T>
 int kreorderCPULauncher(DetailedPlaceDB<T> &, int, int, int);
-template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int);
+template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int, int);
 template <typename T>
 void independentSetMatchingCPULauncher(DetailedPlaceDB<T>, int, int, int, int);
 template <typename T>
@@ -570,6 +570,6 @@ void detailed_place(Design &d, int bx, int by, int threads,
   run("independent_set_matching", [&] {
     independentSetMatchingCPULauncher(db, 16, 16, iterations, threads);
   });
-  run("global_swap", [&] { globalSwapCPULauncher(db, iterations); });
+  run("global_swap", [&] { globalSwapCPULauncher(db, iterations, threads); });
 }
 } // namespace DreamPlace::native::detail

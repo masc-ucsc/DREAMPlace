@@ -3,10 +3,15 @@
 // cache.
 #include "global_swap/src/net_bounds.h"
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <random>
 #include <stdexcept>
+
+namespace DreamPlace {
+template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int, int);
+}
 
 namespace {
 using DB = DreamPlace::DetailedPlaceDB<double>;
@@ -109,10 +114,115 @@ void check(bool yes, const char *message) {
   if (!yes)
     throw std::runtime_error(message);
 }
+
+void check_parallel_swaps(int count) {
+  constexpr int cols = 64;
+  check(count >= 512 && count % cols == 0,
+        "cell count must be a multiple of 64, at least 512");
+  const int rows = count / cols;
+  std::vector<double> x, y, width, height(count, 1), offset, weights;
+  std::vector<int> p2node, p2net, net2pin, net_start{0}, node2pin,
+      node_start{0};
+  std::vector<int> regions(count, 0);
+  std::vector<unsigned char> mask;
+  for (int n = 0; n < count; ++n) {
+    x.push_back(4 * (n % cols));
+    y.push_back(n / cols);
+    width.push_back(1 + n % 2);
+  }
+  auto net = [&](const std::vector<int> &nodes) {
+    for (int n : nodes) {
+      p2node.push_back(n);
+      p2net.push_back(weights.size());
+      net2pin.push_back(net2pin.size());
+      offset.push_back(.25);
+    }
+    weights.push_back(1 + (weights.size() % 7) * .125);
+    mask.push_back(1);
+    net_start.push_back(p2node.size());
+  };
+  for (int n = 0; n < count; ++n)
+    net({n, (37 * n + 137) % count});
+  std::vector<int> high_degree;
+  for (int n = 0; n < count; n += 4)
+    high_degree.push_back(n);
+  net(high_degree);
+  for (int n = 0; n < count; ++n) {
+    for (int p = 0; p < int(p2node.size()); ++p)
+      if (p2node[p] == n)
+        node2pin.push_back(p);
+    node_start.push_back(node2pin.size());
+  }
+  auto initial_x = x, initial_y = y;
+  DB db{};
+  db.init_x = initial_x.data();
+  db.init_y = initial_y.data();
+  db.node_size_x = width.data();
+  db.node_size_y = height.data();
+  db.node2fence_region_map = regions.data();
+  db.flat_net2pin_map = net2pin.data();
+  db.flat_net2pin_start_map = net_start.data();
+  db.flat_node2pin_map = node2pin.data();
+  db.flat_node2pin_start_map = node_start.data();
+  db.pin2node_map = p2node.data();
+  db.pin2net_map = p2net.data();
+  db.pin_offset_x = db.pin_offset_y = offset.data();
+  db.net_weights = weights.data();
+  db.net_mask = mask.data();
+  db.xh = 4 * cols;
+  db.yh = rows;
+  db.site_width = db.row_height = 1;
+  db.num_bins_x = db.num_bins_y =
+      1; // enough candidates to exercise parallel scoring
+  db.bin_size_x = db.xh;
+  db.bin_size_y = db.yh;
+  db.num_sites_x = db.xh;
+  db.num_sites_y = db.yh;
+  db.num_nodes = count;
+  db.num_movable_nodes = count - 2;
+  db.num_pins = p2node.size();
+  db.num_nets = weights.size();
+  std::vector<double> serial_x, serial_y;
+  for (int threads : {1, 2, 4, 8}) {
+    x = initial_x;
+    y = initial_y;
+    db.x = x.data();
+    db.y = y.data();
+    const double before = db.compute_total_hpwl();
+    const auto start = std::chrono::steady_clock::now();
+    DreamPlace::globalSwapCPULauncher(db, 2, threads);
+    std::cout << "global swap " << count << " cells, " << threads
+              << " threads: "
+              << std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - start)
+                     .count()
+              << " s\n";
+    check(db.compute_total_hpwl() < before, "swap fixture did not improve");
+    for (int n = db.num_movable_nodes; n < count; ++n)
+      check(x[n] == initial_x[n] && y[n] == initial_y[n], "fixed cell moved");
+    for (int a = 0; a < count; ++a) {
+      check(x[a] >= 0 && x[a] + width[a] <= db.xh && y[a] >= 0 &&
+                y[a] + 1 <= db.yh && x[a] == std::floor(x[a]),
+            "swap left the legal site grid");
+      for (int b = a + 1; b < count; ++b)
+        check(y[a] != y[b] || x[a] + width[a] <= x[b] ||
+                  x[b] + width[b] <= x[a],
+              "swap created overlap");
+    }
+    if (threads == 1) {
+      serial_x = x;
+      serial_y = y;
+    } else {
+      check(x == serial_x && y == serial_y,
+            "parallel scoring changed serial move selection");
+    }
+  }
+}
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
   try {
+    check_parallel_swaps(argc > 1 ? std::stoi(argv[1]) : 512);
     Fixture f;
     DreamPlace::global_swap_detail::NetBounds<double> cache(f.db);
     check(cache.cached(0) && cache.cached(1) && cache.cached(3),

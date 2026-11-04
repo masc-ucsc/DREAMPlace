@@ -233,7 +233,8 @@ struct MovablePosition {
       0; // hold for this many subsequent GP steps, then release
 };
 class UrouteContext;
-enum class RouteModel { off, rudy, rsmt, automatic, uroute };
+struct RudyResult;
+enum class RouteModel { off, rudy, rsmt, automatic, uroute, external };
 const char *route_model_name(RouteModel model);
 struct RoutePolicy {
   RouteModel model = RouteModel::rudy;
@@ -406,6 +407,9 @@ struct Options {
   std::function<void(const GpCheckpointSample &)> checkpoint_observer;
   GpCheckpoint checkpoint;
 
+  // Minimum additional steps for this call, independent of the global clock.
+  // This is a slice budget, not part of the optimizer compatibility signature.
+  int min_slice_iterations = 0;
   int max_iterations = 500;
   int bins_x = 32, bins_y = 32;
   // Opt-in repulsion controls. Automatic bins resolve before halo padding.
@@ -540,6 +544,14 @@ struct Options {
   double order_weight = 0, order_growth = 1;
   int schedule_iterations = 0;
   RoutePolicy route;
+  // External maps replace native estimators for this stage. The callback sees
+  // physical nodes only and returns x-major utilization on the requested grid.
+  // Include rudy.hpp when defining it. Invalid/missing maps fail atomically.
+  std::function<RudyResult(const Design &, int bins_x, int bins_y)>
+      route_external;
+  // First active step, then this many cumulative GP steps between samples;
+  // retained slices keep the cadence, while a physical rebind samples afresh.
+  int route_external_interval = 50;
   std::shared_ptr<const UrouteContext> uroute;
   std::string uroute_identity, uroute_skipped;
   std::function<void(const Design &, int bins_x, int bins_y)>
@@ -627,7 +639,7 @@ struct GpSample {
   bool route_sampled = false, route_probe = false;
   int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
   double route_rudy_seconds = 0, route_rsmt_seconds = 0,
-         route_uroute_seconds = 0;
+         route_uroute_seconds = 0, route_external_seconds = 0;
   int route_uroute_switch_iteration = -1;
   double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
   double route_probe_overflow = -1;
@@ -697,6 +709,8 @@ struct Result {
   double poisson_seconds = 0, macro_routing_seconds = 0;
   double rudy_seconds = 0;
   int rudy_calls = 0;
+  double route_external_seconds = 0;
+  int route_external_calls = 0;
   RouteModel route_model = RouteModel::rudy;
   int route_switch_iteration = -1;
   double route_switch_rudy = -1, route_switch_rsmt = -1;
@@ -736,6 +750,9 @@ struct Result {
 // Optional full GP continuation. Includes private fillers, Nesterov/BB history,
 // density normalization and global iteration offset. A mismatching design is
 // rejected; failed calls leave state untouched. Empty state starts a new solve.
+// Without GpRebind, callbacks require fixed topology, cell footprints and
+// reservations. Explicit rebind permits hosted model edits and checkpoint
+// replacement while preserving the private particle state.
 struct GpState {
   GpConvergence convergence;
   RouteModel route_model = RouteModel::rudy;
@@ -747,7 +764,18 @@ struct GpState {
   double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
   double route_probe_overflow = -1;
   std::uint64_t signature = 0;
+  int route_external_last_iteration = -1;
+  double route_external_overflow = 0, route_external_peak = 0;
+  int route_external_unroutable_nets = 0, route_external_blocked_pins = 0;
   int iteration = 0;
+  // Smoothing can restart after a host remap without resetting callback clocks,
+  // fixed-macro penalties, fillers, or the lifetime of the placement session.
+  int wirelength_epoch = 0;
+  // Pending callback effects must survive a pause exactly at a checkpoint.
+  bool restart = false, checkpoint_invoked = false, pin_timing_seen = false;
+  bool movable_updates_retired = false;
+  int last_checkpoint = -1;
+  std::vector<int> movable_holds;
   double density_weight = 0, momentum = 1, step = 0;
   bool density_initialized = false;
   double previous_overflow = -1, previous_hpwl = 0;
@@ -759,6 +787,48 @@ struct GpState {
   std::optional<PinTiming> pin_timing;
   std::vector<DensityReservation> density_reservations;
   bool reservation_accounting = false;
+  // Physical identities and private particle geometry retained for explicit
+  // host edits. Physical coordinates here match the saved optimizer snapshot.
+  Design physical;
+  double filler_size_x = 0, filler_size_y = 0, filler_rounding_loss = 0;
+  bool rebound_fillers = false;
+  // Zero-step model edits defer particle replenishment until an active slice.
+  bool filler_replenish_pending = false;
+};
+
+// Explicit host transaction between GP slices. Empty mapping means unchanged
+// node identities. Otherwise maps every new physical node to its previous
+// index; -1 inserts a standard cell or zero-area fixed region terminal. Such
+// nodes may also disappear. Footprints, net/pin topology, bounds, timing and
+// optimizer controls may change. Retained nodes preserve mobility and macro
+// identity; fixed bodies and the core origin/site/row lattice must remain.
+// Keeps private particles, density normalization and the accumulated clock. The
+// next nonzero slice appends deterministic particles if its whitespace budget
+// needs more, up to filler_max_count; retained particle positions and
+// footprints remain. Invalidates momentum and convergence samples for the
+// edited model. Passing this to place() is atomic with the placement call (also
+// at zero steps).
+struct GpRebind {
+  std::vector<int> previous_node;
+  // Discard the old objective's density penalty, retaining particles and clock.
+  // The next GP step calibrates initial_density_weight against the new model's
+  // gradients, independently of density_weight_seed. Zero-step rebinds defer
+  // that calibration until the next active slice.
+  bool renormalize_density = false;
+  // Start a fresh wirelength smoothing schedule at the current global step.
+  // Ordinary rebinds retain the previous epoch. Density recalibration is
+  // separate so each recovery mechanism can be measured independently.
+  bool restart_wirelength = false;
+  // Discard stale estimator-only standard-cell inflation before remeasuring a
+  // new placement. Physical sizes, reservations, macros and fillers stay
+  // intact.
+  bool reset_routing_inflation = false;
+  // Explicit handoff from a host macro planner. Retained fixed hard macros
+  // may move or mirror (N/FN/FS/S); their size, identity and mobility remain.
+  // Fixed standard cells and placement masks retain their strict pose
+  // invariant. Pin offsets must already describe the new orientation, as in
+  // Design.
+  bool allow_fixed_macro_move = false;
 };
 
 // Validates identities/physical bindings and returns nominal charge. Inflation,
@@ -781,7 +851,7 @@ double reservation_filler_area(double unreserved_budget, double rounding_loss,
 // cannot produce a legal result. Failed calls leave the caller's design intact.
 // Non-movable nodes remain bit-identical. No Torch, Python, CUDA, or file I/O.
 Result place(Design &design, const Options &options = {},
-             GpState *state = nullptr);
+             GpState *state = nullptr, const GpRebind *rebind = nullptr);
 double hpwl(const Design &design);
 // Exact physical overflow excluding fillers; fixed area reduces bin capacity.
 double density_overflow(const Design &, int bins_x, int bins_y,

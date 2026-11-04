@@ -35,7 +35,10 @@ private:
 };
 struct UrouteSupport {
   std::string id;
-  UrouteMaps features, labels; // labels: raw utilization, DRC density, detour
+  UrouteMaps features,
+      labels; // detailed: utilization, DRC, detour; coarse: utilization only
+  bool utilization_only =
+      false; // explicit task mask, never interpret absent DRC as zero
 };
 struct UroutePrediction {
   int bins_x = 0, bins_y = 0;
@@ -52,6 +55,7 @@ public:
   int bins_x() const { return bins_x_; }
   int bins_y() const { return bins_y_; }
   double drc_level() const { return drc_level_; }
+  bool has_drc() const { return has_drc_; }
 
 private:
   std::shared_ptr<const UrouteWeights> weights_;
@@ -60,5 +64,6 @@ private:
   std::array<double, 2> utilization_range_, drc_range_;
   int bins_x_ = 0, bins_y_ = 0;
   double drc_level_ = 0;
+  bool has_drc_ = false;
 };
 } // namespace DreamPlace::native

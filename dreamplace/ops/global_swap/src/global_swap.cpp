@@ -26,7 +26,8 @@ DREAMPLACE_BEGIN_NAMESPACE
 
 /// @brief global swap algorithm for detailed placement
 template <typename T>
-int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
+int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters,
+                          int num_threads) {
   dreamplacePrint(kDEBUG, "%dx%d bins, bin size %g x %g\n", db.num_bins_x,
                   db.num_bins_y, db.bin_size_x, db.bin_size_y);
 
@@ -453,7 +454,12 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
         collect_candidates_runs += 1;
         // dreamplacePrint(kDEBUG, "found %lu candidates\n", candidates.size());
         timer_start = CPUTimer::getGlobaltime();
-        // #pragma omp parallel for num_threads (4)
+        // Proposals read the same placement and bounds; each writes only its
+        // own candidate. Keep selection and application serial, preserving
+        // candidate order, floating-point sums and tie breaking exactly.
+        // Small bins stay serial to avoid team-launch overhead.
+#pragma omp parallel for num_threads(num_threads)                              \
+    schedule(static) if (num_threads > 1 && candidates.size() >= 256)
         for (unsigned int k = 0; k < candidates.size(); ++k) {
           auto &cand = candidates[k];
           cand.cost = compute_cost(cand.node_id, cand.node_xl, cand.node_yl,
@@ -565,6 +571,12 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
   return 0;
 }
 
+// Preserve the sequential entry point used by the upstream Torch wrapper.
+template <typename T>
+int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
+  return globalSwapCPULauncher(db, max_iters, 1);
+}
+
 #ifndef DREAMPLACE_TORCH_FREE
 at::Tensor global_swap_forward(
     at::Tensor init_pos, at::Tensor node_size_x, at::Tensor node_size_y,
@@ -607,6 +619,7 @@ at::Tensor global_swap_forward(
 
 #ifdef DREAMPLACE_TORCH_FREE
 template int globalSwapCPULauncher<double>(DetailedPlaceDB<double>, int);
+template int globalSwapCPULauncher<double>(DetailedPlaceDB<double>, int, int);
 #endif
 
 DREAMPLACE_END_NAMESPACE

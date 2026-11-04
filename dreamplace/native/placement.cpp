@@ -104,6 +104,37 @@ int count(size_t n) {
 RouteModel available_route_model(RouteModel model, bool has_context) {
   return model == RouteModel::uroute && !has_context ? RouteModel::rsmt : model;
 }
+void validate_external_route(const RudyResult &r, int bins_x, int bins_y) {
+  const size_t bins = size_t(bins_x) * size_t(bins_y);
+  const auto map = [&](const std::vector<double> &values, bool optional,
+                       double upper = std::numeric_limits<double>::infinity()) {
+    return (optional && values.empty()) ||
+           (values.size() == bins &&
+            std::all_of(values.begin(), values.end(), [&](double value) {
+              return finite(value) && value >= 0 && value <= upper;
+            }));
+  };
+  require(map(r.horizontal, false) && map(r.vertical, false) &&
+              map(r.pin_utilization, false) &&
+              map(r.blocked_fraction, true, 1) && map(r.drc_density, true),
+          "invalid external route map dimensions or utilization");
+  require(finite(r.overflow) && r.overflow >= 0 && finite(r.max_utilization) &&
+              r.max_utilization >= 0 && finite(r.detour_wirelength) &&
+              r.detour_wirelength >= 0 && r.measured_nets >= 0 &&
+              r.degenerate_nets >= 0 && r.unroutable_nets >= 0 &&
+              r.blocked_pins >= 0,
+          "invalid external route summary");
+  double peak = 0, excess = 0;
+  for (size_t i = 0; i < bins; ++i) {
+    const double use =
+        std::max({r.horizontal[i], r.vertical[i], r.pin_utilization[i]});
+    peak = std::max(peak, use);
+    excess += std::max(0., use - 1) / double(bins);
+  }
+  require(r.max_utilization + 1e-12 * std::max(1., peak) >= peak &&
+              r.overflow + 1e-12 * std::max(1., excess) >= excess,
+          "external route summary understates its utilization map");
+}
 // Stage-wide route-switch decisions. Result, GpState and the magnet runtime
 // carry them under the same names; copy all of them in one place.
 template <class To, class From>
@@ -389,6 +420,9 @@ void options_check(const Options &o) {
   require(finite(o.max_step) && o.max_step > 0 && o.max_step <= 1,
           "max_step must be in (0,1]");
   require(o.min_iterations >= 0, "negative minimum GP iterations");
+  require(o.min_slice_iterations >= 0 &&
+              o.min_slice_iterations <= o.max_iterations,
+          "invalid minimum GP slice iterations");
   require(o.post_density_factor >= 0 && o.post_density_factor <= 100 &&
               finite(o.convergence_tolerance) && o.convergence_tolerance >= 0 &&
               o.convergence_tolerance <= 1,
@@ -414,6 +448,12 @@ void options_check(const Options &o) {
               o.schedule_iterations >= 0,
           "invalid H2D GP hook options");
   validate_route_policy(o.route);
+  require(o.route.model != RouteModel::external ||
+              (o.route_external && o.route_external_interval > 0),
+          "external route model requires a callback and positive sampling "
+          "interval");
+  require(o.route.model != RouteModel::external || !o.route.probe,
+          "external route model cannot switch to an estimator probe");
   require(!o.routability ||
               (finite(o.route_capacity_h) && o.route_capacity_h > 0 &&
                finite(o.route_capacity_v) && o.route_capacity_v > 0),
@@ -1134,12 +1174,15 @@ const char *route_model_name(RouteModel model) {
     return "auto";
   case RouteModel::uroute:
     return "uroute";
+  case RouteModel::external:
+    return "external";
   }
   throw std::invalid_argument("invalid route model");
 }
 RouteModel route_model_from_name(std::string_view name) {
-  for (auto model : {RouteModel::off, RouteModel::rudy, RouteModel::rsmt,
-                     RouteModel::automatic, RouteModel::uroute})
+  for (auto model :
+       {RouteModel::off, RouteModel::rudy, RouteModel::rsmt,
+        RouteModel::automatic, RouteModel::uroute, RouteModel::external})
     if (name == route_model_name(model))
       return model;
   throw std::invalid_argument("invalid route model: " + std::string(name));
@@ -1173,8 +1216,137 @@ bool route_latches(const RoutePolicy &p) {
          (p.probe &&
           (p.model == RouteModel::rudy || p.probe_model == RouteModel::uroute));
 }
-Result place(Design &design, const Options &options, GpState *state) {
+namespace {
+GpState rebind_state(const Design &design, const GpState &old,
+                     const GpRebind &request) {
+  require(old.signature && !old.physical.node_x.empty(),
+          "GP rebind requires an initialized physical checkpoint");
+  const auto &before = old.physical;
+  const size_t previous = before.node_x.size(), current = design.node_x.size();
+  const auto &a = before.layout;
+  const auto &b = design.layout;
+  require(
+      a.xl == b.xl && a.yl == b.yl && a.site_width == b.site_width &&
+          a.row_height == b.row_height && b.xh >= a.xh && b.yh >= a.yh,
+      "GP rebind may grow the core but must preserve its origin and lattice");
+  for (const auto *v : {&old.x, &old.y, &old.prev_x, &old.prev_y, &old.old_gx,
+                        &old.old_gy, &old.old_ex, &old.old_ey, &old.inflation})
+    require(v->size() == old.x.size() && v->size() >= previous &&
+                std::all_of(v->begin(), v->end(),
+                            [](double x) { return finite(x); }),
+            "invalid GP rebind optimizer arrays");
+  require(old.movable_holds.size() == size_t(before.num_movable),
+          "invalid GP rebind holds");
+  auto mapping = request.previous_node;
+  if (mapping.empty()) {
+    require(current == previous, "GP rebind changed nodes without a mapping");
+    mapping.resize(current);
+    std::iota(mapping.begin(), mapping.end(), 0);
+  }
+  require(mapping.size() == current, "GP rebind node mapping size mismatch");
+  const auto terminal = [](const Design &d, size_t i) {
+    return i >= size_t(d.num_movable) && d.node_size_x[i] == 0 &&
+           d.node_size_y[i] == 0;
+  };
+  const auto macro = [](const Design &d, size_t i) {
+    return !d.node_macro.empty() && d.node_macro[i];
+  };
+  std::vector<bool> seen(previous);
+  auto next = old;
+  next.x = design.node_x;
+  next.y = design.node_y;
+  next.inflation.assign(current, 1);
+  next.movable_holds.assign(design.num_movable, 0);
+  for (size_t i = 0; i < current; ++i) {
+    const int from = mapping[i];
+    require(from >= -1 && (from < 0 || size_t(from) < previous),
+            "invalid GP rebind node index");
+    if (from < 0) {
+      require(terminal(design, i) ||
+                  (i < size_t(design.num_movable) && !macro(design, i)),
+              "GP rebind may only insert cells or region terminals");
+      continue;
+    }
+    require(!seen[from] &&
+                (i < size_t(design.num_movable)) ==
+                    (from < before.num_movable) &&
+                macro(design, i) == macro(before, from),
+            "GP rebind changed or duplicated a node identity");
+    seen[from] = true;
+    if (from >= before.num_movable || macro(before, from)) {
+      require(before.node_size_x[from] == design.node_size_x[i] &&
+                  before.node_size_y[from] == design.node_size_y[i],
+              "GP rebind resized a fixed node or macro");
+      if (!terminal(before, from) && from >= before.num_movable) {
+        const bool macro_handoff =
+            request.allow_fixed_macro_move && macro(before, from) &&
+            before.placement_mask(from) == PlacementMask::none &&
+            design.placement_mask(i) == PlacementMask::none;
+        const auto old_orientation = before.node_orientation.empty()
+                                         ? Orientation::N
+                                         : before.node_orientation[from];
+        const auto new_orientation = design.node_orientation.empty()
+                                         ? Orientation::N
+                                         : design.node_orientation[i];
+        require(macro_handoff || (before.node_x[from] == design.node_x[i] &&
+                                  before.node_y[from] == design.node_y[i] &&
+                                  old_orientation == new_orientation),
+                "GP rebind moved or reoriented a fixed body");
+      }
+    }
+    next.inflation[i] = old.inflation[from];
+    if (i < size_t(design.num_movable))
+      next.movable_holds[i] = old.movable_holds[from];
+  }
+  for (size_t i = 0; i < previous; ++i)
+    require(seen[i] || terminal(before, i) ||
+                (i < size_t(before.num_movable) && !macro(before, i)),
+            "GP rebind removed a fixed body or macro");
+  if (request.reset_routing_inflation) {
+    for (int i = 0; i < design.num_movable; ++i) {
+      if (!macro(design, i))
+        next.inflation[i] = 1;
+    }
+  }
+  next.x.insert(next.x.end(), old.x.begin() + previous, old.x.end());
+  next.y.insert(next.y.end(), old.y.begin() + previous, old.y.end());
+  next.inflation.insert(next.inflation.end(), old.inflation.begin() + previous,
+                        old.inflation.end());
+  next.prev_x = next.old_ex = next.x;
+  next.prev_y = next.old_ey = next.y;
+  next.old_gx.assign(next.x.size(), 0);
+  next.old_gy.assign(next.y.size(), 0);
+  next.restart = true;
+  next.momentum = 1;
+  next.step = 0;
+  next.convergence = {};
+  next.last_checkpoint = next.iteration;
+  next.previous_hpwl = -1;
+  next.previous_overflow = -1;
+  next.checkpoint_invoked = false;
+  next.align_pairs.clear();
+  next.routing_utilization.clear();
+  next.route_hold = next.route_uroute_hold = 0;
+  next.route_probe_deadline = 0;
+  next.route_probed = false;
+  next.route_external_last_iteration = -1;
+  next.route_external_overflow = next.route_external_peak = 0;
+  next.route_external_unroutable_nets = next.route_external_blocked_pins = 0;
+  next.physical = design;
+  next.pin_timing = design.pin_timing;
+  next.pin_timing_seen = design.pin_timing && design.pin_timing->enabled();
+  next.density_reservations = design.density_reservations;
+  next.reservation_accounting = !design.density_reservations.empty();
+  next.rebound_fillers = true;
+  next.filler_replenish_pending = true;
+  next.filler_rounding_loss = 0;
+  return next;
+}
+} // namespace
+Result place(Design &design, const Options &options, GpState *state,
+             const GpRebind *rebind) {
   design.validate();
+  require(!rebind || state, "GP rebind requires a continuation destination");
   Options o = options;
   if (o.route.model == RouteModel::off) {
     o.routability = false;
@@ -1295,12 +1467,6 @@ Result place(Design &design, const Options &options, GpState *state) {
   require(
       !centroids || !state,
       "centroid placement requires one GP solve without external continuation");
-  require(!o.checkpoint || o.checkpoint_interval == 0 || !state,
-          "GP checkpoints require no external continuation");
-  require(!o.terminal_update || o.terminal_interval == 0 || !state,
-          "terminal updates require no external continuation");
-  require(!o.movable_update || o.movable_interval == 0 || !state,
-          "movable updates require no external continuation");
   require(
       !(o.macro_transparency.enabled() || o.vanished_memory) || !state ||
           (o.trial_tuning && !o.macro_transparency.enabled()),
@@ -1354,6 +1520,13 @@ Result place(Design &design, const Options &options, GpState *state) {
     const auto unpad = [&](const Design &snapshot) {
       return detail::unpad_snapshot(snapshot, halo_model);
     };
+    if (o.route.model == RouteModel::external) {
+      control.route_physical_snapshot =
+          [&, expand = o.route_physical_snapshot](const Design &snapshot) {
+            auto physical = unpad(snapshot);
+            return expand ? expand(physical) : physical;
+          };
+    }
     if (o.trial_timing) {
       control.trial_timing = [&](const Design &snapshot) {
         return o.trial_timing(unpad(snapshot));
@@ -1450,7 +1623,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         return updates;
       };
     }
-    const auto result = place(padded, control, state);
+    const auto result = place(padded, control, state, rebind);
     if ((o.checkpoint && o.checkpoint_interval > 0) ||
         (o.terminal_update && o.terminal_interval > 0) ||
         (o.movable_update && o.movable_interval > 0) || o.before_legalize ||
@@ -1465,6 +1638,35 @@ Result place(Design &design, const Options &options, GpState *state) {
                          halo(design.node_halo_y, i, design.layout.row_height);
     }
     return result;
+  }
+  GpState *destination = state;
+  std::optional<GpState> rebound;
+  if (rebind && state->signature) {
+    rebound = rebind_state(design, *state, *rebind);
+    if (rebind->restart_wirelength) {
+      rebound->wirelength_epoch = rebound->iteration;
+    }
+    if (rebind->renormalize_density) {
+      rebound->density_weight = o.initial_density_weight;
+      rebound->density_initialized = false;
+    }
+    const auto requested_route =
+        available_route_model(o.route.model, o.uroute != nullptr);
+    if (!o.routability) {
+      rebound->route_model = RouteModel::off;
+    } else if (requested_route != RouteModel::automatic) {
+      rebound->route_model = requested_route;
+    } else if (rebound->route_model == RouteModel::off ||
+               rebound->route_model == RouteModel::external) {
+      rebound->route_model = RouteModel::rudy;
+    }
+    state = &*rebound;
+  } else if (state && state->signature && state->filler_replenish_pending &&
+             o.max_iterations) {
+    // Refilling extends optimizer arrays. Keep those edits private until the
+    // entire resumed slice succeeds, just as for an immediate model rebind.
+    rebound = *state;
+    state = &*rebound;
   }
   GpState next;
   const bool warm = state && state->signature;
@@ -1660,6 +1862,9 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
   }
   salt(static_cast<std::uint64_t>(o.route.model));
+  if (o.route.model == RouteModel::external) {
+    salt(o.route_external_interval);
+  }
   salt(std::bit_cast<std::uint64_t>(o.route.switch_overflow));
   salt(std::bit_cast<std::uint64_t>(o.route.target_overflow));
   salt(o.route.hold);
@@ -1676,13 +1881,18 @@ Result place(Design &design, const Options &options, GpState *state) {
   salt(reinterpret_cast<std::uintptr_t>(o.uroute.get()));
   for (unsigned char c : o.uroute_identity)
     salt(c);
-  if (warm && state->signature != signature) {
+  if (warm && !rebind && state->signature != signature) {
     throw std::invalid_argument("GP continuation options changed");
   }
   require(!warm || state->pin_timing == design.pin_timing,
           "GP continuation pin timing changed outside a checkpoint");
   require(!warm || state->density_reservations == design.density_reservations,
           "GP continuation density reservations changed outside a checkpoint");
+  if (rebound) {
+    state->signature = signature;
+    if (!o.max_iterations)
+      next = *state;
+  }
   Result r;
   r.uroute_skipped = o.uroute_skipped;
   if (o.uroute)
@@ -1788,7 +1998,12 @@ Result place(Design &design, const Options &options, GpState *state) {
   const auto gp_start = std::chrono::steady_clock::now();
   if (d.num_movable && o.max_iterations) {
     auto active = [&](int i) { return i < d.num_movable || i >= original; };
-    std::vector<int> movable_holds(d.num_movable, 0);
+    std::vector<int> movable_holds =
+        warm ? state->movable_holds : std::vector<int>(d.num_movable, 0);
+    require(movable_holds.size() == size_t(d.num_movable) &&
+                std::all_of(movable_holds.begin(), movable_holds.end(),
+                            [](int n) { return n >= 0; }),
+            "invalid GP continuation movable holds");
     const auto can_move = [&](int i) {
       return active(i) && (i >= d.num_movable || movable_holds[i] == 0);
     };
@@ -1836,7 +2051,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         o.observer(d, PlacementStage::centroid_start, 0);
       }
     }
-    if (o.add_fillers) {
+    if (o.add_fillers && (!warm || rebind || state->filler_replenish_pending)) {
       double target_area =
           std::max(0., o.target_density * (width * height - fixed_area) - area +
                            reservation_charge(d).materialized_area +
@@ -1927,17 +2142,31 @@ Result place(Design &design, const Options &options, GpState *state) {
           o.magnet_runtime->filler_height = fh;
         }
       }
+      // Explicit model rebinding retains existing particles but replenishes
+      // their discretization when an expanded core needs more whitespace
+      // charge. A nearly full initial core must not leave every later solve
+      // with a handful of disproportionately charged particles.
+      const size_t retained =
+          warm ? state->x.size() - state->physical.node_x.size() : 0;
+      if (retained) {
+        fw = state->filler_size_x;
+        fh = state->filler_size_y;
+        require(fw > 0 && fh > 0 && fw <= width && fh <= height,
+                "GP continuation fillers do not fit the requested model");
+      }
       double desired = std::floor(target_area / (fw * fh));
       if (o.filler_max_count > 0) {
         desired = std::min(desired, double(o.filler_max_count));
       }
+      desired = std::max(desired, double(retained));
       require(desired <= double(std::numeric_limits<int>::max() - original),
               "filler index capacity exceeded; configure filler size or an "
               "explicit count guard");
       int fillers = desired;
       r.filler_count = fillers;
       r.filler_area = fillers * fw * fh;
-      filler_rounding_loss = std::max(0., target_area - r.filler_area);
+      filler_rounding_loss =
+          warm ? 0 : std::max(0., target_area - r.filler_area);
       r.filler_size_x = fw;
       r.filler_size_y = fh;
       // fillers_in_whitespace: cumulative free capacity per bin (target density
@@ -1973,12 +2202,22 @@ Result place(Design &design, const Options &options, GpState *state) {
           room.clear();
         }
       }
-      for (int i = 0; i < fillers; ++i) {
+      for (size_t i = 0; i < retained; ++i) {
+        d.node_x.push_back(state->x[size_t(original) + i]);
+        d.node_y.push_back(state->y[size_t(original) + i]);
+        d.node_size_x.push_back(fw);
+        d.node_size_y.push_back(fh);
+      }
+      if (warm) {
+        // New particles are reproducible for this retained prefix and never
+        // perturb the original cold-start random stream.
+        rng.seed(o.seed ^ (0x9e3779b9U * (unsigned(retained) + 1)));
+      }
+      for (int i = int(retained); i < fillers; ++i) {
         if (!room.empty()) {
-          const auto k = size_t(
-              std::upper_bound(room.begin(), room.end(),
-                               unit(rng) * room.back()) -
-              room.begin());
+          const auto k = size_t(std::upper_bound(room.begin(), room.end(),
+                                                 unit(rng) * room.back()) -
+                                room.begin());
           const size_t bin = std::min(k, room.size() - 1);
           const double cx = l.xl + (bin % o.bins_x + unit(rng)) * dx;
           const double cy = l.yl + (bin / o.bins_x + unit(rng)) * dy;
@@ -1990,6 +2229,43 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         d.node_size_x.push_back(fw);
         d.node_size_y.push_back(fh);
+      }
+      d.build_maps();
+      if (warm) {
+        for (size_t i = state->x.size(); i < d.node_x.size(); ++i) {
+          for (auto *values : {&state->x, &state->prev_x, &state->old_ex})
+            values->push_back(d.node_x[i]);
+          for (auto *values : {&state->y, &state->prev_y, &state->old_ey})
+            values->push_back(d.node_y[i]);
+          state->old_gx.push_back(0);
+          state->old_gy.push_back(0);
+          state->inflation.push_back(1);
+        }
+        state->filler_size_x = fw;
+        state->filler_size_y = fh;
+        state->filler_rounding_loss = 0;
+      }
+    } else if (warm) {
+      const size_t previous = state->physical.node_x.size();
+      require(state->x.size() >= previous && state->filler_size_x >= 0 &&
+                  state->filler_size_y >= 0,
+              "invalid GP continuation filler geometry");
+      const size_t fillers = state->x.size() - previous;
+      require(!fillers ||
+                  (o.add_fillers && state->filler_size_x > 0 &&
+                   state->filler_size_y > 0 && state->filler_size_x <= width &&
+                   state->filler_size_y <= height),
+              "GP continuation fillers do not fit the requested model");
+      r.filler_count = count(fillers);
+      r.filler_size_x = state->filler_size_x;
+      r.filler_size_y = state->filler_size_y;
+      r.filler_area = fillers * r.filler_size_x * r.filler_size_y;
+      filler_rounding_loss = state->filler_rounding_loss;
+      for (size_t i = previous; i < state->x.size(); ++i) {
+        d.node_x.push_back(state->x[i]);
+        d.node_y.push_back(state->y[i]);
+        d.node_size_x.push_back(r.filler_size_x);
+        d.node_size_y.push_back(r.filler_size_y);
       }
       d.build_maps();
     }
@@ -2004,10 +2280,19 @@ Result place(Design &design, const Options &options, GpState *state) {
                                 [](double v) { return finite(v); }),
                 "invalid GP continuation arrays");
       }
-      require(state->iteration >= 0 && finite(state->density_weight) &&
-                  state->density_weight > 0 && finite(state->momentum) &&
-                  state->momentum >= 1 && finite(state->step) &&
-                  state->step >= 0,
+      require(state->iteration >= 0 && state->wirelength_epoch >= 0 &&
+                  state->wirelength_epoch <= state->iteration &&
+                  state->route_external_last_iteration >= -1 &&
+                  state->route_external_last_iteration < state->iteration &&
+                  finite(state->route_external_overflow) &&
+                  state->route_external_overflow >= 0 &&
+                  finite(state->route_external_peak) &&
+                  state->route_external_peak >= 0 &&
+                  state->route_external_unroutable_nets >= 0 &&
+                  state->route_external_blocked_pins >= 0 &&
+                  finite(state->density_weight) && state->density_weight > 0 &&
+                  finite(state->momentum) && state->momentum >= 1 &&
+                  finite(state->step) && state->step >= 0,
               "invalid GP continuation scalars");
     }
     std::vector<double> inflation(n, 1);
@@ -2115,6 +2400,7 @@ Result place(Design &design, const Options &options, GpState *state) {
              : (o.density_weight_seed.has_value() ||
                 (o.magnet_runtime && o.magnet_runtime->density_initialized));
     const int offset = warm ? state->iteration : o.iteration_offset;
+    int wirelength_epoch = warm ? state->wirelength_epoch : 0;
     double previous_overflow = warm ? state->previous_overflow : -1;
     int macro_pull_changed =
         o.magnet_runtime ? o.magnet_runtime->macro_pull_changed : -1;
@@ -2140,10 +2426,27 @@ Result place(Design &design, const Options &options, GpState *state) {
                                       requested_route == RouteModel::rsmt
                                   ? requested_route
                                   : RouteModel::rudy;
+    // A host can switch the route provider during an explicit physical rebind.
+    // The previous estimator must not hide the external request (or survive
+    // after switching back to a native model).
+    if (requested_route == RouteModel::external ||
+        active_route == RouteModel::external) {
+      active_route = requested_route == RouteModel::automatic ? RouteModel::rudy
+                                                              : requested_route;
+    }
     if (!o.routability) {
       active_route = RouteModel::off;
     }
     int route_hold = warm ? state->route_hold : 0;
+    int external_last = warm && active_route == RouteModel::external &&
+                                state->route_model == RouteModel::external
+                            ? state->route_external_last_iteration
+                            : -1;
+    if (active_route == RouteModel::external && external_last >= 0) {
+      route_overflow = state->route_external_overflow;
+    } else if (active_route == RouteModel::external) {
+      route_hold = 0;
+    }
     int uroute_hold = warm ? state->route_uroute_hold : 0;
     int probe_deadline = warm          ? state->route_probe_deadline
                          : rigid_route ? rigid_route->probe_deadline
@@ -2153,10 +2456,16 @@ Result place(Design &design, const Options &options, GpState *state) {
     else if (rigid_route)
       copy_route_switch(r, *rigid_route);
     double route_sample_seconds = 0, route_peak_utilization = 0;
+    if (external_last >= 0)
+      route_peak_utilization = state->route_external_peak;
     bool route_sampled = false;
     int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
+    if (external_last >= 0) {
+      route_blocked_pins = state->route_external_blocked_pins;
+      route_unroutable_nets = state->route_external_unroutable_nets;
+    }
     double route_rudy_seconds = 0, route_rsmt_seconds = 0,
-           route_uroute_seconds = 0;
+           route_uroute_seconds = 0, route_external_seconds = 0;
     r.route_model = active_route;
     auto measure_route = [&](const Design &physical, RouteModel model,
                              bool record_history = true) {
@@ -2182,19 +2491,30 @@ Result place(Design &design, const Options &options, GpState *state) {
       std::optional<Design> expanded;
       if (o.route_physical_snapshot)
         expanded = o.route_physical_snapshot(physical);
-      auto result = rudy(expanded ? *expanded : physical, route_options);
+      auto result =
+          model == RouteModel::external
+              ? o.route_external(expanded ? *expanded : physical, aux_x, aux_y)
+              : rudy(expanded ? *expanded : physical, route_options);
+      if (model == RouteModel::external)
+        validate_external_route(result, aux_x, aux_y);
       const double seconds = std::chrono::duration<double>(
                                  std::chrono::steady_clock::now() - started)
                                  .count();
       r.rudy_seconds += seconds;
       ++r.rudy_calls;
+      if (model == RouteModel::external) {
+        r.route_external_seconds += seconds;
+        ++r.route_external_calls;
+      }
       // Trial scores have their own trace. Do not let a losing candidate
       // overwrite the selected trajectory's most recent routing sample.
       if (record_history) {
         route_sample_seconds += seconds;
         ++route_calls;
         route_sampled = true;
-        if (model == RouteModel::uroute) {
+        if (model == RouteModel::external) {
+          route_external_seconds += seconds;
+        } else if (model == RouteModel::uroute) {
           route_uroute_seconds += seconds;
         } else if (model == RouteModel::rsmt) {
           route_rsmt_seconds += seconds;
@@ -2217,6 +2537,14 @@ Result place(Design &design, const Options &options, GpState *state) {
     };
     auto estimate_route = [&](const Design &physical, int iteration) {
       auto result = measure_route(physical, active_route);
+      if (active_route == RouteModel::external) {
+        external_last = iteration - 1;
+        route_hold = result.overflow <= o.route.target_overflow &&
+                             result.unroutable_nets == 0 &&
+                             result.blocked_pins == 0
+                         ? route_hold + 1
+                         : 0;
+      }
       if (active_route == RouteModel::rudy &&
           o.route.model == RouteModel::automatic) {
         route_hold =
@@ -2242,6 +2570,12 @@ Result place(Design &design, const Options &options, GpState *state) {
       route_peak_utilization = result.max_utilization;
       return result;
     };
+    const auto invalidate_external_route = [&] {
+      if (active_route == RouteModel::external) {
+        external_last = -1;
+        route_hold = 0;
+      }
+    };
     auto route_history = [&](GpSample &sample) {
       sample.route_blocked_pins = route_blocked_pins;
       sample.route_unroutable_nets = route_unroutable_nets;
@@ -2250,12 +2584,14 @@ Result place(Design &design, const Options &options, GpState *state) {
       sample.route_rudy_seconds = route_rudy_seconds;
       sample.route_rsmt_seconds = route_rsmt_seconds;
       sample.route_uroute_seconds = route_uroute_seconds;
+      sample.route_external_seconds = route_external_seconds;
       sample.route_uroute_switch_iteration = r.route_uroute_switch_iteration;
       sample.route_switch_uroute_rsmt = r.route_switch_uroute_rsmt;
       sample.route_switch_uroute = r.route_switch_uroute;
       sample.route_probe_overflow = r.route_probe_overflow;
       route_calls = 0;
       route_rudy_seconds = route_rsmt_seconds = route_uroute_seconds = 0;
+      route_external_seconds = 0;
       sample.route_model = active_route;
       sample.route_sampled = route_sampled;
       sample.route_seconds = route_sample_seconds;
@@ -2293,17 +2629,21 @@ Result place(Design &design, const Options &options, GpState *state) {
         !o.macro_align_weight && !macro_routing &&
         !(o.macro_pull_update && o.macro_pull_interval > 0);
     double best_feasible_hpwl = std::numeric_limits<double>::infinity();
-    bool pin_timing_seen = d.pin_timing && d.pin_timing->enabled();
+    bool pin_timing_seen = (warm && state->pin_timing_seen) ||
+                           (d.pin_timing && d.pin_timing->enabled());
     std::vector<MacroPull> macro_pulls = o.magnet_runtime
                                              ? o.magnet_runtime->macro_pulls
                                              : std::vector<MacroPull>{};
     std::vector<double> best_feasible_x, best_feasible_y;
     int best_feasible_iteration = 0;
-    bool restart = o.trial_tuning.has_value();
-    int last_checkpoint = -1;
-    bool movable_updates_active = o.movable_update && o.movable_interval > 0;
+    bool restart = o.trial_tuning.has_value() || (warm && state->restart);
+    int last_checkpoint = warm ? state->last_checkpoint : -1;
+    bool movable_updates_retired = warm && state->movable_updates_retired;
+    bool movable_updates_active =
+        o.movable_update && o.movable_interval > 0 && !movable_updates_retired;
     bool checkpoint_invoked =
-        o.magnet_runtime && o.magnet_runtime->checkpoint_invoked;
+        (warm && state->checkpoint_invoked) ||
+        (o.magnet_runtime && o.magnet_runtime->checkpoint_invoked);
     const bool density_gated_checkpoints =
         o.checkpoint_after_density && o.checkpoint && o.checkpoint_interval > 0;
     auto convergence = warm ? state->convergence
@@ -2398,12 +2738,26 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
     const auto save_state = [&](int iteration) {
       GpState s;
+      s.physical = model;
+      s.physical.node_x.assign(x.begin(), x.begin() + original);
+      s.physical.node_y.assign(y.begin(), y.begin() + original);
+      s.filler_size_x = r.filler_size_x;
+      s.filler_size_y = r.filler_size_y;
+      s.filler_rounding_loss = filler_rounding_loss;
+      s.rebound_fillers = warm && state->rebound_fillers;
       s.pin_timing = d.pin_timing;
       s.density_reservations = d.density_reservations;
       s.reservation_accounting = reservation_accounting;
       s.convergence = convergence;
       s.signature = signature;
       s.iteration = iteration;
+      s.wirelength_epoch = wirelength_epoch;
+      s.restart = restart;
+      s.last_checkpoint = last_checkpoint;
+      s.checkpoint_invoked = checkpoint_invoked;
+      s.pin_timing_seen = pin_timing_seen;
+      s.movable_holds = movable_holds;
+      s.movable_updates_retired = movable_updates_retired;
       s.x = x;
       s.y = y;
       s.prev_x = prev_x;
@@ -2421,6 +2775,15 @@ Result place(Design &design, const Options &options, GpState *state) {
       s.inflation = inflation;
       s.routing_utilization = routing_utilization;
       s.route_model = active_route;
+      s.route_external_last_iteration = external_last;
+      s.route_external_overflow =
+          active_route == RouteModel::external ? route_overflow : 0;
+      s.route_external_peak =
+          active_route == RouteModel::external ? route_peak_utilization : 0;
+      s.route_external_unroutable_nets =
+          active_route == RouteModel::external ? route_unroutable_nets : 0;
+      s.route_external_blocked_pins =
+          active_route == RouteModel::external ? route_blocked_pins : 0;
       s.route_hold = route_hold;
       s.route_uroute_hold = uroute_hold;
       s.route_probe_deadline = probe_deadline;
@@ -2448,9 +2811,25 @@ Result place(Design &design, const Options &options, GpState *state) {
       t = saved.momentum;
       alpha = saved.step;
       convergence = saved.convergence;
+      wirelength_epoch = saved.wirelength_epoch;
+      restart = saved.restart;
+      last_checkpoint = saved.last_checkpoint;
+      checkpoint_invoked = saved.checkpoint_invoked;
+      pin_timing_seen = saved.pin_timing_seen;
+      movable_holds = std::forward<State>(saved).movable_holds;
+      movable_updates_retired = saved.movable_updates_retired;
+      movable_updates_active = o.movable_update && o.movable_interval > 0 &&
+                               !movable_updates_retired;
       inflation = std::forward<State>(saved).inflation;
       routing_utilization = std::forward<State>(saved).routing_utilization;
       active_route = saved.route_model;
+      external_last = saved.route_external_last_iteration;
+      if (active_route == RouteModel::external) {
+        route_overflow = saved.route_external_overflow;
+        route_peak_utilization = saved.route_external_peak;
+        route_unroutable_nets = saved.route_external_unroutable_nets;
+        route_blocked_pins = saved.route_external_blocked_pins;
+      }
       route_hold = saved.route_hold;
       uroute_hold = saved.route_uroute_hold;
       probe_deadline = saved.route_probe_deadline;
@@ -2687,15 +3066,20 @@ Result place(Design &design, const Options &options, GpState *state) {
                   std::max(1, (o.schedule_iterations ? o.schedule_iterations
                                                      : o.max_iterations) -
                                   1));
-      double gamma = std::max(l.site_width,
-                              4 * std::max(dx, dy) *
-                                  std::pow(o.wirelength_gamma_end, progress));
+      const double wirelength_progress = std::min(
+          1., double(global_iter - wirelength_epoch) /
+                  std::max(1, (o.schedule_iterations ? o.schedule_iterations
+                                                     : o.max_iterations) -
+                                  1));
+      double gamma = std::max(l.site_width, 4 * std::max(dx, dy) *
+                                                std::pow(o.wirelength_gamma_end,
+                                                         wirelength_progress));
       if (o.wirelength_gamma_start != 1) {
         gamma = std::max(
             l.site_width,
             4 * std::max(dx, dy) * o.wirelength_gamma_start *
                 std::pow(o.wirelength_gamma_end / o.wirelength_gamma_start,
-                         progress));
+                         wirelength_progress));
       }
       double nt = (1 + std::sqrt(1 + 4 * t * t)) / 2, momentum = (t - 1) / nt;
       for (int i = 0; i < n; ++i) {
@@ -2732,12 +3116,17 @@ Result place(Design &design, const Options &options, GpState *state) {
           g[e.to] -= force;
         }
       }
+      const bool external_route = active_route == RouteModel::external;
       if (o.routability &&
-          (global_iter % 20 == 0 ||
-           (o.vanished_memory && global_iter >= o.vanished_memory_start &&
-            global_iter < o.vanished_memory_start +
-                              o.vanished_memory_growth_iterations)) &&
-          (!o.improved_routability ||
+          (external_route
+               ? external_last < 0 ||
+                     global_iter - external_last >= o.route_external_interval
+               : (global_iter % 20 == 0 ||
+                  (o.vanished_memory &&
+                   global_iter >= o.vanished_memory_start &&
+                   global_iter < o.vanished_memory_start +
+                                     o.vanished_memory_growth_iterations))) &&
+          (external_route || !o.improved_routability ||
            (previous_overflow >= 0 && previous_overflow < .3))) {
         Design physical = model;
         std::copy_n(d.node_x.begin(), original, physical.node_x.begin());
@@ -2832,7 +3221,8 @@ Result place(Design &design, const Options &options, GpState *state) {
                                   (real_charge - materialized_area)) *
                          o.filler_area_fraction;
       };
-      if ((o.gp_search.enabled || o.trial_tuning || o.vanished_memory ||
+      if (((warm && state->rebound_fillers) || o.gp_search.enabled ||
+           o.trial_tuning || o.vanished_memory ||
            (o.improved_routability && o.routability_charge_compensation) ||
            (o.macro_transparency.always ||
             (cycling && global_iter >= o.macro_transparency.warmup))) &&
@@ -2945,7 +3335,9 @@ Result place(Design &design, const Options &options, GpState *state) {
                                .count();
       auto dg = detail::density_force(d, o.bins_x, o.bins_y, o.num_threads, sx,
                                       sy, ox, oy, ratio, fx, fy);
-      if ((!o.density_upper_bound && !global_iter && !o.density_weight_seed) ||
+      if ((!o.density_upper_bound &&
+           ((!global_iter && !o.density_weight_seed) ||
+            (warm && !density_initialized))) ||
           (o.density_upper_bound && !density_initialized)) {
         double wsum = 0, dsum = 0;
         for (int i = 0; i < d.num_movable; ++i) {
@@ -3460,6 +3852,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           movable_holds[i] = position.fix_iterations;
         }
         if (changed) {
+          invalidate_external_route();
           t = 1;
           prev_x = x;
           prev_y = y;
@@ -3496,6 +3889,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           y[pin.node] = d.node_y[pin.node] = model.node_y[pin.node] = pin.y;
         }
         if (changed) {
+          invalidate_external_route();
           if (o.magnet_runtime) {
             o.magnet_runtime->event(global_iter + 1, MagnetEvent::terminal);
           }
@@ -3652,6 +4046,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         retain_checkpoint =
             invoke && update.action == GpCheckpointAction::retain;
         if (update.stop_movable_updates) {
+          movable_updates_retired = true;
           movable_updates_active = false;
         }
         if (update.timing_violation) {
@@ -3660,6 +4055,21 @@ Result place(Design &design, const Options &options, GpState *state) {
                   "invalid checkpoint timing violation");
           convergence.timing_observed = true;
           convergence.timing_satisfied = *update.timing_violation == 0;
+        }
+        // External continuation reconstructs private filler geometry from the
+        // unchanged physical model. Reject changes that invalidate that model
+        // before committing either the caller's design or optimizer state.
+        if (state && !rebind) {
+          require(
+              !update.replacement && update.previous_node.empty() &&
+                  (update.node_size_x.empty() ||
+                   update.node_size_x == model.node_size_x) &&
+                  (update.node_size_y.empty() ||
+                   update.node_size_y == model.node_size_y) &&
+                  (!update.density_reservations ||
+                   *update.density_reservations == model.density_reservations),
+              "GP continuation checkpoints require fixed topology, "
+              "footprints and density reservations");
         }
         bool objective_changed = update.replacement.has_value();
         if (update.replacement) {
@@ -3941,6 +4351,7 @@ Result place(Design &design, const Options &options, GpState *state) {
           restart = true;
           last_checkpoint = global_iter + 1;
           // New weights/netlist make successive objective values incomparable.
+          invalidate_external_route();
           // Do not restart the hard continuation deadline after an ECO.
           convergence.previous_hpwl = -1;
           convergence.previous_inflation = -1;
@@ -4088,7 +4499,7 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         const bool settled =
             opacity_settled && global_iter + 1 >= o.min_iterations &&
-            excess <= o.stop_overflow &&
+            iter + 1 >= o.min_slice_iterations && excess <= o.stop_overflow &&
             (!o.macro_align_weight || global_iter >= o.macro_align_full) &&
             (!align_centroids || global_iter >= o.centroid_align_full) &&
             (!fixed_macro_weight || progress >= 1);
@@ -4131,13 +4542,26 @@ Result place(Design &design, const Options &options, GpState *state) {
           convergence.previous_inflation = inflated_ratio;
         }
         const bool route_candidate =
-            o.post_density_factor
+            active_route == RouteModel::external
+                ? (geometry_ready && external_last >= 0 &&
+                   route_hold >= o.route.hold &&
+                   (!o.post_density_factor || convergence.stable_samples >= 2))
+            : o.post_density_factor
                 ? convergence.stable_samples >= 2
                 : (geometry_ready &&
                    (o.route.probe || active_route == RouteModel::uroute ||
                     learned_ladder));
         if (route_candidate && o.routability) {
-          auto route = estimate_route(physical, global_iter + 1);
+          // External samples are expensive host router invocations. Consume
+          // their retained result here; convergence checks must not silently
+          // replace the requested cadence with the history-sample interval.
+          RudyResult route;
+          if (active_route == RouteModel::external) {
+            route.overflow = route_overflow;
+            route.max_utilization = route_peak_utilization;
+          } else {
+            route = estimate_route(physical, global_iter + 1);
+          }
           const auto probe_model =
               available_route_model(o.route.probe_model, o.uroute != nullptr);
           if (o.route.probe && !r.route_probed && geometry_ready &&
@@ -4187,7 +4611,8 @@ Result place(Design &design, const Options &options, GpState *state) {
             learned_ladder && active_route == RouteModel::rsmt &&
             route_overflow <= o.route.uroute_switch_overflow;
         if (o.post_density_factor || probe_deadline ||
-            active_route == RouteModel::uroute || learned_ladder) {
+            active_route == RouteModel::uroute ||
+            active_route == RouteModel::external || learned_ladder) {
           r.objective_converged =
               (!density_gated_checkpoints || checkpoint_invoked) &&
               !uroute_pending && route_candidate &&
@@ -4219,14 +4644,15 @@ Result place(Design &design, const Options &options, GpState *state) {
             !o.magnet_runtime || o.magnet_runtime->ready(global_iter + 1);
         if (!o.trial_tuning && magnet_ready && geometry_ready &&
             ((!o.post_density_factor && !probe_deadline &&
-              active_route != RouteModel::uroute && !learned_ladder) ||
+              active_route != RouteModel::uroute &&
+              active_route != RouteModel::external && !learned_ladder) ||
              r.objective_converged)) {
           r.density_stalled = r.overflow > o.stop_overflow;
           r.converged = !r.density_stalled;
           break;
         }
-        if (!o.trial_tuning && r.continuation_limit && macro_pulls_ready &&
-            magnet_ready) {
+        if (iter + 1 >= o.min_slice_iterations && !o.trial_tuning &&
+            r.continuation_limit && macro_pulls_ready && magnet_ready) {
           break;
         }
         // A routing estimate can retain irreducible congestion around fixed
@@ -4353,11 +4779,15 @@ Result place(Design &design, const Options &options, GpState *state) {
         }
         previous_overflow = r.overflow;
         previous_hpwl = current_hpwl;
-        // If only circle separation is pending, do not keep escalating an
-        // already-satisfied density constraint. Resume if density rises again.
+        // Adaptive recovery may deliberately continue after reaching density
+        // feasibility to improve wirelength or collect timing feedback. A
+        // feasible sample is not stagnation: escalating its penalty would
+        // overwhelm wirelength throughout the rest of the slice. Resume the
+        // ramp only if density violates its target again. Preserve the legacy
+        // non-adaptive schedule for callers that request it explicitly.
         if (!o.hold_overflow &&
-            ((!separate_circles && !o.density_upper_bound &&
-              !o.post_density_factor) ||
+            ((!o.adaptive_density && !separate_circles &&
+              !o.density_upper_bound && !o.post_density_factor) ||
              excess > o.stop_overflow)) {
           density_weight = std::min(density_weight * growth, 1e12);
         }
@@ -4439,13 +4869,13 @@ Result place(Design &design, const Options &options, GpState *state) {
   r.converged =
       !r.density_stalled && !r.route_stalled &&
       (!gp_ran || !o.checkpoint_after_density || !o.checkpoint ||
-       !o.checkpoint_interval ||
+       !o.checkpoint_interval || (state && next.checkpoint_invoked) ||
        (o.magnet_runtime && o.magnet_runtime->checkpoint_invoked) ||
        std::any_of(r.checkpoint_history.begin(), r.checkpoint_history.end(),
                    [](const auto &sample) { return sample.invoked; })) &&
       (!gp_ran ||
        (!o.post_density_factor && r.route_model != RouteModel::uroute &&
-        !learned_ladder) ||
+        r.route_model != RouteModel::external && !learned_ladder) ||
        r.objective_converged) &&
       r.overflow <= o.stop_overflow &&
       (!separate_circles || r.centroid.circles_converged) &&
@@ -4455,6 +4885,8 @@ Result place(Design &design, const Options &options, GpState *state) {
            o.macro_align_full) &&
       (!o.magnet_runtime ||
        o.magnet_runtime->ready(o.iteration_offset + r.iterations));
+  const int completed_iteration =
+      (warm ? state->iteration : o.iteration_offset) + r.iterations;
   if (o.legalize && d.num_movable) {
     if (o.before_legalize) {
       o.before_legalize(d);
@@ -4489,8 +4921,7 @@ Result place(Design &design, const Options &options, GpState *state) {
                                legality_reason);
     }
     if (o.observer) {
-      o.observer(d, PlacementStage::legalization,
-                 o.iteration_offset + r.iterations);
+      o.observer(d, PlacementStage::legalization, completed_iteration);
     }
     if (o.detailed_place && !d.net_weights.empty()) {
       const auto detail_start = std::chrono::steady_clock::now();
@@ -4502,8 +4933,7 @@ Result place(Design &design, const Options &options, GpState *state) {
                                         detail_start)
               .count();
       if (o.observer) {
-        o.observer(d, PlacementStage::detailed_placement,
-                   o.iteration_offset + r.iterations);
+        o.observer(d, PlacementStage::detailed_placement, completed_iteration);
       }
     }
   }
@@ -4522,10 +4952,10 @@ Result place(Design &design, const Options &options, GpState *state) {
     }
   }
   if (o.observer) {
-    o.observer(d, PlacementStage::finished, o.iteration_offset + r.iterations);
+    o.observer(d, PlacementStage::finished, completed_iteration);
   }
   if (state && next.signature) {
-    *state = std::move(next);
+    *destination = std::move(next);
   }
   if ((o.checkpoint && o.checkpoint_interval > 0) || o.before_legalize ||
       o.after_macro_legalize) {

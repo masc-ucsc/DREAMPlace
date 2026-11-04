@@ -351,3 +351,11 @@ cc_test(
     srcs = ["reservations_test.cpp"],
     deps = [":placer"],
 )
+
+cc_test(
+    name = "gp_continuation_smoke",
+    size = "small",
+    timeout = "short",
+    srcs = ["gp_continuation_smoke.cpp"],
+    deps = [":placer"],
+)

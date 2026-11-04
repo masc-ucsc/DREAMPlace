@@ -112,6 +112,19 @@ message tables. Placement itself never starts or embeds Python. Serial native
 build actions do not use Python. On macOS the standalone build explicitly
 selects Command Line Tools instead of discovering an unrelated Xcode install.
 
+Global swap uses the configured worker count to score candidate swaps in parallel
+when a bin has at least 256 candidates. Every proposal reads one unchanged
+placement; selection, tie breaking, application and bounds-cache updates remain
+serial. Serial and parallel runs therefore choose the same moves. The upstream
+two-argument entry point remains sequential. `//dreamplace/ops:global_swap_test`
+checks exact coordinates, fixed nodes and legality across worker counts, including
+weighted nets and high-degree bounds. An optional cell-count argument runs a
+larger synthetic comparison (a multiple of 64, at least 512):
+
+```sh
+bazel run -c opt --config=openmp //dreamplace/ops:global_swap_test -- 4096
+```
+
 ## Dependency boundary
 
 | Dependency | Source | Used by |
@@ -236,6 +249,54 @@ standard-cell filler width is H2D-only; regular placement defaults are unchanged
 full momentum, BB/density history and filler state. Use `schedule_iterations`
 for a fixed schedule when splitting a GP run into checkpoints. Incompatible
 solver geometry/connectivity is rejected without changing the design or state.
+
+The continuation also supports timing checkpoints, zero-area terminal moves and
+bounded standard-cell moves. Pending gradient resets, timing availability,
+checkpoint milestones and temporary cell holds survive a call boundary. Callback
+iteration numbers use the accumulated GP clock. Keep `schedule_iterations` and
+convergence controls fixed; set `max_iterations` to the next slice's budget and
+leave legalization/detail disabled until the host requests finalization.
+`checkpoint_final` applies to each call, so disable it for slices that must match
+an uninterrupted run. A weights-only update preserves momentum and density
+normalization while invalidating the old gradient step estimate; pin/cell moves
+use the existing objective-change reset rules. Callbacks may change pin timing
+and pin offsets, but external continuation currently rejects replacement
+netlists, resized footprints and changed density reservations unless the host
+opts into the explicit rebind API below. Failed calls leave the caller's design and state unchanged; callback
+side effects remain the host's responsibility.
+
+`gp_continuation_smoke` compares 50 uninterrupted steps with splits before, at
+and after feedback events, with and without fillers, including simultaneous STA,
+terminal changes, temporary cell holds and hook retirement. It also checks
+milestone continuity and atomic rejection after an earlier successful update.
+
+Hosts can pass a fourth `GpRebind` argument to `place` when changing the model
+between slices. Its `previous_node` mapping preserves real node identities while
+adding/removing standard cells or zero-area region terminals; fixed bodies and
+macros remain protected. An empty mapping preserves node indices. The core may
+grow while keeping its origin and site/row lattice. Rebinding retains the
+iteration clock, density normalization and private particle positions/footprints;
+particle charge follows the new available whitespace. It resets momentum,
+gradient estimates, convergence samples and stale routing measurements. A
+zero-step call applies the same atomic rebind without optimizing. The explicit
+hosted mode also permits the existing in-loop topology callbacks; the host must
+publish the resulting node identities before its next slice. Ordinary three-
+argument continuation keeps its strict compatibility checks.
+
+`GpRebind::allow_fixed_macro_move` is an explicit host macro-plan handoff:
+retained fixed hard macros may translate or mirror (N/FN/FS/S), keeping their
+identity, dimensions and mobility. The caller supplies transformed pin offsets.
+Fixed standard cells and placement masks remain protected. This permission
+belongs only to that transaction; ordinary rebinds still reject changed fixed
+poses. The same particle retention, gradient invalidation and atomic rollback
+rules apply.
+
+`min_slice_iterations` requires that many additional steps in the current call,
+independently of the accumulated GP clock and old convergence deadline. It must
+not exceed `max_iterations`. LiveHD's placement session uses this for timed
+20/50-step rebalance requests and stores full optimizer snapshots alongside the
+physical candidates used for routing selection. Callbacks are owned by each
+advance operation, so the session never retains a callback's expired captures.
 
 LiveHD enables this with `synth.place.macro=h2d`, exposes every parameter under
 `synth.place.macro.*` and writes `macro_topology.json` plus `h2d.png` under its
@@ -676,6 +737,36 @@ blocked-pin/unroutable-net counts instead of a capacity floor.
 `RudyOptions::pin_access` estimates macro signal-pin demand against available
 tracks at bin edges. These estimates are not a detailed router or signoff model.
 
+An explicit `RouteModel::external` replaces these estimators with
+`Options::route_external(const Design&, int bins_x, int bins_y) -> RudyResult`.
+Include `rudy.hpp` to define the callback. It receives physical dimensions and
+pins, without private fillers, inflation or placement halos, and must return
+x-major H/V/pin utilization arrays of exactly `bins_x*bins_y` finite,
+nonnegative entries. Optional blocked-fraction and DRC arrays must be empty or
+match that grid; blocked fractions lie in `[0,1]`. Summary values/counts must be
+finite and nonnegative, and peak/overflow must cover the map's peak/mean excess
+(`detail::accumulate_overflow` computes those before adding explicit penalties).
+Missing callbacks or invalid results throw; no estimator fallback occurs.
+
+`route_external_interval` defaults to 50 and applies only to external mode.
+Sampling starts on its first GP step and repeats at that cumulative step
+interval, even above the native estimator's 0.3 density threshold. Ordinary
+continuations retain the cadence and latest result; a physical rebind or host
+geometry/netlist/objective update requests a fresh sample. Convergence consumes the latest result rather than launching
+extra routing calls at every history check, and requires `route.hold`
+consecutive target-passing samples with no unroutable nets or blocked pins.
+These samples guide optimization, not physical routing closure. External mode
+cannot enable an estimator probe. `Result::route_external_calls/seconds` and
+`GpSample::route_external_seconds` distinguish callback cost; historical
+`rudy_calls/seconds` remain totals across routing models.
+
+The existing inflation update samples the local cell-center bin and consumes
+`max(H,V,pin)` as a scalar area factor; this API preserves the directional maps
+but does not add anisotropic physical cell sizing. Its existing movable-area
+budget remains. Clear stale estimator inflation with the explicit recovery
+rebind when switching sources. Failed callbacks leave caller geometry and
+continuation state unchanged, although the caller owns any callback-side IO.
+
 For repeated net exclusions at fixed placement, `RudyMaskSnapshot` caches
 contributions and `RudyMaskCursor` retains the current demand map. Cursor
 `without(net)` evaluates a trial without changing state; `exclude(net)` commits
@@ -1022,3 +1113,35 @@ sites. Kernel adapters restore the original mask dimensions after legalizing.
 Masks require zero halos and N orientation. Empty metadata preserves ordinary
 macro behavior. Metadata survives rigid contraction and topology replacements;
 a replacement cannot change an existing node's mask semantics.
+
+Explicit GP rebinding replenishes private filler particles on the next nonzero
+slice when the enlarged core or edited charge budget needs more whitespace
+charge. It keeps existing positions and particle footprints, appends deterministic
+particles using the ordinary initialization (including an initially empty filler
+set), and respects the configured count cap. All optimizer arrays grow together.
+A zero-step synchronization records the pending refill without moving particles;
+the next active slice completes it even when no new rebind is requested. Later
+fixed-model continuation keeps that particle set. A failed refill slice publishes
+neither the new particles nor any other optimizer changes.
+
+For a changed objective whose previous density penalty is no longer appropriate,
+`GpRebind::renormalize_density` explicitly restarts gradient calibration from
+`Options::initial_density_weight` (ignoring `density_weight_seed`). It preserves
+particles and the accumulated iteration clock. A zero-step rebind records pending
+calibration, which the next active slice performs. Ordinary rebinding preserves
+the previous density penalty. Failed calls commit neither reset nor calibration.
+
+
+Explicit objective recovery can additionally set `GpRebind::restart_wirelength`
+to start the smoothing schedule at the current lifetime iteration. The stored
+`GpState::wirelength_epoch` survives slices and rollback; callback clocks and
+fixed-macro/cohesion schedules remain cumulative. This is independent of density
+recalibration. `reset_routing_inflation` clears only stale estimator inflation on
+movable standard cells; physical sizes, bounds, reservations, macros and retained
+fillers are unchanged. Ordinary rebinds preserve inflation.
+
+Adaptive density increases its penalty only while density exceeds the effective
+overflow target. Extra requested steps after feasibility can improve wirelength
+and collect timing feedback without treating satisfied density as stagnation.
+The penalty resumes rising if density violates the target again; the legacy
+non-adaptive schedule is unchanged.
