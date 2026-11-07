@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 
@@ -36,7 +37,14 @@ struct Tree {
 };
 
 // Major functions
-void readLUT(const char* powv, const char* post);
+// Load the POWV/POST lookup tables once per process; later calls (through any
+// entry point) are no-ops after a successful load. Failures throw
+// std::runtime_error and leave the tables unloaded.
+void readLUT(const char *powv, const char *post); // from files
+void readLUT(const char *powv_data, size_t powv_size, const char *post_data,
+             size_t post_size); // from in-memory copies of the files
+// Tables compiled into the library (lut.ICCAD2015); no runtime file access.
+void readLUT_embedded();
 DType flute_wl(int d, DType* x, DType* y, int acc);
 Tree flute(int d, DType* x, DType* y, int acc);
 DType wirelength(Tree t);

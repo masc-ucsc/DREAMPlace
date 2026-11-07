@@ -10,7 +10,20 @@ if(NOT CMAKE_BUILD_TYPE)
     FORCE)
 endif(NOT CMAKE_BUILD_TYPE)
 
-set(SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/flute.cpp)
+# Embed lut.ICCAD2015 so readLUT_embedded() needs no runtime data files.
+add_executable(flute_embed_gen ${CMAKE_CURRENT_SOURCE_DIR}/flute_embed_gen.cpp)
+set(FLUTE_LUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lut.ICCAD2015)
+set(FLUTE_LUT_DATA ${CMAKE_CURRENT_BINARY_DIR}/flute_lut_data.cpp)
+add_custom_command(
+  OUTPUT ${FLUTE_LUT_DATA}
+  COMMAND flute_embed_gen ${FLUTE_LUT_DIR}/POWV9.dat ${FLUTE_LUT_DIR}/POST9.dat ${FLUTE_LUT_DATA}
+  DEPENDS flute_embed_gen ${FLUTE_LUT_DIR}/POWV9.dat ${FLUTE_LUT_DIR}/POST9.dat
+  VERBATIM)
+
+set(SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/flute.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/flute_embedded.cpp
+  ${FLUTE_LUT_DATA})
 
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

@@ -2415,6 +2415,170 @@ void virtual_macro_pulls() {
   check(bad.node_x == before.node_x,
         "invalid pull partially committed placement");
 }
+void macro_pull_cap_and_density_margin() {
+  auto d = design();
+  d.node_macro.assign(d.node_x.size(), 0);
+  d.node_macro[0] = 1;
+  const auto before = d;
+  Options o;
+  o.max_iterations = 30;
+  o.min_iterations = 30;
+  o.legalize = o.detailed_place = o.add_fillers = false;
+  o.bins_x = o.bins_y = 8;
+  o.macro_pull_interval = 1;
+  o.macro_pull_update =
+      [](const Design &,
+         int iteration) -> std::optional<std::vector<MacroPull>> {
+    if (iteration == 1)
+      return std::vector<MacroPull>{{0, 45, 25, 2}};
+    return std::nullopt;
+  };
+  auto capped = before;
+  rejects([&] { place(capped, o); }); // default cap stays 1
+  o.macro_pull_max_weight = 4;
+  auto strong = before;
+  place(strong, o);
+  o.macro_pull_update =
+      [](const Design &,
+         int iteration) -> std::optional<std::vector<MacroPull>> {
+    if (iteration == 1)
+      return std::vector<MacroPull>{{0, 45, 25, 1}};
+    return std::nullopt;
+  };
+  auto weak = before;
+  place(weak, o);
+  check(strong.node_x[0] >= weak.node_x[0],
+        "a weight above one must pull at least as far");
+  o.macro_pull_max_weight = .5;
+  auto invalid = before;
+  rejects([&] { place(invalid, o); });
+  // Density margin: a zero schedule is the unchanged solve; an inflated macro
+  // footprint changes the spreading; invalid margins are rejected.
+  o.macro_pull_max_weight = 1;
+  o.macro_pull_update = {};
+  o.macro_pull_interval = 0;
+  auto plain = before, zero = before, inflated = before;
+  place(plain, o);
+  o.macro_density_margin = [](int) { return 0.; };
+  place(zero, o);
+  check(zero.node_x == plain.node_x && zero.node_y == plain.node_y,
+        "zero macro density margin changed the solve");
+  o.macro_density_margin = [](int iteration) {
+    return iteration < 20 ? .3 : 0.;
+  };
+  place(inflated, o);
+  check(inflated.node_x != plain.node_x || inflated.node_y != plain.node_y,
+        "macro density margin had no effect");
+  o.macro_density_margin = [](int) { return 1.; };
+  auto bad = before;
+  rejects([&] { place(bad, o); });
+  // A jump pull moves the macro center to its target when applied.
+  o.macro_density_margin = {};
+  o.max_iterations = o.min_iterations = 2;
+  o.macro_pull_interval = 1;
+  double seen_x = -1;
+  o.macro_pull_update =
+      [&](const Design &snapshot,
+          int iteration) -> std::optional<std::vector<MacroPull>> {
+    if (iteration == 2)
+      seen_x = snapshot.node_x[0] + snapshot.node_size_x[0] / 2;
+    if (iteration == 1)
+      return std::vector<MacroPull>{{0, 15, 25, 0, true}};
+    return std::nullopt;
+  };
+  auto jumped = before;
+  place(jumped, o);
+  check(std::abs(seen_x - 15) < 2, "jump pull did not move the macro");
+
+  // A jump changes the routing geometry immediately, even when the external
+  // provider's normal sampling interval has not elapsed. A force-only pull
+  // retains the normal sampling interval.
+  o.routability = true;
+  o.route.model = RouteModel::external;
+  o.route_external_interval = 50;
+  for (bool jump : {false, true}) {
+    std::vector<double> sampled_centers;
+    o.route_external = [&](const Design &physical, int bx, int by) {
+      sampled_centers.push_back(physical.node_x[0] +
+                                physical.node_size_x[0] / 2);
+      RudyResult route;
+      route.horizontal.assign(bx * by, 0);
+      route.vertical.assign(bx * by, 0);
+      route.pin_utilization.assign(bx * by, 0);
+      return route;
+    };
+    o.macro_pull_update =
+        [jump](const Design &,
+               int iteration) -> std::optional<std::vector<MacroPull>> {
+      if (iteration == 1)
+        return std::vector<MacroPull>{{0, 15, 25, 0, jump}};
+      return std::nullopt;
+    };
+    auto candidate = before;
+    GpState state;
+    place(candidate, o, &state);
+    check(sampled_centers.size() == (jump ? 2u : 1u),
+          "macro jump did not invalidate the external routing sample");
+    if (jump) {
+      near(sampled_centers.back(), 15, 1e-9,
+           "external route did not observe the jumped macro geometry");
+      check(state.route_hold == 1,
+            "macro jump retained pre-jump routing convergence samples");
+    }
+  }
+}
+void macro_density_margin_preserves_rebuilt_footprints() {
+  auto initial = design();
+  initial.node_macro.assign(initial.node_x.size(), 0);
+  initial.node_macro[0] = 1;
+  initial.node_size_x[0] = initial.node_size_y[0] = 4;
+  initial.node_inflatable.assign(initial.node_x.size(), 0);
+  initial.node_inflatable[0] = 1;
+  Options o;
+  o.num_threads = 1;
+  o.bins_x = o.bins_y = 8;
+  o.max_iterations = o.min_iterations = o.min_slice_iterations =
+      o.schedule_iterations = 2;
+  o.legalize = o.detailed_place = o.add_fillers = false;
+  o.exact_macro_density = true;
+  o.routability = true;
+  o.improved_routability = false; // no 5%-per-sample inflation cap
+  o.route.model = RouteModel::external;
+  o.route_external_interval = 1;
+  o.macro_density_margin = [](int) { return .25; };
+  int calls = 0;
+  o.route_external = [&](const Design &, int bx, int by) {
+    const double demand = ++calls == 1 ? 1 : 2.25;
+    RudyResult route;
+    route.horizontal.assign(bx * by, demand);
+    route.vertical.assign(bx * by, 0);
+    route.pin_utilization.assign(bx * by, 0);
+    detail::accumulate_overflow(route);
+    return route;
+  };
+  auto full = initial;
+  GpState full_state;
+  place(full, o, &full_state);
+  check(calls == 2 && full_state.inflation[0] == 2.25,
+        "margin collision fixture did not reach its uncapped routing demand");
+  // Step one has a 4x4 base and a 6x6 margin footprint. Step two rebuilds a
+  // 6x6 routing base and must apply the margin to make 9x9, not mistake the
+  // new base for the old margin. A resumed solve reconstructs its base from
+  // physical sizes and inflation, independently of the old margin ownership.
+  auto split = initial;
+  GpState split_state;
+  calls = 0;
+  o.max_iterations = o.min_slice_iterations = 1;
+  place(split, o, &split_state);
+  check(split_state.inflation[0] == 1,
+        "first margin step unexpectedly changed routing inflation");
+  place(split, o, &split_state);
+  check(calls == 2 && split_state.inflation[0] == 2.25 &&
+            full.node_x == split.node_x && full.node_y == split.node_y &&
+            full_state.old_gx == split_state.old_gx &&
+            full_state.old_gy == split_state.old_gy,
+        "density margin discarded a rebuilt routing footprint");
+}
 void size_neutral_macro_pull() {
   Design d;
   d.layout = {0, 0, 10000, 10000, 1, 1};
@@ -2462,6 +2626,58 @@ void size_neutral_macro_pull() {
               "macro pull direction or zero-offset response incorrect");
       }
     }
+  }
+}
+void macro_pull_length() {
+  Design d;
+  d.layout = {0, 0, 10000, 10000, 1, 1};
+  d.num_movable = 2;
+  d.node_x = {1000, 5000};
+  d.node_y = {1000, 5000};
+  d.node_size_x = d.node_size_y = {100, 100};
+  d.node_macro = {1, 1};
+  d.pin2node = {0, 1};
+  d.pin_offset_x = d.pin_offset_y = {0, 0};
+  d.flat_net2pin = {0, 1};
+  d.flat_net2pin_start = {0, 2};
+  d.build_maps();
+  detail::Gradient wire, density;
+  wire.x = {10, 1};
+  wire.y = {0, 0};
+  density.x = {0, 0};
+  density.y = {0, 0};
+  // Mean ordinary force (x+y, preconditioned by pins=1): (10 + 1) / 2.
+  const double reference = 5.5;
+  const auto force = [&](double offset, double length) {
+    MacroPull pull{0, d.node_x[0] + 50 + offset, d.node_y[0] + 50, 1};
+    pull.length = length;
+    MacroPull other{1, d.node_x[1] + 50, d.node_y[1] + 50, 1};
+    return detail::macro_pull_forces(d, {pull, other}, wire, density, 0)[0].x;
+  };
+  // Default length = mean max side (100): 10 away gives a tenth of the cap.
+  near(force(10, 0), -reference * .1, 1e-12, "default spring length");
+  // Short spring: at the cap beyond it, linear inside it.
+  near(force(10, 5), -reference, 1e-12, "short spring not at cap");
+  near(force(2, 5), -reference * .4, 1e-12, "short spring not linear");
+  near(force(0, std::numeric_limits<double>::denorm_min()), 0, 0,
+       "tiny spring length produced a non-finite force at its anchor");
+
+  Options o;
+  o.bins_x = o.bins_y = 8;
+  o.max_iterations = o.min_iterations = 2;
+  o.legalize = o.detailed_place = o.add_fillers = false;
+  o.macro_pull_interval = 1;
+  for (double invalid : {-1., std::numeric_limits<double>::quiet_NaN(),
+                         std::numeric_limits<double>::infinity()}) {
+    o.macro_pull_update =
+        [invalid](const Design &,
+                  int) -> std::optional<std::vector<MacroPull>> {
+      return std::vector<MacroPull>{{0, 1050, 1050, 1, false, invalid}};
+    };
+    auto candidate = d;
+    rejects([&] { place(candidate, o); });
+    check(candidate.node_x == d.node_x && candidate.node_y == d.node_y,
+          "invalid spring length partially committed placement");
   }
 }
 void macro_sized_virtual_fillers() {
@@ -2782,9 +2998,12 @@ int main() {
     setup_timing_does_not_veto_convergence();
     route_policy_helpers();
     size_neutral_macro_pull();
+    macro_pull_length();
     macro_sized_virtual_fillers();
     gp_ab_search();
     virtual_macro_pulls();
+    macro_pull_cap_and_density_margin();
+    macro_density_margin_preserves_rebuilt_footprints();
     spectral();
     power2_grid();
     timing_spreading();

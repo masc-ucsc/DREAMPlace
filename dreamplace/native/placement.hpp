@@ -267,6 +267,13 @@ bool route_latches(const RoutePolicy &);
 struct MacroPull {
   int node = -1;
   double x = 0, y = 0, weight = 0;
+  // Also move the macro center to (x, y), projected into its legal origin
+  // bounds, when this replacement is applied (e.g. an exchange of two macros).
+  bool jump = false;
+  // Softening length of the spring: the force grows linearly with the
+  // distance up to `length`, then stays at the far cap. 0 keeps the shared
+  // default (the mean max(width, height) of the pulled macros).
+  double length = 0;
 };
 struct MagnetOptions {
   bool enabled = false;
@@ -378,6 +385,13 @@ struct Options {
       0; // minimum GP steps after an anchor change, within the iteration cap
   std::function<std::optional<std::vector<MacroPull>>(const Design &, int)>
       macro_pull_update;
+  // Largest accepted MacroPull::weight (1 keeps the original cap).
+  double macro_pull_max_weight = 1;
+  // Optional early macro density inflation: per-side margin as a fraction of
+  // each movable macro's (padded) size, queried every GP iteration. The macro
+  // density footprint grows by 1+2m per axis at unchanged charge density;
+  // geometry, overlap and legalization are unaffected. Return 0 to stop.
+  std::function<double(int)> macro_density_margin;
   // Cheap terminal-only updates, independent of density-gated STA checkpoints.
   // Only fixed zero-area terminals may move; callbacks see physical geometry.
   int terminal_interval = 0;

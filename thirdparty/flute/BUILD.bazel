@@ -1,9 +1,32 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+# Embeds lut.ICCAD2015 into the library so readLUT_embedded() needs no runtime
+# data files (binaries work without a runfiles tree).
+cc_binary(
+    name = "flute_embed_gen",
+    srcs = ["flute_embed_gen.cpp"],
+)
+
+genrule(
+    name = "flute_lut_data",
+    srcs = [
+        "lut.ICCAD2015/POWV9.dat",
+        "lut.ICCAD2015/POST9.dat",
+    ],
+    outs = ["flute_lut_data.cpp"],
+    cmd = "$(execpath :flute_embed_gen) $(execpath lut.ICCAD2015/POWV9.dat) $(execpath lut.ICCAD2015/POST9.dat) $@",
+    tools = [":flute_embed_gen"],
+)
 
 cc_library(
     name = "flute",
-    srcs = ["flute.cpp"],
+    srcs = [
+        "flute.cpp",
+        "flute_embedded.cpp",
+        ":flute_lut_data",
+    ],
     hdrs = ["flute.hpp"],
+    # Still shipped for callers of the file-path readLUT().
     data = glob(["lut.ICCAD2015/*"]),
     visibility = ["//visibility:public"],
 )

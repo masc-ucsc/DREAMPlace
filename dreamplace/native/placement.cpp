@@ -486,6 +486,8 @@ void options_check(const Options &o) {
     require(finite(value) && value >= 0, "invalid macro regularity control");
   }
   require(o.macro_pull_interval >= 0, "invalid virtual macro pull interval");
+  require(finite(o.macro_pull_max_weight) && o.macro_pull_max_weight >= 1,
+          "invalid virtual macro pull weight cap");
   require(finite(o.cohesion_weight) && o.cohesion_weight >= 0,
           "invalid cohesion weight");
   require(o.terminal_interval >= 0, "negative terminal update interval");
@@ -596,11 +598,14 @@ macro_pull_forces(const Design &d, const std::vector<MacroPull> &pulls,
     const int i = pull.node;
     const double dx = d.node_x[i] + d.node_size_x[i] / 2 - pull.x;
     const double dy = d.node_y[i] + d.node_size_y[i] / 2 - pull.y;
-    // Shared length and identical far-target cap: no per-macro size in the
-    // displacement factor. Multiplying by pre cancels the optimizer's division.
+    // Shared default length and identical far-target cap: no per-macro size
+    // in the displacement factor. Keep the same softening floor for explicit
+    // lengths, including an exact-anchor pull with a tiny positive length.
+    // Multiplying by pre cancels the optimizer's division.
+    const double soft = std::max(1e-12, pull.length > 0 ? pull.length : length);
     const double scale = pull.weight * reference *
                          placement_preconditioner(d, i, density_weight) /
-                         std::max(length, std::hypot(dx, dy));
+                         std::max(soft, std::hypot(dx, dy));
     result.push_back({i, scale * dx, scale * dy});
   }
   return result;
@@ -2334,6 +2339,8 @@ Result place(Design &design, const Options &options, GpState *state,
     };
     auto spread_mobility = make_spread_mobility();
     std::vector<double> sx(n), sy(n), ox(n), oy(n), ratio(n);
+    std::vector<double> margin_base_sx, margin_base_sy;
+    std::vector<bool> margin_applied;
     const auto sharp = [&](int i) {
       return (i < d.num_movable && o.exact_cell_density &&
               (d.node_macro.empty() || !d.node_macro[i])) ||
@@ -3297,6 +3304,9 @@ Result place(Design &design, const Options &options, GpState *state,
                 o.routability_charge_compensation ? target : o.target_density;
           }
         }
+        // These are fresh routing footprints, even if their sizes happen to
+        // equal the preceding iteration's margin-inflated footprints.
+        std::fill(margin_applied.begin(), margin_applied.end(), false);
       }
       if (o.vanished_memory) {
         for (int i = d.num_movable; i < original; ++i) {
@@ -3308,6 +3318,40 @@ Result place(Design &design, const Options &options, GpState *state,
           ox[i] = (d.node_size_x[i] - sx[i]) / 2;
           oy[i] = (d.node_size_y[i] - sy[i]) / 2;
           ratio[i] = exclusion_scale > 0 ? target : 0;
+        }
+      }
+      if (o.macro_density_margin) {
+        // Only undo inflation that this schedule still owns. Routing and
+        // checkpoint rebuilds explicitly invalidate that ownership.
+        const double margin = o.macro_density_margin(global_iter);
+        require(finite(margin) && margin >= 0 && margin < 1,
+                "invalid macro density margin");
+        const int movable = std::min(d.num_movable, n);
+        margin_applied.resize(movable, false);
+        margin_base_sx.resize(movable, 0);
+        margin_base_sy.resize(movable, 0);
+        for (int i = 0; i < movable; ++i) {
+          if (d.node_macro.empty() || !d.node_macro[i]) {
+            continue;
+          }
+          if (margin_applied[i]) {
+            sx[i] = margin_base_sx[i];
+            sy[i] = margin_base_sy[i];
+            ox[i] = (d.node_size_x[i] - sx[i]) / 2;
+            oy[i] = (d.node_size_y[i] - sy[i]) / 2;
+          }
+          margin_applied[i] = false;
+          if (margin > 0) {
+            margin_base_sx[i] = sx[i];
+            margin_base_sy[i] = sy[i];
+            // Unchanged ratio: the inflated ring is charged at the macro's
+            // own density, like a halo pad.
+            sx[i] *= 1 + 2 * margin;
+            sy[i] *= 1 + 2 * margin;
+            ox[i] = (d.node_size_x[i] - sx[i]) / 2;
+            oy[i] = (d.node_size_y[i] - sy[i]) / 2;
+            margin_applied[i] = true;
+          }
         }
       }
       detail::density_map(d, o.bins_x, o.bins_y, o.num_threads, sx, sy, ox, oy,
@@ -3926,11 +3970,29 @@ Result place(Design &design, const Options &options, GpState *state,
                         !d.node_macro.empty() && d.node_macro[pull.node] &&
                         !seen[pull.node] && finite(pull.x) && finite(pull.y) &&
                         finite(pull.weight) && pull.weight >= 0 &&
-                        pull.weight <= 1,
+                        pull.weight <= o.macro_pull_max_weight &&
+                        finite(pull.length) && pull.length >= 0,
                     "invalid virtual macro pull");
             seen[pull.node] = true;
           }
           macro_pulls = std::move(*replacement);
+          bool jumped = false;
+          for (auto &pull : macro_pulls) {
+            if (!pull.jump) {
+              continue;
+            }
+            const int i = pull.node;
+            double px = pull.x - d.node_size_x[i] / 2;
+            double py = pull.y - d.node_size_y[i] / 2;
+            project(i, px, py);
+            jumped |= x[i] != px || y[i] != py;
+            x[i] = d.node_x[i] = model.node_x[i] = px;
+            y[i] = d.node_y[i] = model.node_y[i] = py;
+            pull.jump = false;
+          }
+          if (jumped) {
+            invalidate_external_route();
+          }
           if (o.magnet_runtime) {
             o.magnet_runtime->event(global_iter + 1, MagnetEvent::pull);
           }
@@ -4321,6 +4383,9 @@ Result place(Design &design, const Options &options, GpState *state,
                                                             : o.target_density;
             }
           }
+          // Rebuilding may also have replaced/reindexed the movable graph.
+          // None of these new footprints carries the previous margin.
+          margin_applied.clear();
           for (auto &g : d.cohesion_groups) {
             if (!g.areas.empty()) {
               for (size_t k = 0; k < g.nodes.size(); ++k) {

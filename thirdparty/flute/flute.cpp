@@ -1,6 +1,10 @@
 #include "flute.hpp"
 
+#include <cctype>
+#include <cstring>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -38,14 +42,123 @@ Tree dmergetree(Tree t1, Tree t2);
 Tree hmergetree(Tree t1, Tree t2, int* s);
 Tree vmergetree(Tree t1, Tree t2);
 
+namespace {
+
+// Bounded cursor over an in-memory lookup table. Its operations mirror the
+// stdio calls the original file parser used (fscanf/fgetc/fgets/fread), so the
+// buffer and file entry points decode the same bytes identically.
+class LutReader {
+public:
+  LutReader(const char *data, size_t size)
+      : pos_(reinterpret_cast<const unsigned char *>(data)), end_(pos_ + size) {
+  }
+
+  // fgetc
+  int get() { return pos_ < end_ ? *pos_++ : EOF; }
+
+  // fscanf(" %d\n"): optional leading whitespace, decimal int, trailing space.
+  bool read_int(int *value) {
+    skip_space();
+    bool negative = false;
+    if (pos_ < end_ && (*pos_ == '-' || *pos_ == '+'))
+      negative = *pos_++ == '-';
+    if (pos_ == end_ || *pos_ < '0' || *pos_ > '9')
+      return false;
+    long long v = 0;
+    while (pos_ < end_ && *pos_ >= '0' && *pos_ <= '9') {
+      v = v * 10 + (*pos_++ - '0');
+      if (v > INT_MAX)
+        return false;
+    }
+    *value = int(negative ? -v : v);
+    skip_space();
+    return true;
+  }
+
+  // fscanf("d=%d\n")
+  bool read_degree(int *value) {
+    if (end_ - pos_ < 2 || pos_[0] != 'd' || pos_[1] != '=')
+      return false;
+    pos_ += 2;
+    return read_int(value);
+  }
+
+  // fgets(line, capacity): up to capacity-1 bytes, through the first newline.
+  unsigned char *read_line(unsigned char *line, size_t capacity) {
+    if (pos_ == end_)
+      return nullptr;
+    size_t n = 0;
+    while (n + 1 < capacity && pos_ < end_) {
+      const unsigned char c = *pos_++;
+      line[n++] = c;
+      if (c == '\n')
+        break;
+    }
+    line[n] = '\0';
+    return line;
+  }
+
+  // fread(line, 1, n): all-or-nothing is enough because a short read is fatal.
+  bool read_bytes(unsigned char *line, size_t n) {
+    if (size_t(end_ - pos_) < n)
+      return false;
+    std::memcpy(line, pos_, n);
+    pos_ += n;
+    return true;
+  }
+
+private:
+  void skip_space() {
+    while (pos_ < end_ && std::isspace(*pos_))
+      ++pos_;
+  }
+
+  const unsigned char *pos_;
+  const unsigned char *end_;
+};
+
+std::string read_file(const char *path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input)
+    throw std::runtime_error(std::string("FLUTE: cannot open ") + path);
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  if (input.bad())
+    throw std::runtime_error(std::string("FLUTE: cannot read ") + path);
+  return std::move(contents).str();
+}
+
+bool LUTread = false;
+
+} // namespace
+
 void readLUT(const char *powv, const char *post) {
-  static bool LUTread = false;
   if (LUTread)
     return;
+  const std::string powv_data = read_file(powv);
+#if FLUTEROUTING == 1
+  const std::string post_data = read_file(post);
+#else
+  (void)post;
+  const std::string post_data;
+#endif
+  readLUT(powv_data.data(), powv_data.size(), post_data.data(),
+          post_data.size());
+}
+
+void readLUT(const char *powv_data, size_t powv_size, const char *post_data,
+             size_t post_size) {
+  if (LUTread)
+    return;
+  if (powv_data == nullptr || powv_size == 0
+#if FLUTEROUTING == 1
+      || post_data == nullptr || post_size == 0
+#endif
+  )
+    throw std::runtime_error("FLUTE: invalid or truncated lookup table");
   // LUTread is set only after a complete load: a failed attempt must not make a
   // later flute() call run against empty tables.
 
-  FILE *fpwv, *fprt;
   struct csoln *p;
   int d, i, j, k, kk, ns, nn, ne;
   unsigned char line[99], *linep, c;
@@ -64,25 +177,13 @@ void readLUT(const char *powv, const char *post) {
     mod16[i] = i % 16;
   }
 
-  fpwv = fopen(powv, "r");
-  if (fpwv == nullptr) {
-    throw std::runtime_error(std::string("FLUTE: cannot open ") + powv);
-  }
-
+  LutReader fpwv(powv_data, powv_size);
 #if FLUTEROUTING == 1
-  fprt = fopen(post, "r");
-  if (fprt == nullptr) {
-    fclose(fpwv);
-    throw std::runtime_error(std::string("FLUTE: cannot open ") + post);
-  }
+  LutReader fprt(post_data, post_size);
 #else
-  fprt = nullptr;
+  (void)post_data;
+  (void)post_size;
 #endif
-  struct FileCloser {
-    void operator()(FILE *f) const { fclose(f); }
-  };
-  const std::unique_ptr<FILE, FileCloser> powv_file(fpwv);
-  const std::unique_ptr<FILE, FileCloser> post_file(fprt);
   // Keep partial allocations private until both tables have loaded. A failed
   // read can then be retried without leaking solutions or retaining aliases.
   std::vector<std::unique_ptr<csoln, decltype(&std::free)>> allocations;
@@ -99,14 +200,14 @@ void readLUT(const char *powv, const char *post) {
       dsq = d * d;
 
       int degree = 0;
-      if (fscanf(fpwv, "d=%d\n", &degree) != 1 || degree != d)
+      if (!fpwv.read_degree(&degree) || degree != d)
         invalid();
 #if FLUTEROUTING == 1
-      if (fscanf(fprt, "d=%d\n", &degree) != 1 || degree != d)
+      if (!fprt.read_degree(&degree) || degree != d)
         invalid();
 #endif
       for (k = 0; k < numgrp[d]; k++) {
-        const int count = fgetc(fpwv);
+        const int count = fpwv.get();
         if (count == EOF)
           invalid();
         ns = (int)charnum[count];
@@ -114,12 +215,12 @@ void readLUT(const char *powv, const char *post) {
           invalid();
 
         if (ns == 0) { // same as some previous group
-          if (fscanf(fpwv, "%d\n", &kk) != 1 || kk < 0 || kk >= k)
+          if (!fpwv.read_int(&kk) || kk < 0 || kk >= k)
             invalid();
           numsoln[d][k] = numsoln[d][kk];
           LUT[d][k] = LUT[d][kk];
         } else {
-          if (fgetc(fpwv) != '\n')
+          if (fpwv.get() != '\n')
             invalid();
           numsoln[d][k] = ns;
           p = (struct csoln *)malloc(ns * sizeof(struct csoln));
@@ -128,7 +229,7 @@ void readLUT(const char *powv, const char *post) {
           allocations.emplace_back(p, std::free);
           LUT[d][k] = p;
           for (i = 1; i <= ns; i++) {
-            linep = (unsigned char *)fgets((char *)line, 99, fpwv);
+            linep = fpwv.read_line(line, sizeof(line));
             if (linep == nullptr)
               invalid();
             const auto *line_end =
@@ -152,7 +253,7 @@ void readLUT(const char *powv, const char *post) {
 #if FLUTEROUTING == 1
             nn = 2 * d - 2;
             ne = 2 * d - 3;
-            if (fread(line, 1, d - 2, fprt) != size_t(d - 2))
+            if (!fprt.read_bytes(line, d - 2))
               invalid();
             linep = line;
             for (j = d; j < nn; j++) {
@@ -168,7 +269,7 @@ void readLUT(const char *powv, const char *post) {
               p->col[j - d] = modd[c];
               p->neighbor[j] = j; // initialized
             }
-            if (ne < 0 || fread(line, 1, ne + 1, fprt) != size_t(ne + 1))
+            if (ne < 0 || !fprt.read_bytes(line, ne + 1))
               invalid();
             linep = line; // last char = \n
             for (j = 0; j < ne; j++) {
