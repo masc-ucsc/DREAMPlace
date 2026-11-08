@@ -889,6 +889,16 @@ double reservation_filler_area(double unreserved_budget, double rounding_loss,
 bool post_density_restore_pays(double sample_excess, double sample_cost,
                                double last_excess, double last_cost,
                                double stop_overflow);
+// Wirelength side of the post-density drift test: a retained sample of cost
+// sample_cost beats an iterate of cost `cost` when it is materially (5%)
+// shorter. Restoring a density-infeasible iterate only needs the feasible
+// sample to be no longer (within convergence_tolerance); the plateau stop
+// (`stopping`) needs the material drift even then, because an infeasible
+// iterate close to the sample may still settle into a feasible point that no
+// retained sample replaces.
+bool post_density_wirelength_drift(double sample_cost, double cost,
+                                   bool iterate_feasible, bool stopping,
+                                   double convergence_tolerance);
 } // namespace detail
 
 // Throws invalid_argument for bad inputs and runtime_error if legalization

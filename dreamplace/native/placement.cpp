@@ -581,6 +581,13 @@ bool post_density_restore_pays(double sample_excess, double sample_cost,
          sample_excess - last_excess <=
              stop_overflow * std::max(.5, last_cost / sample_cost - 1);
 }
+bool post_density_wirelength_drift(double sample_cost, double cost,
+                                   bool iterate_feasible, bool stopping,
+                                   double convergence_tolerance) {
+  return iterate_feasible || stopping
+             ? sample_cost * 1.05 < cost
+             : sample_cost <= cost * (1 + convergence_tolerance);
+}
 std::vector<MacroPullForce>
 macro_pull_forces(const Design &d, const std::vector<MacroPull> &pulls,
                   const Gradient &wire, const Gradient &density,
@@ -2692,8 +2699,14 @@ Result place(Design &design, const Options &options, GpState *state,
     // feasibility threshold, or a larger gap paid for by the wirelength the
     // sample saves (one stop_overflow per 100% of wirelength). A runaway that
     // doubled the wirelength restores any feasible sample; a moderate drift
-    // that bought a much better spread keeps the iterate. The stop test (no
-    // `excess`) is unchanged.
+    // that bought a much better spread keeps the iterate.
+    //
+    // Stopping (no `excess`) always requires the material wirelength drift
+    // (detail::post_density_wirelength_drift): a density-infeasible iterate
+    // within 5% of a feasible sample may still settle into a feasible point
+    // no retained sample replaces, so the continuation runs on; once it is
+    // materially longer, reaching feasibility only adds wirelength and every
+    // point it can reach is replaced anyway.
     const auto drifted_from = [&](double cost, double violation, bool feasible,
                                   int iteration,
                                   std::optional<double> excess = {}) {
@@ -2707,9 +2720,8 @@ Result place(Design &design, const Options &options, GpState *state,
                           c->excess, c->cost, *excess, cost, o.stop_overflow)) {
           continue;
         }
-        const bool beats =
-            feasible ? c->cost * 1.05 < cost
-                     : c->cost <= cost * (1 + o.convergence_tolerance);
+        const bool beats = detail::post_density_wirelength_drift(
+            c->cost, cost, feasible, !excess, o.convergence_tolerance);
         if (beats && (!chosen || c->cost < chosen->cost)) {
           chosen = c;
         }
@@ -4842,11 +4854,11 @@ Result place(Design &design, const Options &options, GpState *state,
           }
         }
         // Density was feasible, nothing improved for the patience window and
-        // the current iterate drifted away from a retained sample: further
-        // steps only trade wirelength for the density weight's overshoot or
-        // an unreachable route target. Without drift the continuation runs on
-        // unchanged. Pending model switches, probes and gated checkpoints
-        // finish first.
+        // the current iterate drifted materially away from a retained sample
+        // (feasible or not): further steps only trade wirelength for the
+        // density weight's overshoot or an unreachable route target. Without
+        // drift the continuation runs on unchanged. Pending model switches,
+        // probes and gated checkpoints finish first.
         if (post_sample && !post_best.empty() &&
             global_iter + 1 - post_best.improved >= o.post_density_patience &&
             global_iter + 1 >= o.min_iterations &&

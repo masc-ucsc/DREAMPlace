@@ -605,6 +605,27 @@ void post_density_restore_prices_density() {
         "closeness accepted a distant unpaid sample or a zero-cost one");
 }
 
+void post_density_stop_needs_material_drift() {
+  using detail::post_density_wirelength_drift;
+  // Challenge proxy (ariane136 initial GP): at the plateau the iterate is at
+  // overflow 0.1016 (just infeasible) and only 3.9% longer than the feasible
+  // sample. It may still settle feasible within 5%, so it must not stop...
+  check(!post_density_wirelength_drift(5.3617e9, 5.5708e9, false, true, .01),
+        "plateau stopped an infeasible iterate close to its feasible sample");
+  // ... while an exit that already happened restores the feasible sample.
+  check(post_density_wirelength_drift(5.3617e9, 5.5708e9, false, false, .01),
+        "unconverged exit kept an infeasible iterate over a feasible sample");
+  // HighTide liteeth legacy d0.32: infeasible and 20% longer: stops.
+  check(post_density_wirelength_drift(1, 1.2, false, true, .01),
+        "plateau did not stop a materially drifted infeasible iterate");
+  // A feasible iterate needs the material drift for both.
+  check(!post_density_wirelength_drift(1, 1.04, true, true, .01) &&
+            !post_density_wirelength_drift(1, 1.04, true, false, .01) &&
+            post_density_wirelength_drift(1, 1.06, true, true, .01) &&
+            post_density_wirelength_drift(1, 1.06, true, false, .01),
+        "feasible drift test changed");
+}
+
 void post_density_record_without_drift_is_inert() {
   // Routing between fixed IOs cannot improve by moving the unrelated cells
   // and wirelength settles: no drift, so the record must not change the
@@ -3135,6 +3156,7 @@ int main() {
     routing_plateau_hands_off_without_claiming_convergence();
     post_density_plateau_keeps_best_feasible_iterate();
     post_density_restore_prices_density();
+    post_density_stop_needs_material_drift();
     post_density_record_without_drift_is_inert();
     setup_timing_does_not_veto_convergence();
     route_policy_helpers();
