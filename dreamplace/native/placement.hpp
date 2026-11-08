@@ -520,6 +520,20 @@ struct Options {
   // max_iterations.
   double post_density_factor = 0;
   double convergence_tolerance = .01; // relative weighted-HPWL/inflation change
+  // Post-density continuation (post_density_factor > 0) retains the
+  // density-feasible samples with the least wirelength and the least routing
+  // violation (overflow beyond route.target_overflow). Density pressure and
+  // inflation keep acting after feasibility, so the last iterate can drift far
+  // from them while an unreachable route target keeps the objective
+  // unconverged. A static solve stops once neither wirelength (beyond
+  // convergence_tolerance) nor routing violation (beyond a 5% noise band) has
+  // improved for this many iterations. Every unconverged exit (plateau, stall,
+  // budget, cap) returns a retained sample instead of the last iterate when
+  // the sample is no worse on one metric and clearly better on the other,
+  // and its density overflow is close to the last iterate's or paid for by
+  // the wirelength it saves (detail::post_density_restore_pays).
+  // Zero keeps the last iterate and runs to the post-density budget or cap.
+  int post_density_patience = 100;
   double initial_density_weight = 0.01;
   // Already normalized coefficient from a previous converged placement.
   // Coordinate-only refinement keeps this coefficient but starts new momentum.
@@ -716,6 +730,13 @@ struct Result {
   // Density is feasible, but a sustained routing plateau warrants handing the
   // static cell solve to legalization. Routing convergence is still unproven.
   bool route_stalled = false;
+  // Density was feasible, but neither wirelength nor routing violation
+  // improved for post_density_patience iterations. Like route_stalled, a
+  // hand-off to legalization; the routing target itself remains unproven.
+  bool post_density_plateau = false;
+  // Iteration of the retained post-density sample returned in place of the
+  // last iterate (0: the last iterate was kept).
+  int post_density_best_iteration = 0;
   bool timing_observed = false, timing_satisfied = true;
   CentroidReport centroid;
   AlignmentReport alignment;
@@ -859,6 +880,15 @@ void reservation_density_map(const Design &, int bins_x, int bins_y,
 // of the user's filler fraction. Insufficient filler budget is explicit.
 double reservation_filler_area(double unreserved_budget, double rounding_loss,
                                const ReservationCharge &);
+// Post-density restore closeness: a retained sample (excess overflow,
+// wirelength cost) may replace the last iterate only when its overflow is
+// within half of stop_overflow of the iterate's, or the larger gap, in units
+// of stop_overflow, is at most the relative wirelength it saves:
+// sample_excess - last_excess <=
+//     stop_overflow * max(1/2, last_cost / sample_cost - 1).
+bool post_density_restore_pays(double sample_excess, double sample_cost,
+                               double last_excess, double last_cost,
+                               double stop_overflow);
 } // namespace detail
 
 // Throws invalid_argument for bad inputs and runtime_error if legalization

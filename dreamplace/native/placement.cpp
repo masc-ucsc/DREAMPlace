@@ -427,6 +427,7 @@ void options_check(const Options &o) {
               finite(o.convergence_tolerance) && o.convergence_tolerance >= 0 &&
               o.convergence_tolerance <= 1,
           "invalid post-density convergence controls");
+  require(o.post_density_patience >= 0, "negative post-density patience");
   require(finite(o.wirelength_gamma_end) && o.wirelength_gamma_end > 0 &&
               o.wirelength_gamma_end <= 1,
           "wirelength gamma ratio must be in (0,1]");
@@ -573,6 +574,13 @@ Design padded_design(const Design &source) {
 } // namespace
 
 namespace detail {
+bool post_density_restore_pays(double sample_excess, double sample_cost,
+                               double last_excess, double last_cost,
+                               double stop_overflow) {
+  return sample_cost > 0 &&
+         sample_excess - last_excess <=
+             stop_overflow * std::max(.5, last_cost / sample_cost - 1);
+}
 std::vector<MacroPullForce>
 macro_pull_forces(const Design &d, const std::vector<MacroPull> &pulls,
                   const Gradient &wire, const Gradient &density,
@@ -2643,6 +2651,79 @@ Result place(Design &design, const Options &options, GpState *state,
                                              : std::vector<MacroPull>{};
     std::vector<double> best_feasible_x, best_feasible_y;
     int best_feasible_iteration = 0;
+    // Post-density continuation record (see Options::post_density_patience):
+    // the feasible samples with the least wirelength and the least routing
+    // violation, and the anchors that define meaningful progress. Restoring
+    // raw coordinates is only meaningful while nothing outside this call
+    // observes the trajectory and the post-feasibility objective is
+    // wirelength plus density/routing continuation; macro-stage alignment and
+    // centroid objectives, relative order, cohesion and pin timing are not
+    // measured by the selection cost.
+    struct PostDensitySample {
+      std::vector<double> x, y;
+      double cost = 0, violation = 0, density_weight = 0, excess = 0;
+      int iteration = 0;
+    };
+    struct PostDensityRecord {
+      PostDensitySample shortest, least_violation;
+      double anchor_cost = std::numeric_limits<double>::infinity();
+      double anchor_violation = std::numeric_limits<double>::infinity();
+      int improved = 0;
+      RouteModel model = RouteModel::off;
+      bool empty() const { return !shortest.iteration; }
+    } post_best;
+    const bool track_post_density =
+        o.post_density_factor > 0 && o.post_density_patience > 0 && !state &&
+        !o.magnet_runtime && !o.trial_tuning && !centroids &&
+        !o.macro_align_weight && !o.cohesion_weight &&
+        !(o.order_weight > 0 && !design.order_edges.empty());
+    // A routing estimate is noisy: violations within 5% (+1e-3) tie.
+    const auto route_band = [](double v) { return .05 * v + 1e-3; };
+    // A retained sample replaces an iterate (cost, violation, feasible) only
+    // when the iterate drifted from it: no better routed, and wirelength
+    // longer by a material 5% (legalization moves cells by more than the
+    // convergence tolerance, so smaller differences are noise there), or
+    // density-infeasible without being shorter or better routed. Among the
+    // samples that qualify, the shortest one wins.
+    //
+    // Restoring (`excess` set: the iterate's density overflow beyond the
+    // floor) also requires the sample's overflow to be close to the
+    // iterate's (detail::post_density_restore_pays): within half the
+    // feasibility threshold, or a larger gap paid for by the wirelength the
+    // sample saves (one stop_overflow per 100% of wirelength). A runaway that
+    // doubled the wirelength restores any feasible sample; a moderate drift
+    // that bought a much better spread keeps the iterate. The stop test (no
+    // `excess`) is unchanged.
+    const auto drifted_from = [&](double cost, double violation, bool feasible,
+                                  int iteration,
+                                  std::optional<double> excess = {}) {
+      PostDensitySample *chosen = nullptr;
+      for (auto *c : {&post_best.shortest, &post_best.least_violation}) {
+        if (!c->iteration || c->iteration == iteration ||
+            c->violation > violation + route_band(violation)) {
+          continue;
+        }
+        if (excess && !detail::post_density_restore_pays(
+                          c->excess, c->cost, *excess, cost, o.stop_overflow)) {
+          continue;
+        }
+        const bool beats =
+            feasible ? c->cost * 1.05 < cost
+                     : c->cost <= cost * (1 + o.convergence_tolerance);
+        if (beats && (!chosen || c->cost < chosen->cost)) {
+          chosen = c;
+        }
+      }
+      return chosen;
+    };
+    // A saved point belongs to the objective, netlist and routing model it was
+    // measured under; every reset of the classic feasible point resets both.
+    const auto forget_feasible = [&] {
+      best_feasible_x.clear();
+      best_feasible_y.clear();
+      best_feasible_hpwl = std::numeric_limits<double>::infinity();
+      post_best = {};
+    };
     bool restart = o.trial_tuning.has_value() || (warm && state->restart);
     int last_checkpoint = warm ? state->last_checkpoint : -1;
     bool movable_updates_retired = warm && state->movable_updates_retired;
@@ -2996,9 +3077,7 @@ Result place(Design &design, const Options &options, GpState *state,
         convergence.previous_hpwl = -1;
         convergence.previous_inflation = -1;
         convergence.stable_samples = 0;
-        best_feasible_x.clear();
-        best_feasible_y.clear();
-        best_feasible_hpwl = std::numeric_limits<double>::infinity();
+        forget_feasible();
         for (const auto &h : winner.result.history) {
           r.history.push_back(h);
           if (o.progress_observer) {
@@ -3054,9 +3133,7 @@ Result place(Design &design, const Options &options, GpState *state,
         convergence.previous_inflation = -1;
         convergence.stable_samples = 0;
         previous_hpwl = -1;
-        best_feasible_x.clear();
-        best_feasible_y.clear();
-        best_feasible_hpwl = std::numeric_limits<double>::infinity();
+        forget_feasible();
         // Inflation from a blocked routing model must not persist through a
         // transparent phase (or vice versa). Re-estimate using the new model.
         std::fill(inflation.begin(), inflation.end(), 1);
@@ -3906,9 +3983,7 @@ Result place(Design &design, const Options &options, GpState *state,
           convergence.previous_inflation = -1;
           convergence.stable_samples = 0;
           previous_hpwl = -1;
-          best_feasible_x.clear();
-          best_feasible_y.clear();
-          best_feasible_hpwl = std::numeric_limits<double>::infinity();
+          forget_feasible();
         }
       }
       if (o.terminal_update && o.terminal_interval > 0 &&
@@ -3946,9 +4021,7 @@ Result place(Design &design, const Options &options, GpState *state,
           convergence.previous_inflation = -1;
           convergence.stable_samples = 0;
           previous_hpwl = -1;
-          best_feasible_x.clear();
-          best_feasible_y.clear();
-          best_feasible_hpwl = std::numeric_limits<double>::infinity();
+          forget_feasible();
         }
       }
       if (o.macro_pull_update && o.macro_pull_interval > 0 &&
@@ -4005,9 +4078,7 @@ Result place(Design &design, const Options &options, GpState *state,
           convergence.previous_inflation = -1;
           convergence.stable_samples = 0;
           previous_hpwl = -1;
-          best_feasible_x.clear();
-          best_feasible_y.clear();
-          best_feasible_hpwl = std::numeric_limits<double>::infinity();
+          forget_feasible();
         }
       }
       const bool forced_checkpoint =
@@ -4099,6 +4170,7 @@ Result place(Design &design, const Options &options, GpState *state,
           r.objective_converged = r.converged = false;
           restored_selection = s.iteration;
           r.rollback_history.push_back({global_iter + 1, s.iteration});
+          forget_feasible();
           // Policy clocks and the iteration cap are monotonic. Suppress
           // convergence on this rejected observation without changing the
           // restored optimizer, fillers, weights or density normalization.
@@ -4249,9 +4321,7 @@ Result place(Design &design, const Options &options, GpState *state,
           old_ey = y;
           align_pairs = alignment_pairs(d);
           // A saved feasible point belongs to the old netlist and dimensions.
-          best_feasible_x.clear();
-          best_feasible_y.clear();
-          best_feasible_hpwl = std::numeric_limits<double>::infinity();
+          forget_feasible();
           // Recompute density-step scaling for the new graph. Memory geometry
           // remains fixed; the next iteration reapplies its current schedule.
           density_initialized = false;
@@ -4311,9 +4381,7 @@ Result place(Design &design, const Options &options, GpState *state,
             pin_timing_seen =
                 pin_timing_seen || (d.pin_timing && d.pin_timing->enabled());
             if (pin_timing_changed || reservations_changed) {
-              best_feasible_x.clear();
-              best_feasible_y.clear();
-              best_feasible_hpwl = std::numeric_limits<double>::infinity();
+              forget_feasible();
             }
             std::copy_n(candidate.node_size_x.begin(), original,
                         d.node_size_x.begin());
@@ -4332,9 +4400,7 @@ Result place(Design &design, const Options &options, GpState *state,
             convergence.previous_hpwl = -1;
             convergence.stable_samples = 0;
             previous_hpwl = -1;
-            best_feasible_x.clear();
-            best_feasible_y.clear();
-            best_feasible_hpwl = std::numeric_limits<double>::infinity();
+            forget_feasible();
           }
         }
         if (objective_changed) {
@@ -4616,6 +4682,7 @@ Result place(Design &design, const Options &options, GpState *state,
                 : (geometry_ready &&
                    (o.route.probe || active_route == RouteModel::uroute ||
                     learned_ladder));
+        bool route_measured = false;
         if (route_candidate && o.routability) {
           // External samples are expensive host router invocations. Consume
           // their retained result here; convergence checks must not silently
@@ -4669,6 +4736,7 @@ Result place(Design &design, const Options &options, GpState *state,
           route_peak_utilization = route.max_utilization;
           route_overflow = route.overflow;
           r.history.back().route_overflow = route_overflow;
+          route_measured = true;
         }
         // A qualifying RSMT candidate must collect its hold window rather
         // than exit before the learned model has a chance to measure it.
@@ -4718,6 +4786,78 @@ Result place(Design &design, const Options &options, GpState *state,
         }
         if (iter + 1 >= o.min_slice_iterations && !o.trial_tuning &&
             r.continuation_limit && macro_pulls_ready && magnet_ready) {
+          break;
+        }
+        const bool post_sample = track_post_density && !pin_timing_seen &&
+                                 (geometry_ready || !post_best.empty());
+        double post_violation = 0;
+        if (post_sample && o.routability) {
+          // Score this sample on the current geometry. The inflation
+          // estimate behind route_overflow is up to 19 steps old.
+          const double measured =
+              route_measured || active_route == RouteModel::external
+                  ? route_overflow
+                  : measure_route(physical, active_route, false).overflow;
+          post_violation = std::max(0., measured - o.route.target_overflow);
+        }
+        if (post_sample && !post_best.empty() &&
+            post_best.model != active_route) {
+          post_best = {}; // a new routing model rescales the violation
+        }
+        if (post_sample && geometry_ready) {
+          const auto keep = [&](PostDensitySample &slot) {
+            slot.x = x;
+            slot.y = y;
+            slot.cost = selection_cost;
+            slot.violation = post_violation;
+            slot.density_weight = density_weight;
+            slot.excess = excess;
+            slot.iteration = global_iter + 1;
+          };
+          const bool first = post_best.empty();
+          auto &shortest = post_best.shortest;
+          auto &least = post_best.least_violation;
+          if (first || selection_cost < shortest.cost) {
+            keep(shortest);
+          }
+          if (first || post_violation < least.violation ||
+              (post_violation == least.violation &&
+               selection_cost < least.cost)) {
+            keep(least);
+          }
+          post_best.model = active_route;
+          // Progress is a wirelength gain beyond the convergence tolerance or
+          // a routing gain beyond the noise band. A slow creep within either
+          // cannot extend the continuation.
+          if (first || selection_cost < post_best.anchor_cost *
+                                            (1 - o.convergence_tolerance)) {
+            post_best.anchor_cost = selection_cost;
+            post_best.improved = global_iter + 1;
+          }
+          if (first ||
+              post_violation < post_best.anchor_violation -
+                                   route_band(post_best.anchor_violation)) {
+            post_best.anchor_violation = post_violation;
+            post_best.improved = global_iter + 1;
+          }
+        }
+        // Density was feasible, nothing improved for the patience window and
+        // the current iterate drifted away from a retained sample: further
+        // steps only trade wirelength for the density weight's overshoot or
+        // an unreachable route target. Without drift the continuation runs on
+        // unchanged. Pending model switches, probes and gated checkpoints
+        // finish first.
+        if (post_sample && !post_best.empty() &&
+            global_iter + 1 - post_best.improved >= o.post_density_patience &&
+            global_iter + 1 >= o.min_iterations &&
+            iter + 1 >= o.min_slice_iterations && macro_pulls_ready &&
+            !uroute_pending && (!o.route.probe || r.route_probed) &&
+            (!density_gated_checkpoints || checkpoint_invoked) &&
+            std::none_of(movable_holds.begin(), movable_holds.end(),
+                         [](int hold) { return hold > 0; }) &&
+            drifted_from(selection_cost, post_violation,
+                         excess <= o.stop_overflow, global_iter + 1)) {
+          r.post_density_plateau = true;
           break;
         }
         // A routing estimate can retain irreducible congestion around fixed
@@ -4903,6 +5043,45 @@ Result place(Design &design, const Options &options, GpState *state,
       x = std::move(best_feasible_x);
       y = std::move(best_feasible_y);
       r.selected_iteration = best_feasible_iteration;
+    } else if (track_post_density && !post_best.empty() &&
+               !r.objective_converged && !restored_selection) {
+      // Unconverged exits (plateau, stall, budget, cap) return the retained
+      // sample the last iterate drifted from (see drifted_from); otherwise
+      // the last iterate stands, as before. Inflation is a GP-only charge, so
+      // the coordinates stand on their own.
+      Design physical = model;
+      std::copy_n(x.begin(), original, physical.node_x.begin());
+      std::copy_n(y.begin(), original, physical.node_y.begin());
+      double floor = 0;
+      const double last_overflow = overflow(
+          physical, o.bins_x, o.bins_y, o.target_density, o.scale_macro_density,
+          o.macro_transparency.always, exclusion_scale, true, &floor);
+      const double last_excess = excess_overflow(last_overflow, floor);
+      const bool last_feasible = last_excess <= o.stop_overflow;
+      const double last_cost =
+          hpwl(physical) +
+          (fixed_macro_weight > 0
+               ? detail::fixed_macro_overlap(physical, o.bins_x, o.bins_y,
+                                             fixed_macro_weight)
+                     .value
+               : 0);
+      double last_violation = 0;
+      if (o.routability) {
+        last_violation = std::max(
+            0., (active_route == RouteModel::external
+                     ? route_overflow
+                     : measure_route(physical, active_route, false).overflow) -
+                    o.route.target_overflow);
+      }
+      auto *chosen = drifted_from(last_cost, last_violation, last_feasible,
+                                  offset + r.iterations, last_excess);
+      if (chosen) {
+        x = std::move(chosen->x);
+        y = std::move(chosen->y);
+        r.density_weight = chosen->density_weight;
+        r.selected_iteration = chosen->iteration;
+        r.post_density_best_iteration = chosen->iteration;
+      }
     }
     d.node_x = std::move(x);
     d.node_y = std::move(y);

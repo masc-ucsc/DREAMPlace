@@ -505,6 +505,144 @@ void routing_plateau_hands_off_without_claiming_convergence() {
         "routing plateau reused samples preceding a timing-weight update");
 }
 
+void post_density_plateau_keeps_best_feasible_iterate() {
+  // A cluster of cells chained between fixed IOs under a routing capacity no
+  // placement can meet: the route target is unreachable, so the objective
+  // never converges. With a loose density target, feasibility arrives while
+  // the cluster is still compact and the constant density weight keeps
+  // spreading it afterwards, lengthening every net: post-density drift. A
+  // movable macro keeps the static-cell stall detector out of the way.
+  Design initial;
+  initial.layout = {0, 0, 100, 100, 1, 1};
+  const int cells = 24;
+  initial.num_movable = cells;
+  for (int i = 0; i < cells; ++i) {
+    initial.node_x.push_back(48 + i % 4);
+    initial.node_y.push_back(47 + i / 4);
+  }
+  initial.node_x.insert(initial.node_x.end(), {45, 55});
+  initial.node_y.insert(initial.node_y.end(), {50, 50});
+  initial.node_size_x.assign(cells, 2);
+  initial.node_size_y.assign(cells, 2);
+  initial.node_size_x.insert(initial.node_size_x.end(), {0, 0});
+  initial.node_size_y.insert(initial.node_size_y.end(), {0, 0});
+  // A ring of two-pin nets, anchored to the IOs by two more nets.
+  for (int net = 0; net < cells; ++net) {
+    initial.pin2node.push_back(net);
+    initial.pin2node.push_back((net + 1) % cells);
+  }
+  initial.pin2node.insert(initial.pin2node.end(),
+                          {cells, 0, cells + 1, cells / 2});
+  initial.pin_offset_x.assign(initial.pin2node.size(), 0);
+  initial.pin_offset_y.assign(initial.pin2node.size(), 0);
+  for (int pin = 0; pin < int(initial.pin2node.size()); ++pin) {
+    initial.flat_net2pin.push_back(pin);
+  }
+  for (int net = 0; net <= cells + 2; ++net) {
+    initial.flat_net2pin_start.push_back(2 * net);
+  }
+  initial.node_macro.assign(cells + 2, 0);
+  initial.node_macro[0] = 1;
+  initial.build_maps();
+  Options options;
+  options.bins_x = options.bins_y = 16;
+  options.target_density = .3;
+  options.stop_overflow = .6;
+  options.max_iterations = 1000;
+  options.post_density_factor = 100;
+  options.add_fillers = false;
+  options.legalize = false;
+  options.detailed_place = false;
+  options.routability = true;
+  options.route.model = RouteModel::rudy;
+  options.route_capacity_h = options.route_capacity_v = .0001;
+  auto kept = initial;
+  const auto result = place(kept, options);
+  check(result.post_density_plateau && !result.objective_converged &&
+            !result.converged && result.iterations < options.max_iterations,
+        "post-density drift ran on to the iteration cap");
+  check(result.post_density_best_iteration > result.density_iteration &&
+            result.selected_iteration == result.post_density_best_iteration,
+        "post-density plateau did not return its retained sample");
+  const auto selected = std::find_if(
+      result.history.begin(), result.history.end(),
+      [&](const auto &s) { return s.iteration == result.selected_iteration; });
+  check(selected != result.history.end() &&
+            selected->overflow <= options.stop_overflow &&
+            std::abs(hpwl(kept) - selected->hpwl) <=
+                1e-9 * std::max(1., selected->hpwl) &&
+            selected->hpwl * 1.05 < result.history.back().hpwl,
+        "returned placement is not the retained feasible sample");
+  options.post_density_patience = 0;
+  auto legacy = initial;
+  const auto last = place(legacy, options);
+  check(!last.post_density_plateau && last.post_density_best_iteration == 0 &&
+            last.selected_iteration == last.iterations &&
+            last.iterations == options.max_iterations,
+        "zero patience changed the last-iterate continuation");
+}
+
+void post_density_restore_prices_density() {
+  using detail::post_density_restore_pays;
+  // Challenge proxy (mempool_tile initial GP): a 24% drift that bought 0.058
+  // less overflow (more than half of stop_overflow 0.1): the iterate stands.
+  check(!post_density_restore_pays(.096, 5.31e9, .038, 6.61e9, .1),
+        "small drift restored a much less spread sample");
+  // ibm10: 0.011 apart, inside the half-threshold band: restored.
+  check(post_density_restore_pays(.0998, 1, .0888, 1.0646, .1),
+        "close sample not restored");
+  // HighTide runaway (coralnpu): 7x the wirelength restores a feasible sample
+  // far less spread than the iterate.
+  check(post_density_restore_pays(.093, 1, .0074, 7.06, .1),
+        "runaway did not restore its feasible sample");
+  // Lower overflow restores at any gain; any feasible sample restores once
+  // the drift doubled the wirelength.
+  check(post_density_restore_pays(.03, 1, .08, 1.0, .1) &&
+            post_density_restore_pays(.1, 1, 0, 2, .1),
+        "closeness rejected a free or paid-for restore");
+  check(!post_density_restore_pays(.1, 1, .04, 1.3, .1) &&
+            !post_density_restore_pays(0, 0, 0, 1, .1),
+        "closeness accepted a distant unpaid sample or a zero-cost one");
+}
+
+void post_density_record_without_drift_is_inert() {
+  // Routing between fixed IOs cannot improve by moving the unrelated cells
+  // and wirelength settles: no drift, so the record must not change the
+  // trajectory, the stopping iteration or the returned coordinates.
+  Design initial;
+  initial.layout = {0, 0, 100, 20, 1, 1};
+  initial.num_movable = 2;
+  initial.node_x = {40, 60, 0, 100};
+  initial.node_y = {10, 10, 0, 20};
+  initial.node_size_x = initial.node_size_y = {1, 1, 0, 0};
+  initial.pin2node = {2, 3, 0, 1};
+  initial.pin_offset_x = initial.pin_offset_y = {0, 0, 0, 0};
+  initial.flat_net2pin = {0, 1, 2, 3};
+  initial.flat_net2pin_start = {0, 2, 4};
+  initial.node_macro = {1, 0, 0, 0};
+  initial.build_maps();
+  Options options;
+  options.bins_x = options.bins_y = 8;
+  options.max_iterations = 400;
+  options.min_iterations = 100;
+  options.post_density_factor = 4;
+  options.add_fillers = false;
+  options.detailed_place = false;
+  options.routability = true;
+  options.route.model = RouteModel::rudy;
+  options.route_capacity_h = options.route_capacity_v = .0001;
+  auto recorded = initial;
+  const auto with_record = place(recorded, options);
+  options.post_density_patience = 0;
+  auto plain = initial;
+  const auto without = place(plain, options);
+  check(!with_record.post_density_plateau &&
+            with_record.post_density_best_iteration == 0 &&
+            with_record.iterations == without.iterations &&
+            recorded.node_x == plain.node_x && recorded.node_y == plain.node_y,
+        "post-density record changed a placement that did not drift");
+}
+
 void setup_timing_does_not_veto_convergence() {
   Design initial;
   initial.layout = {0, 0, 100, 20, 1, 1};
@@ -2995,6 +3133,9 @@ int main() {
     density_floor_accounts_for_grid_resolution();
     density_floor_checkpoint_and_resize();
     routing_plateau_hands_off_without_claiming_convergence();
+    post_density_plateau_keeps_best_feasible_iterate();
+    post_density_restore_prices_density();
+    post_density_record_without_drift_is_inert();
     setup_timing_does_not_veto_convergence();
     route_policy_helpers();
     size_neutral_macro_pull();
