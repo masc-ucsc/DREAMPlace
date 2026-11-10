@@ -493,6 +493,7 @@ void options_check(const Options &o) {
           "invalid cohesion weight");
   require(o.terminal_interval >= 0, "negative terminal update interval");
   require(o.movable_interval >= 0, "negative movable update interval");
+  require(o.interact_interval >= 0, "negative interact interval");
   require(o.checkpoint_interval >= 0, "negative GP checkpoint interval");
   require(o.checkpoint_start >= 0, "negative GP checkpoint start");
   double previous_milestone = std::numeric_limits<double>::infinity();
@@ -1643,6 +1644,27 @@ Result place(Design &design, const Options &options, GpState *state,
         return updates;
       };
     }
+    if (o.interact && o.interact_interval > 0) {
+      // The solver works on halo-padded origins; the host sees physical ones.
+      control.interact = [&](const InteractView &view) {
+        std::vector<double> px(view.x, view.x + view.count),
+            py(view.y, view.y + view.count);
+        for (int i = 0; i < design.num_movable && i < view.count; ++i) {
+          px[i] += halo(design.node_halo_x, i, design.layout.site_width);
+          py[i] += halo(design.node_halo_y, i, design.layout.row_height);
+        }
+        auto update = o.interact(
+            InteractView{&design, px.data(), py.data(), view.count,
+                         view.iteration, view.first, view.finishing});
+        for (auto &pin : update.pins) {
+          require(pin.node >= 0 && pin.node < design.num_movable,
+                  "invalid interactive pin index");
+          pin.x -= halo(design.node_halo_x, pin.node, design.layout.site_width);
+          pin.y -= halo(design.node_halo_y, pin.node, design.layout.row_height);
+        }
+        return update;
+      };
+    }
     const auto result = place(padded, control, state, rebind);
     if ((o.checkpoint && o.checkpoint_interval > 0) ||
         (o.terminal_update && o.terminal_interval > 0) ||
@@ -2020,12 +2042,14 @@ Result place(Design &design, const Options &options, GpState *state,
     auto active = [&](int i) { return i < d.num_movable || i >= original; };
     std::vector<int> movable_holds =
         warm ? state->movable_holds : std::vector<int>(d.num_movable, 0);
+    std::vector<char> interact_pins(d.num_movable, 0); // permanent holds
     require(movable_holds.size() == size_t(d.num_movable) &&
                 std::all_of(movable_holds.begin(), movable_holds.end(),
                             [](int n) { return n >= 0; }),
             "invalid GP continuation movable holds");
     const auto can_move = [&](int i) {
-      return active(i) && (i >= d.num_movable || movable_holds[i] == 0);
+      return active(i) && (i >= d.num_movable ||
+                           (movable_holds[i] == 0 && !interact_pins[i]));
     };
     // Area without the halo padding a place() wrapper added to node_size.
     const auto physical_area = [&](int i) {
@@ -2951,7 +2975,62 @@ Result place(Design &design, const Options &options, GpState *state,
                                            : o.local_density_weight});
     int search_round = 0;
     bool tuned = o.trial_tuning.has_value();
-    for (int iter = 0; iter < o.max_iterations; ++iter) {
+    // Interactive host (Options::interact): applies pins/releases, returns the requested extension.
+    const auto interact_apply = [&](int global_next, bool first, bool finishing) -> int {
+      const InteractView view{&model, x.data(), y.data(), int(original),
+                              global_next, first, finishing};
+      const auto update = o.interact(view);
+      bool changed = false;
+      for (const int i : update.releases) {
+        require(i >= 0 && i < d.num_movable, "invalid interactive release");
+        changed |= interact_pins[i] != 0;
+        interact_pins[i] = 0;
+      }
+      for (const auto &pin : update.pins) {
+        const int i = pin.node;
+        require(i >= 0 && i < d.num_movable && finite(pin.x) && finite(pin.y),
+                "invalid interactive pin");
+        double px = pin.x, py = pin.y;
+        project(i, px, py); // clamp into the legal origin bounds
+        changed |= !interact_pins[i] || x[i] != px || y[i] != py;
+        interact_pins[i] = 1;
+        x[i] = d.node_x[i] = model.node_x[i] = px;
+        y[i] = d.node_y[i] = model.node_y[i] = py;
+      }
+      if (changed || (finishing && update.extend > 0)) {
+        invalidate_external_route();
+        t = 1;
+        prev_x = x;
+        prev_y = y;
+        restart = true;
+        last_checkpoint = global_next;
+        convergence.previous_hpwl = -1;
+        convergence.previous_inflation = -1;
+        convergence.stable_samples = 0;
+        previous_hpwl = -1;
+        best_feasible_x.clear();
+        best_feasible_y.clear();
+        best_feasible_hpwl = std::numeric_limits<double>::infinity();
+      }
+      return finishing ? std::max(0, update.extend) : 0;
+    };
+    int max_iter = o.max_iterations, forced_until = 0;
+    const auto try_extend = [&](int next_iter, int global_next) {
+      if (!o.interact || o.interact_interval <= 0) {
+        return false;
+      }
+      const int extra = interact_apply(global_next, false, true);
+      if (extra <= 0) {
+        return false;
+      }
+      max_iter = forced_until = next_iter + extra;
+      r.converged = r.density_stalled = false;
+      return true;
+    };
+    for (int iter = 0;; ++iter) {
+      if (iter >= max_iter && !try_extend(iter, offset + iter)) {
+        break;
+      }
       const int global_iter = offset + iter;
       bool retain_checkpoint = false;
       restored_selection = 0;
@@ -3998,6 +4077,10 @@ Result place(Design &design, const Options &options, GpState *state,
           forget_feasible();
         }
       }
+      if (o.interact && o.interact_interval > 0 &&
+          (iter == 0 || (global_iter + 1) % o.interact_interval == 0)) {
+        interact_apply(global_iter + 1, iter == 0, false);
+      }
       if (o.terminal_update && o.terminal_interval > 0 &&
           (global_iter + 1) % o.terminal_interval == 0) {
         Design snapshot = model;
@@ -4788,16 +4871,24 @@ Result place(Design &design, const Options &options, GpState *state,
         const bool magnet_ready =
             !o.magnet_runtime || o.magnet_runtime->ready(global_iter + 1);
         if (!o.trial_tuning && magnet_ready && geometry_ready &&
+            iter + 1 >= forced_until &&
             ((!o.post_density_factor && !probe_deadline &&
               active_route != RouteModel::uroute &&
               active_route != RouteModel::external && !learned_ladder) ||
              r.objective_converged)) {
           r.density_stalled = r.overflow > o.stop_overflow;
           r.converged = !r.density_stalled;
+          if (try_extend(iter + 1, global_iter + 1)) {
+            continue;
+          }
           break;
         }
         if (iter + 1 >= o.min_slice_iterations && !o.trial_tuning &&
-            r.continuation_limit && macro_pulls_ready && magnet_ready) {
+            iter + 1 >= forced_until && r.continuation_limit &&
+            macro_pulls_ready && magnet_ready) {
+          if (try_extend(iter + 1, global_iter + 1)) {
+            continue;
+          }
           break;
         }
         const bool post_sample = track_post_density && !pin_timing_seen &&

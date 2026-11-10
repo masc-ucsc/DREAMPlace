@@ -291,6 +291,14 @@ belongs only to that transaction; ordinary rebinds still reject changed fixed
 poses. The same particle retention, gradient invalidation and atomic rollback
 rules apply.
 
+`Options::interact` (`interact_interval`) is the interactive-host hook: called every N GP steps (and
+once at the first step of each `place()` call, `view.first`) with the solver's physical positions, it may
+block, and may return pins (permanent holds that overwrite a movable cell or macro position, mask it from
+the Nesterov step and gradient and keep its density and wirelength terms) and releases. When the solve is
+about to stop it is called once more with `view.finishing`; `extend > 0` then runs that many more steps
+with the stop rules deferred. An installed hook that returns nothing changes no result. `interact_smoke`
+covers neutrality, cell and macro pins, release and extension.
+
 `min_slice_iterations` requires that many additional steps in the current call,
 independently of the accumulated GP clock and old convergence deadline. It must
 not exceed `max_iterations`. LiveHD's placement session uses this for timed

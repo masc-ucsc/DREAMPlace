@@ -232,6 +232,22 @@ struct MovablePosition {
   int fix_iterations =
       0; // hold for this many subsequent GP steps, then release
 };
+// Read-only view of the live solve; x/y hold `count` physical nodes (fillers
+// hidden) in the design's node order.
+struct InteractView {
+  const Design *design = nullptr; // sizes, kinds, num_movable, layout
+  const double *x = nullptr, *y = nullptr;
+  int count = 0, iteration = 0;
+  bool first = false; // first call of this place() call: pins are not carried over
+  // The solve is about to stop (converged, continuation limit or iteration
+  // cap): the host may answer with extend > 0 to run that many more steps.
+  bool finishing = false;
+};
+struct InteractUpdate {
+  std::vector<MovablePosition> pins; // fix_iterations ignored: held until released
+  std::vector<int> releases;
+  int extend = 0; // only honored when view.finishing; stop rules wait for it
+};
 class UrouteContext;
 struct RudyResult;
 enum class RouteModel { off, rudy, rsmt, automatic, uroute, external };
@@ -403,6 +419,17 @@ struct Options {
   int movable_interval = 0;
   std::function<std::vector<MovablePosition>(const Design &, int)>
       movable_update;
+  // Interactive host (LiveHD `--gui`): called every interact_interval GP steps
+  // with the solver's live positions. The call may block (a paused session).
+  // It never changes how the solve runs until it returns a pin or release: a
+  // pin is a permanent hold (movable macros included) that overwrites the node
+  // position and masks it from the Nesterov step and gradient, keeping its
+  // density charge and wirelength terms; a release makes it movable again.
+  // Any applied pin/release restarts momentum like a movable_update move. It is
+  // also called once at the first step of every place() call (view.first), since
+  // pins live only inside one call; the host re-sends the ones it still wants.
+  int interact_interval = 0;
+  std::function<InteractUpdate(const InteractView &)> interact;
   int checkpoint_interval = 0;
   // Descending density thresholds, each consumed once per stage. In this mode
   // interval bounds cheap density sampling only; no forced off-threshold STA.

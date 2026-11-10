@@ -216,6 +216,14 @@ cc_test(
 )
 
 cc_test(
+    name = "interact_smoke",
+    size = "small",
+    timeout = "short",
+    srcs = ["interact_smoke.cpp"],
+    deps = [":placer"],
+)
+
+cc_test(
     name = "gp_hooks_smoke",
     size = "small",
     timeout = "short",
