@@ -296,7 +296,10 @@ once at the first step of each `place()` call, `view.first`) with the solver's p
 block, and may return pins (permanent holds that overwrite a movable cell or macro position, mask it from
 the Nesterov step and gradient and keep its density and wirelength terms) and releases. When the solve is
 about to stop it is called once more with `view.finishing`; `extend > 0` then runs that many more steps
-with the stop rules deferred. An installed hook that returns nothing changes no result. `interact_smoke`
+with the stop rules deferred. With `interact_centroids` the view also carries every centroid group's current
+centroid, and the update can set per-group world targets (`centroid_targets`, which freeze the other groups at
+their current centroids) or release them; the design's own targets are restored when the GP loop exits. An
+installed hook that returns nothing changes no result. `interact_smoke`
 covers neutrality, cell and macro pins, release and extension.
 
 `min_slice_iterations` requires that many additional steps in the current call,

@@ -101,6 +101,63 @@ int main() {
     };
     const auto result = place(more, o);
     check(finishing == 2 && result.iterations == 55);
+    // Centroid targets: dragging a group's target pulls its members; release restores the moving centroids.
+    {
+      Design d;
+      d.layout = {0, 0, 1000, 1000, 1, 1};
+      d.num_movable = 8;
+      d.node_x = {100, 160, 220, 600, 660, 720, 300, 900, 950};
+      d.node_y = {200, 230, 260, 500, 530, 560, 400, 100, 950};
+      d.node_size_x = d.node_size_y = {30, 30, 30, 30, 30, 30, 1, 1, 1};
+      d.node_macro = {1, 1, 1, 1, 1, 1, 0, 0, 0};
+      d.centroid_node_area = {900, 900, 900, 900, 900, 900, 1, 1, 1};
+      d.node_centroid_color = {0, 1, 2, 0, 3, 4, 0, 0, -1};
+      d.centroid_color_names = {"shared", "a1", "a2", "b1", "b2"};
+      d.pin2node = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+      d.pin_offset_x.assign(9, 1);
+      d.pin_offset_y.assign(9, 1);
+      d.flat_net2pin = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+      d.flat_net2pin_start = {0, 4, 9};
+      d.build_maps();
+      const std::vector<std::string> paths = {"top.a.m0", "top.a.m1", "top.a.m2", "top.b.m0", "top.b.m1",
+                                              "top.b.m2", "top.a.logic", "outside.logic", "fixed"};
+      const std::vector<std::string> masters = {"ram", "ram", "ram", "ram", "ram", "ram", "and", "and", "and"};
+      d.centroid_groups = detail::centroid_candidates(d, paths, masters, 2000, 2);
+      d.validate();
+      Options oc;
+      oc.max_iterations = 120;
+      oc.bins_x = oc.bins_y = 8;
+      oc.add_fillers = oc.legalize = oc.detailed_place = false;
+      oc.centroid_weight = .25;
+      oc.centroid_ramp = 20;
+      oc.target_density = 1;
+      auto plain = d, dragged = d;
+      place(plain, oc);
+      const auto before = detail::centroid_summary(plain);
+      check(before.size() == 2);
+      oc.interact_interval = 10;
+      oc.interact_centroids = true;
+      int seen = 0;
+      oc.interact = [&](const InteractView &v) {
+        InteractUpdate u;
+        if (v.centroids) {
+          check(v.centroids->size() == 2);
+          ++seen;
+        }
+        if (v.iteration == 20) {
+          u.centroid_targets = {{0, 100, 900}};  // drag group 0 to the top-left corner
+        }
+        return u;
+      };
+      place(dragged, oc);
+      const auto after = detail::centroid_summary(dragged);
+      check(seen > 5);
+      check(dragged.centroid_targets.empty());  // the caller's design is not rewritten
+      const double d_plain = std::hypot(before[0].x - 100, before[0].y - 900);
+      const double d_drag = std::hypot(after[0].x - 100, after[0].y - 900);
+      std::cout << "centroid 0 distance to target: plain " << d_plain << " dragged " << d_drag << "\n";
+      check(d_drag < d_plain - 10);  // the group's members follow its dragged target
+    }
     std::cout << "interact smoke ok\n";
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";

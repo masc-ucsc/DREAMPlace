@@ -1655,7 +1655,8 @@ Result place(Design &design, const Options &options, GpState *state,
         }
         auto update = o.interact(
             InteractView{&design, px.data(), py.data(), view.count,
-                         view.iteration, view.first, view.finishing});
+                         view.iteration, view.first, view.finishing,
+                         view.centroids});
         for (auto &pin : update.pins) {
           require(pin.node >= 0 && pin.node < design.num_movable,
                   "invalid interactive pin index");
@@ -2975,12 +2976,46 @@ Result place(Design &design, const Options &options, GpState *state,
                                            : o.local_density_weight});
     int search_round = 0;
     bool tuned = o.trial_tuning.has_value();
+    const auto interact_orig_targets = d.centroid_targets;
+    // The host's design must not keep targets the user dragged: restore on every exit of the GP loop.
+    struct RestoreTargets {
+      Design &design;
+      const std::vector<std::pair<double, double>> &original;
+      ~RestoreTargets() { design.centroid_targets = original; }
+    } restore_targets{d, interact_orig_targets};
     // Interactive host (Options::interact): applies pins/releases, returns the requested extension.
     const auto interact_apply = [&](int global_next, bool first, bool finishing) -> int {
-      const InteractView view{&model, x.data(), y.data(), int(original),
-                              global_next, first, finishing};
+      std::vector<CentroidSample> centroid_view;
+      if (o.interact_centroids && !d.centroid_groups.empty()) {
+        centroid_view = detail::centroid_summary(d);
+      }
+      InteractView view{&model, x.data(), y.data(), int(original),
+                        global_next, first, finishing};
+      if (!centroid_view.empty()) {
+        view.centroids = &centroid_view;
+      }
       const auto update = o.interact(view);
       bool changed = false;
+      const bool moving_parents = o.centroid_parent_weight > 0 && interact_orig_targets.empty();
+      if (update.release_centroids && !moving_parents) {
+        changed |= d.centroid_targets != interact_orig_targets;
+        d.centroid_targets = interact_orig_targets;
+      }
+      if (!update.centroid_targets.empty() && !moving_parents &&
+          !d.centroid_groups.empty()) {
+        if (d.centroid_targets.empty()) {
+          for (const auto &c : detail::centroid_summary(d)) {
+            d.centroid_targets.emplace_back(c.x, c.y);
+          }
+        }
+        for (const auto &t : update.centroid_targets) {
+          require(t.group >= 0 && size_t(t.group) < d.centroid_groups.size() &&
+                      finite(t.x) && finite(t.y),
+                  "invalid interactive centroid target");
+          d.centroid_targets[t.group] = {t.x, t.y};
+          changed = true;
+        }
+      }
       for (const int i : update.releases) {
         require(i >= 0 && i < d.num_movable, "invalid interactive release");
         changed |= interact_pins[i] != 0;

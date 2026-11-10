@@ -242,11 +242,23 @@ struct InteractView {
   // The solve is about to stop (converged, continuation limit or iteration
   // cap): the host may answer with extend > 0 to run that many more steps.
   bool finishing = false;
+  // Current centroid of every centroid group (Options::interact_centroids), else null.
+  const std::vector<CentroidSample> *centroids = nullptr;
+};
+struct CentroidTargetUpdate {
+  int group = -1;
+  double x = 0, y = 0;
 };
 struct InteractUpdate {
   std::vector<MovablePosition> pins; // fix_iterations ignored: held until released
   std::vector<int> releases;
   int extend = 0; // only honored when view.finishing; stop rules wait for it
+  // Pull centroid groups to world-coordinate targets. The first one freezes the
+  // other groups at their current centroids (a frozen-target solve); release
+  // restores the design's own targets (moving centroids when it had none).
+  // Ignored when moving parent-centroid attraction is active.
+  std::vector<CentroidTargetUpdate> centroid_targets;
+  bool release_centroids = false;
 };
 class UrouteContext;
 struct RudyResult;
@@ -429,6 +441,7 @@ struct Options {
   // also called once at the first step of every place() call (view.first), since
   // pins live only inside one call; the host re-sends the ones it still wants.
   int interact_interval = 0;
+  bool interact_centroids = false; // fill InteractView::centroids (an O(nodes) pass per call)
   std::function<InteractUpdate(const InteractView &)> interact;
   int checkpoint_interval = 0;
   // Descending density thresholds, each consumed once per stage. In this mode
