@@ -15,12 +15,6 @@
 
 namespace DreamPlace {
 template <typename T>
-int computeWeightedAverageWirelengthMergedLauncher(const T *, const T *,
-                                                   const int *, const int *,
-                                                   const unsigned char *, int,
-                                                   const T *, T *, T *, T *,
-                                                   int);
-template <typename T>
 int kreorderCPULauncher(DetailedPlaceDB<T> &, int, int, int);
 template <typename T> int globalSwapCPULauncher(DetailedPlaceDB<T>, int, int);
 template <typename T>
@@ -160,23 +154,90 @@ bool kernel_is_legal(const Design &d) {
       l.site_width, l.row_height, 1.0, d.node_x.size(), d.num_movable, 0);
 }
 
+// Weighted-average wirelength and its gradient, in the solver precision (Real).
+//
+//   WL(net) = sum(x e^(x/g)) / sum(e^(x/g)) - sum(x e^(-x/g)) / sum(e^(-x/g))   (and the same in y)
+//
+// The value and the gradient do not change when every pin of a net moves by
+// the same amount, so each net is evaluated in its own coordinates: u = x -
+// x_min, taken in the precision of the design arrays and only then narrowed.
+// A net spans far less than the die, so 24 bits hold u to a small fraction of
+// a site, where they would hold an absolute DBU coordinate to about one DBU
+// and lose half of that again in the cancellation (1 - b * sum(x e)) of the
+// gradient. Sums over nets (the objective, a node's gradient) stay double.
+//
+// Each exponential is evaluated once: the pass that forms the sums keeps the
+// four values per pin for the pass that forms the gradient.
 Gradient wirelength(const Design &d, double gamma, int threads) {
   const int n = d.node_x.size(), p = d.pin2node.size(),
             nets = d.net_weights.size();
-  std::vector<double> x(p), y(p), gx(p), gy(p), wl(nets);
-  for (int i = 0; i < p; ++i) {
-    x[i] = d.node_x[d.pin2node[i]] + d.pin_offset_x[i];
-    y[i] = d.node_y[d.pin2node[i]] + d.pin_offset_y[i];
+  const Real inv = static_cast<Real>(1 / gamma);
+  std::vector<Real> gx(p), gy(p), wl(nets);
+#pragma omp parallel num_threads(threads) if (threads > 1)
+  {
+    // Per pin of the net at hand: position relative to the net, then the
+    // four exponentials.
+    std::vector<Real> u, v, ex, enx, ey, eny;
+#pragma omp for schedule(dynamic, 1024)
+    for (int i = 0; i < nets; ++i) {
+      if (!d.net_mask[i])
+        continue;
+      const int begin = d.flat_net2pin_start[i],
+                end = d.flat_net2pin_start[i + 1], degree = end - begin;
+      double x_min = std::numeric_limits<double>::max(), x_max = -x_min,
+             y_min = x_min, y_max = -x_min;
+      for (int j = begin; j < end; ++j) {
+        const int pin = d.flat_net2pin[j];
+        const double x = d.node_x[d.pin2node[pin]] + d.pin_offset_x[pin],
+                     y = d.node_y[d.pin2node[pin]] + d.pin_offset_y[pin];
+        x_min = std::min(x_min, x);
+        x_max = std::max(x_max, x);
+        y_min = std::min(y_min, y);
+        y_max = std::max(y_max, y);
+      }
+      if (static_cast<int>(u.size()) < degree) {
+        for (auto *buffer : {&u, &v, &ex, &enx, &ey, &eny})
+          buffer->resize(degree);
+      }
+      const Real span_x = static_cast<Real>(x_max - x_min),
+                  span_y = static_cast<Real>(y_max - y_min);
+      Real xe = 0, xen = 0, e = 0, en = 0, ye = 0, yen = 0, f = 0, fn = 0;
+      for (int k = 0; k < degree; ++k) {
+        const int pin = d.flat_net2pin[begin + k];
+        u[k] = static_cast<Real>(d.node_x[d.pin2node[pin]] +
+                                  d.pin_offset_x[pin] - x_min);
+        v[k] = static_cast<Real>(d.node_y[d.pin2node[pin]] +
+                                  d.pin_offset_y[pin] - y_min);
+        ex[k] = std::exp((u[k] - span_x) * inv);
+        enx[k] = std::exp(-u[k] * inv);
+        ey[k] = std::exp((v[k] - span_y) * inv);
+        eny[k] = std::exp(-v[k] * inv);
+        xe += u[k] * ex[k];
+        xen += u[k] * enx[k];
+        e += ex[k];
+        en += enx[k];
+        ye += v[k] * ey[k];
+        yen += v[k] * eny[k];
+        f += ey[k];
+        fn += eny[k];
+      }
+      wl[i] = xe / e - xen / en + ye / f - yen / fn;
+      const Real b_x = inv / e, a_x = (1 - b_x * xe) / e, b_nx = -inv / en,
+                  a_nx = (1 - b_nx * xen) / en, b_y = inv / f,
+                  a_y = (1 - b_y * ye) / f, b_ny = -inv / fn,
+                  a_ny = (1 - b_ny * yen) / fn;
+      for (int k = 0; k < degree; ++k) {
+        const int pin = d.flat_net2pin[begin + k];
+        gx[pin] = (a_x + b_x * u[k]) * ex[k] - (a_nx + b_nx * u[k]) * enx[k];
+        gy[pin] = (a_y + b_y * v[k]) * ey[k] - (a_ny + b_ny * v[k]) * eny[k];
+      }
+    }
   }
-  double inv = 1 / gamma;
-  computeWeightedAverageWirelengthMergedLauncher<double>(
-      x.data(), y.data(), d.flat_net2pin.data(), d.flat_net2pin_start.data(),
-      d.net_mask.data(), nets, &inv, wl.data(), gx.data(), gy.data(), threads);
   Gradient g;
   g.x.resize(n);
   g.y.resize(n);
   for (int i = 0; i < nets; ++i)
-    g.value += wl[i] * d.net_weights[i];
+    g.value += static_cast<double>(wl[i]) * d.net_weights[i];
   for (int i = 0; i < p; ++i) {
     double w = d.net_weights[d.pin2net[i]];
     g.x[d.pin2node[i]] += w * gx[i];

@@ -12,6 +12,9 @@ void check(bool ok, const char *message) {
   if (!ok)
     throw std::runtime_error(message);
 }
+// Agreement with the general wirelength kernel, which runs in the solver
+// precision (Real); the pin-timing force itself is evaluated in double.
+const double wa_eps = sizeof(Real) == sizeof(float) ? 2e-5 : 1e-12;
 void near(double a, double b, double eps, const char *message) {
   check(std::abs(a - b) <= eps, message);
 }
@@ -99,12 +102,12 @@ void pair_wirelength_oracle() {
   for (double gamma : {.1, .7, 5.}) {
     const auto timing = detail::pin_timing_force(d, gamma);
     const auto ordinary = detail::wirelength(d, gamma, 1);
-    near(timing.value, ordinary.value, 1e-12,
+    near(timing.value, ordinary.value, wa_eps,
          "pin smoothing differs from native two-pin WA");
     for (size_t i = 0; i < d.node_x.size(); ++i) {
-      near(timing.x[i], ordinary.x[i], 1e-12,
+      near(timing.x[i], ordinary.x[i], wa_eps,
            "pin gradient differs from native two-pin WA");
-      near(timing.y[i], ordinary.y[i], 1e-12,
+      near(timing.y[i], ordinary.y[i], wa_eps,
            "pin y gradient differs from native two-pin WA");
     }
   }
@@ -381,10 +384,10 @@ void gap_two_pin_oracle() {
   for (double gamma : {.1, .7, 5.}) {
     const auto g = detail::pin_timing_force(d, gamma);
     const auto oracle = detail::wirelength(pair, gamma, 1);
-    near(g.value, .2 * oracle.value, 1e-12,
+    near(g.value, .2 * oracle.value, wa_eps,
          "gap target differs from fixed two-pin WA oracle");
-    near(g.x[1], .2 * oracle.x[0], 1e-12, "gap x force differs from WA oracle");
-    near(g.y[1], .2 * oracle.y[0], 1e-12, "gap y force differs from WA oracle");
+    near(g.x[1], .2 * oracle.x[0], wa_eps, "gap x force differs from WA oracle");
+    near(g.y[1], .2 * oracle.y[0], wa_eps, "gap y force differs from WA oracle");
     near(g.x[2], 0, 0, "gap applied force to an unrelated sink");
   }
 }

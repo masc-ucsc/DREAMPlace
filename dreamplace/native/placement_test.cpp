@@ -864,17 +864,22 @@ void gradients() {
   d.node_x[1] += 2.4;
   d.node_y[3] -= 0.7;
   auto g = detail::wirelength(d, 1.7, 2);
+  // A central difference of the value against the analytic gradient. The
+  // value carries the kernel precision, so in single precision the step has
+  // to be large enough to rise above its rounding (and the agreement is then
+  // bounded by the step's own truncation error).
+  const bool single = sizeof(Real) == sizeof(float);
   for (int i = 0; i < d.num_movable; ++i)
     for (int axis = 0; axis < 2; ++axis) {
       auto &pos = axis ? d.node_y : d.node_x;
-      double old = pos[i], eps = 1e-5;
+      double old = pos[i], eps = single ? 2e-2 : 1e-5;
       pos[i] = old + eps;
       double plus = detail::wirelength(d, 1.7, 1).value;
       pos[i] = old - eps;
       double minus = detail::wirelength(d, 1.7, 1).value;
       pos[i] = old;
-      near((plus - minus) / (2 * eps), axis ? g.y[i] : g.x[i], 2e-7,
-           "weighted WA gradient");
+      near((plus - minus) / (2 * eps), axis ? g.y[i] : g.x[i],
+           single ? 2e-3 : 2e-7, "weighted WA gradient");
     }
   // Large absolute coordinates must not cause exp() overflow.
   for (auto &x : d.node_x)

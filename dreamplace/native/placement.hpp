@@ -20,6 +20,19 @@
 #include "macro_legalize/src/alignment.h"
 
 namespace DreamPlace::native {
+// The precision of the solver's numeric kernels: single. A design is tens of
+// millions of pins, single precision halves its arrays and is what a GPU
+// runs well; positions that must be exact (legal sites) are integers and do
+// not go through it. A kernel written against Real keeps its accuracy by
+// working in local coordinates (relative to the net, the bin, the row) and
+// by accumulating long sums in double. -DDREAMPLACE_NATIVE_REAL=double builds
+// the same kernels in double, to tell a precision effect from an algorithmic
+// one.
+#ifndef DREAMPLACE_NATIVE_REAL
+#define DREAMPLACE_NATIVE_REAL float
+#endif
+using Real = DREAMPLACE_NATIVE_REAL;
+
 
 struct Layout {
   double xl = 0, yl = 0, xh = 0, yh = 0;
