@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -154,6 +156,48 @@ bool kernel_is_legal(const Design &d) {
       l.site_width, l.row_height, 1.0, d.node_x.size(), d.num_movable, 0);
 }
 
+// exp(x) for x <= 0 in single precision, four values at a time: no call, no
+// branch, no table. x = k ln2 + r with |r| <= ln2/2 (Cody-Waite reduction),
+// exp(r) by the Cephes expf polynomial, and 2^k built from its bits.
+// Arguments below -87 are clamped (the result, 1.6e-38, is still a normal
+// float and is zero for every purpose here). Relative error is under 1e-7,
+// the precision of the type; unlike libm's it is the same arithmetic on every
+// host. The vector types are the compiler's generic ones (SSE2 or NEON
+// without any target flag), so this does not depend on how the library is
+// built.
+using Float4 = float __attribute__((vector_size(16)));
+using Int4 = std::int32_t __attribute__((vector_size(16)));
+inline Float4 exp_nonpositive(Float4 x) {
+  const Float4 floor = {-87.0f, -87.0f, -87.0f, -87.0f};
+  x = x < floor ? floor : x;
+  const Float4 t = x * 1.44269504088896341f;
+  const Int4 k = __builtin_convertvector(t - 0.5f, Int4); // nearest, t <= 0
+  const Float4 kf = __builtin_convertvector(k, Float4);
+  const Float4 r = (x - kf * 0.693359375f) - kf * -2.12194440e-4f;
+  Float4 poly = r * 1.9875691500e-4f + 1.3981999507e-3f;
+  poly = poly * r + 8.3334519073e-3f;
+  poly = poly * r + 4.1665795894e-2f;
+  poly = poly * r + 1.6666665459e-1f;
+  poly = poly * r + 5.0000001201e-1f;
+  const Float4 value = (poly * r * r + r) + 1.0f;
+  const Int4 bits = (k + 127) << 23;
+  return value * reinterpret_cast<Float4>(bits);
+}
+// values[0..count) <- exp(values[k]); every value is <= 0 and `count` is a
+// multiple of four.
+inline void exp_nonpositive(float *values, int count) {
+  for (int k = 0; k < count; k += 4) {
+    Float4 x;
+    std::memcpy(&x, values + k, sizeof(x));
+    x = exp_nonpositive(x);
+    std::memcpy(values + k, &x, sizeof(x));
+  }
+}
+inline void exp_nonpositive(double *values, int count) {
+  for (int k = 0; k < count; ++k)
+    values[k] = std::exp(values[k]);
+}
+
 // Weighted-average wirelength and its gradient, in the solver precision (Real).
 //
 //   WL(net) = sum(x e^(x/g)) / sum(e^(x/g)) - sum(x e^(-x/g)) / sum(e^(-x/g))   (and the same in y)
@@ -166,70 +210,118 @@ bool kernel_is_legal(const Design &d) {
 // and lose half of that again in the cancellation (1 - b * sum(x e)) of the
 // gradient. Sums over nets (the objective, a node's gradient) stay double.
 //
-// Each exponential is evaluated once: the pass that forms the sums keeps the
-// four values per pin for the pass that forms the gradient.
+// The exponentials are the cost of this kernel (four per pin). They are
+// evaluated once, a block of nets at a time: the nets of a block lay their
+// arguments out in flat arrays, one vectorized loop turns them into
+// exponentials, and the nets then form their sums and gradients from them.
 Gradient wirelength(const Design &d, double gamma, int threads) {
   const int n = d.node_x.size(), p = d.pin2node.size(),
             nets = d.net_weights.size();
   const Real inv = static_cast<Real>(1 / gamma);
   std::vector<Real> gx(p), gy(p), wl(nets);
+  // A block ends once it holds this many pins (a net is never split).
+  constexpr int block_pins = 2048;
 #pragma omp parallel num_threads(threads) if (threads > 1)
   {
-    // Per pin of the net at hand: position relative to the net, then the
-    // four exponentials.
-    std::vector<Real> u, v, ex, enx, ey, eny;
-#pragma omp for schedule(dynamic, 1024)
-    for (int i = 0; i < nets; ++i) {
-      if (!d.net_mask[i])
-        continue;
-      const int begin = d.flat_net2pin_start[i],
-                end = d.flat_net2pin_start[i + 1], degree = end - begin;
-      double x_min = std::numeric_limits<double>::max(), x_max = -x_min,
-             y_min = x_min, y_max = -x_min;
-      for (int j = begin; j < end; ++j) {
-        const int pin = d.flat_net2pin[j];
-        const double x = d.node_x[d.pin2node[pin]] + d.pin_offset_x[pin],
-                     y = d.node_y[d.pin2node[pin]] + d.pin_offset_y[pin];
-        x_min = std::min(x_min, x);
-        x_max = std::max(x_max, x);
-        y_min = std::min(y_min, y);
-        y_max = std::max(y_max, y);
+    // Per pin of the block: position relative to its net; then the arguments
+    // and, after the vectorized pass, the values of the four exponentials
+    // (x up, x down, y up, y down), stored one kind after the other.
+    std::vector<Real> u(block_pins), v(block_pins), e(4 * block_pins);
+    std::vector<int> block_nets;
+    const auto flush = [&](int pins) {
+      const int stride = static_cast<int>(u.size());
+      // Rounded up to whole vectors: the buffers are multiples of four and
+      // the slots past `pins` hold old arguments, all <= 0.
+      for (int kind = 0; kind < 4; ++kind)
+        exp_nonpositive(e.data() + static_cast<size_t>(kind) * stride,
+                        (pins + 3) & ~3);
+      int at = 0;
+      const Real *ex = e.data(), *enx = ex + stride, *ey = enx + stride,
+                 *eny = ey + stride;
+      for (const int i : block_nets) {
+        const int begin = d.flat_net2pin_start[i],
+                  degree = d.flat_net2pin_start[i + 1] - begin;
+        Real xe = 0, xen = 0, es = 0, ens = 0, ye = 0, yen = 0, fs = 0, fns = 0;
+        for (int k = at; k < at + degree; ++k) {
+          xe += u[k] * ex[k];
+          xen += u[k] * enx[k];
+          es += ex[k];
+          ens += enx[k];
+          ye += v[k] * ey[k];
+          yen += v[k] * eny[k];
+          fs += ey[k];
+          fns += eny[k];
+        }
+        wl[i] = xe / es - xen / ens + ye / fs - yen / fns;
+        const Real b_x = inv / es, a_x = (1 - b_x * xe) / es, b_nx = -inv / ens,
+                   a_nx = (1 - b_nx * xen) / ens, b_y = inv / fs,
+                   a_y = (1 - b_y * ye) / fs, b_ny = -inv / fns,
+                   a_ny = (1 - b_ny * yen) / fns;
+        for (int k = at; k < at + degree; ++k) {
+          const int pin = d.flat_net2pin[begin + k - at];
+          gx[pin] = (a_x + b_x * u[k]) * ex[k] - (a_nx + b_nx * u[k]) * enx[k];
+          gy[pin] = (a_y + b_y * v[k]) * ey[k] - (a_ny + b_ny * v[k]) * eny[k];
+        }
+        at += degree;
       }
-      if (static_cast<int>(u.size()) < degree) {
-        for (auto *buffer : {&u, &v, &ex, &enx, &ey, &eny})
-          buffer->resize(degree);
+      block_nets.clear();
+    };
+    int used = 0; // pins laid out in the current block
+#pragma omp for schedule(static)
+    for (int first = 0; first < nets; first += 256) {
+      // A group of nets per iteration, so that blocks do not straddle the
+      // ranges the workers are given.
+      const int last = std::min(nets, first + 256);
+      for (int i = first; i < last; ++i) {
+        if (!d.net_mask[i])
+          continue;
+        const int begin = d.flat_net2pin_start[i],
+                  end = d.flat_net2pin_start[i + 1], degree = end - begin;
+        if (used + degree > static_cast<int>(u.size())) {
+          if (used != 0) {
+            flush(used);
+            used = 0;
+          }
+          if (degree > static_cast<int>(u.size())) {
+            const int room = (degree + 3) & ~3; // whole vectors
+            u.resize(room);
+            v.resize(room);
+            e.assign(4 * static_cast<size_t>(room), 0);
+          }
+        }
+        double x_min = std::numeric_limits<double>::max(), x_max = -x_min,
+               y_min = x_min, y_max = -x_min;
+        for (int j = begin; j < end; ++j) {
+          const int pin = d.flat_net2pin[j];
+          const double x = d.node_x[d.pin2node[pin]] + d.pin_offset_x[pin],
+                       y = d.node_y[d.pin2node[pin]] + d.pin_offset_y[pin];
+          x_min = std::min(x_min, x);
+          x_max = std::max(x_max, x);
+          y_min = std::min(y_min, y);
+          y_max = std::max(y_max, y);
+        }
+        const Real span_x = static_cast<Real>(x_max - x_min),
+                   span_y = static_cast<Real>(y_max - y_min);
+        const int stride = static_cast<int>(u.size());
+        Real *ex = e.data(), *enx = ex + stride, *ey = enx + stride,
+             *eny = ey + stride;
+        for (int j = begin; j < end; ++j) {
+          const int pin = d.flat_net2pin[j], k = used + j - begin;
+          u[k] = static_cast<Real>(d.node_x[d.pin2node[pin]] +
+                                   d.pin_offset_x[pin] - x_min);
+          v[k] = static_cast<Real>(d.node_y[d.pin2node[pin]] +
+                                   d.pin_offset_y[pin] - y_min);
+          ex[k] = (u[k] - span_x) * inv;
+          enx[k] = -u[k] * inv;
+          ey[k] = (v[k] - span_y) * inv;
+          eny[k] = -v[k] * inv;
+        }
+        block_nets.push_back(i);
+        used += degree;
       }
-      const Real span_x = static_cast<Real>(x_max - x_min),
-                  span_y = static_cast<Real>(y_max - y_min);
-      Real xe = 0, xen = 0, e = 0, en = 0, ye = 0, yen = 0, f = 0, fn = 0;
-      for (int k = 0; k < degree; ++k) {
-        const int pin = d.flat_net2pin[begin + k];
-        u[k] = static_cast<Real>(d.node_x[d.pin2node[pin]] +
-                                  d.pin_offset_x[pin] - x_min);
-        v[k] = static_cast<Real>(d.node_y[d.pin2node[pin]] +
-                                  d.pin_offset_y[pin] - y_min);
-        ex[k] = std::exp((u[k] - span_x) * inv);
-        enx[k] = std::exp(-u[k] * inv);
-        ey[k] = std::exp((v[k] - span_y) * inv);
-        eny[k] = std::exp(-v[k] * inv);
-        xe += u[k] * ex[k];
-        xen += u[k] * enx[k];
-        e += ex[k];
-        en += enx[k];
-        ye += v[k] * ey[k];
-        yen += v[k] * eny[k];
-        f += ey[k];
-        fn += eny[k];
-      }
-      wl[i] = xe / e - xen / en + ye / f - yen / fn;
-      const Real b_x = inv / e, a_x = (1 - b_x * xe) / e, b_nx = -inv / en,
-                  a_nx = (1 - b_nx * xen) / en, b_y = inv / f,
-                  a_y = (1 - b_y * ye) / f, b_ny = -inv / fn,
-                  a_ny = (1 - b_ny * yen) / fn;
-      for (int k = 0; k < degree; ++k) {
-        const int pin = d.flat_net2pin[begin + k];
-        gx[pin] = (a_x + b_x * u[k]) * ex[k] - (a_nx + b_nx * u[k]) * enx[k];
-        gy[pin] = (a_y + b_y * v[k]) * ey[k] - (a_ny + b_ny * v[k]) * eny[k];
+      if (used != 0) {
+        flush(used);
+        used = 0;
       }
     }
   }
