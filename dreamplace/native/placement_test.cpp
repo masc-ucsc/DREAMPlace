@@ -554,14 +554,25 @@ void post_density_plateau_keeps_best_feasible_iterate() {
   options.legalize = false;
   options.detailed_place = false;
   options.routability = true;
-  options.route.model = RouteModel::rudy;
-  options.route_capacity_h = options.route_capacity_v = .0001;
+  // Hold routing demand fixed so arithmetic changes in GP cannot turn
+  // this plateau fixture into a solve that keeps improving its route score.
+  options.route.model = RouteModel::external;
+  options.route_external = [](const Design &, int bx, int by) {
+    RudyResult route;
+    route.horizontal.assign(bx * by, 2);
+    route.vertical.assign(bx * by, 0);
+    route.pin_utilization.assign(bx * by, 0);
+    detail::accumulate_overflow(route);
+    return route;
+  };
   auto kept = initial;
   const auto result = place(kept, options);
   check(result.post_density_plateau && !result.objective_converged &&
             !result.converged && result.iterations < options.max_iterations,
         "post-density drift ran on to the iteration cap");
-  check(result.post_density_best_iteration > result.density_iteration &&
+  // With a constant route score the first feasible sample may be the best.
+  check(result.density_iteration > 0 &&
+            result.post_density_best_iteration >= result.density_iteration &&
             result.selected_iteration == result.post_density_best_iteration,
         "post-density plateau did not return its retained sample");
   const auto selected = std::find_if(

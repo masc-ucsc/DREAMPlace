@@ -874,14 +874,18 @@ int main() {
       measured.push_back(sum);
     };
     motion_options.macro_motion_observer =
-        [&](const Design &, const std::vector<double> &x,
+        [&](const Design &snapshot, const std::vector<double> &x,
             const std::vector<double> &y, int iteration) {
+          // The step API measures centers. Even with fixed sizes, adding the
+          // half-size before subtracting can round differently from x - prev_x.
+          const double cx = x[0] + snapshot.node_size_x[0] / 2,
+                       cy = y[0] + snapshot.node_size_y[0] / 2;
           expected.push_back(
               previous_iteration < 0
                   ? 0
-                  : std::hypot(x[0] - previous_x, y[0] - previous_y));
-          previous_x = x[0];
-          previous_y = y[0];
+                  : std::hypot(cx - previous_x, cy - previous_y));
+          previous_x = cx;
+          previous_y = cy;
           previous_iteration = iteration;
         };
     place(measured_motion, motion_options);
