@@ -253,10 +253,39 @@ FloorplanSnap snap_floorplan(const std::vector<FloorplanCircle> &circles,
             -(local[i].radius + local[j].radius), false));
       }
     }
+    // Containment also applies when sibling separation is infeasible. Keep
+    // that finding and move each fittable circle into the core; descendants
+    // inherit the same translation as for a successful family fit.
+    const auto apply_positions = [&](std::vector<double>& position) {
+      for (size_t k = 0; k < ids.size(); ++k) {
+        const int i = ids[k];
+        // std::clamp is undefined when lo > hi; a circle wider than the core
+        // keeps its fitted center and is reported through the boundary violation.
+        if (o.contain_circles &&
+            2 * circles[i].radius <= std::min(xh - xl, yh - yl)) {
+          position[2 * k] = std::clamp(position[2 * k], xl + circles[i].radius,
+                                xh - circles[i].radius);
+          position[2 * k + 1] = std::clamp(position[2 * k + 1], yl + circles[i].radius,
+                                    yh - circles[i].radius);
+        }
+        const double dx = position[2 * k] - out.circles[i].x,
+                     dy = position[2 * k + 1] - out.circles[i].y;
+        out.circles[i].x = position[2 * k];
+        out.circles[i].y = position[2 * k + 1];
+        // Parent target translations are inherited before child-family fitting.
+        for (size_t j = i + 1; j < circles.size(); ++j)
+          if (ancestor(circles, i, j)) {
+            out.circles[j].x += dx;
+            out.circles[j].y += dy;
+          }
+      }
+    };
     std::vector<double> x;
     if (!fit(origin, weights, hard, tolerance, x)) {
       out.feasible = false;
       ++out.infeasible_families;
+      if (o.contain_circles)
+        apply_positions(origin);
       continue;
     }
     auto accept = [&](std::vector<Linear> extra, FloorplanRelation relation) {
@@ -382,28 +411,7 @@ FloorplanSnap snap_floorplan(const std::vector<FloorplanCircle> &circles,
         }
       }
     } // sibling scope
-    for (size_t k = 0; k < ids.size(); ++k) {
-      const int i = ids[k];
-      // std::clamp is undefined when lo > hi; a circle wider than the core
-      // keeps its fitted center and is reported through the boundary violation.
-      if (o.contain_circles &&
-          2 * circles[i].radius <= std::min(xh - xl, yh - yl)) {
-        x[2 * k] = std::clamp(x[2 * k], xl + circles[i].radius,
-                              xh - circles[i].radius);
-        x[2 * k + 1] = std::clamp(x[2 * k + 1], yl + circles[i].radius,
-                                  yh - circles[i].radius);
-      }
-      const double dx = x[2 * k] - out.circles[i].x,
-                   dy = x[2 * k + 1] - out.circles[i].y;
-      out.circles[i].x = x[2 * k];
-      out.circles[i].y = x[2 * k + 1];
-      // Parent target translations are inherited before child-family fitting.
-      for (size_t j = i + 1; j < circles.size(); ++j)
-        if (ancestor(circles, i, j)) {
-          out.circles[j].x += dx;
-          out.circles[j].y += dy;
-        }
-    }
+    apply_positions(x);
   }
   for (auto &r : out.relations) {
     auto coordinate = [&](int n) {

@@ -140,6 +140,13 @@ RudyResult uroute_rudy(const Design &design, const RudyOptions &options) {
   result.max_utilization =
       result.blocked_pins || result.unroutable_nets ? 2 : 0;
   for (size_t i = 0; i < count; ++i) {
+    if (!design.routing_exclusions.empty() &&
+        result.blocked_fraction.at(i) >= 1) {
+      result.horizontal[i] = result.vertical[i] = 0;
+      if (!result.drc_density.empty())
+        result.drc_density[i] = 0;
+      continue;
+    }
     const double h = result.horizontal[i], v = result.vertical[i],
                  peak = std::max(h, v);
     // Preserve the directional ratio AND max(h,v)==predicted utilization.

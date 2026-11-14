@@ -709,6 +709,10 @@ void Design::build_maps() {
 }
 
 void Design::validate() const {
+  for (const auto &r : routing_exclusions)
+    require(finite(r[0]) && finite(r[1]) && finite(r[2]) && finite(r[3]) &&
+                r[0] < r[2] && r[1] < r[3],
+            "invalid routing exclusion");
   int n = count(node_x.size()), p = count(pin2node.size()),
       nets = count(net_weights.size());
   require(num_movable >= 0 && num_movable <= n, "invalid movable count");
@@ -1657,12 +1661,15 @@ Result place(Design &design, const Options &options, GpState *state,
             InteractView{&design, px.data(), py.data(), view.count,
                          view.iteration, view.first, view.finishing,
                          view.centroids});
-        for (auto &pin : update.pins) {
-          require(pin.node >= 0 && pin.node < design.num_movable,
-                  "invalid interactive pin index");
-          pin.x -= halo(design.node_halo_x, pin.node, design.layout.site_width);
-          pin.y -= halo(design.node_halo_y, pin.node, design.layout.row_height);
-        }
+        for (auto *positions : {&update.moves, &update.pins})
+          for (auto &pin : *positions) {
+            require(pin.node >= 0 && pin.node < design.num_movable,
+                    "invalid interactive pin index");
+            pin.x -=
+                halo(design.node_halo_x, pin.node, design.layout.site_width);
+            pin.y -=
+                halo(design.node_halo_y, pin.node, design.layout.row_height);
+          }
         return update;
       };
     }
@@ -1840,6 +1847,12 @@ Result place(Design &design, const Options &options, GpState *state,
         }
       }
     }
+  }
+  if (!design.routing_exclusions.empty()) {
+    salt(design.routing_exclusions.size());
+    for (const auto &rect : design.routing_exclusions)
+      for (double edge : rect)
+        salt(std::bit_cast<uint64_t>(edge));
   }
   for (auto mask : design.node_placement_mask) {
     salt(static_cast<unsigned>(mask));
@@ -3021,17 +3034,20 @@ Result place(Design &design, const Options &options, GpState *state,
         changed |= interact_pins[i] != 0;
         interact_pins[i] = 0;
       }
-      for (const auto &pin : update.pins) {
-        const int i = pin.node;
-        require(i >= 0 && i < d.num_movable && finite(pin.x) && finite(pin.y),
-                "invalid interactive pin");
-        double px = pin.x, py = pin.y;
-        project(i, px, py); // clamp into the legal origin bounds
-        changed |= !interact_pins[i] || x[i] != px || y[i] != py;
-        interact_pins[i] = 1;
-        x[i] = d.node_x[i] = model.node_x[i] = px;
-        y[i] = d.node_y[i] = model.node_y[i] = py;
-      }
+      for (auto *positions : {&update.moves, &update.pins})
+        for (const auto &pin : *positions) {
+          const int i = pin.node;
+          require(i >= 0 && i < d.num_movable && finite(pin.x) && finite(pin.y),
+                  "invalid interactive pin");
+          double px = pin.x, py = pin.y;
+          project(i, px, py); // clamp into the legal origin bounds
+          const bool hold = positions == &update.pins;
+          changed |= (hold && !interact_pins[i]) || x[i] != px || y[i] != py;
+          if (hold)
+            interact_pins[i] = 1;
+          x[i] = d.node_x[i] = model.node_x[i] = px;
+          y[i] = d.node_y[i] = model.node_y[i] = py;
+        }
       if (changed || (finishing && update.extend > 0)) {
         invalidate_external_route();
         t = 1;

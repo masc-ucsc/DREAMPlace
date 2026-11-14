@@ -1,5 +1,6 @@
 // BSD-3-Clause. See LICENSE.
 #pragma once
+#include <array>
 #define DREAMPLACE_NATIVE_PIN_TIMING_API 3
 #define DREAMPLACE_NATIVE_DENSITY_RESERVATION_API 2
 
@@ -185,6 +186,9 @@ struct Design {
   std::vector<std::uint8_t> net_mask;
   std::optional<PinTiming> pin_timing;
   std::vector<DensityReservation> density_reservations;
+  // Rectangles in world coordinates that have no routing capacity
+  // on any layer. A placement-only keepout or a macro halo stays routable.
+  std::vector<std::array<double, 4>> routing_exclusions;
 
   // Rebuild inverse maps from net CSR and pin2node. Rejects duplicate/missing
   // pins and malformed CSR before kernels can index raw pointers.
@@ -272,6 +276,7 @@ struct InteractUpdate {
   // Ignored when moving parent-centroid attraction is active.
   std::vector<CentroidTargetUpdate> centroid_targets;
   bool release_centroids = false;
+  std::vector<MovablePosition> moves; // one-shot origins, never install a hold
 };
 class UrouteContext;
 struct RudyResult;

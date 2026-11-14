@@ -58,7 +58,7 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
   r.pin_utilization.resize(o.bins_x * o.bins_y);
   const auto &l = d.layout;
   const double dx = (l.xh - l.xl) / o.bins_x, dy = (l.yh - l.yl) / o.bins_y;
-  if (o.macro_blockages) {
+  if (o.macro_blockages || !d.routing_exclusions.empty()) {
     return obstacle_rudy(d, o);
   }
   if (o.model == RudyModel::rsmt)

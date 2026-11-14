@@ -216,6 +216,21 @@ int main() {
               cached.unroutable_nets == fresh.unroutable_nets);
       }
     }
+    // Removing a corner from the floorplan applies to every route model
+    // even when ordinary macro blockage modeling is disabled.
+    for (auto model : {RudyModel::bbox, RudyModel::rsmt, RudyModel::uroute}) {
+      auto corner = corridor;
+      corner.routing_exclusions = {{40, 40, 100, 100}};
+      auto opts = hard;
+      opts.model = model;
+      opts.macro_blockages = false;
+      opts.fixed_macro_scale = 0;
+      const auto result = rudy(corner, opts);
+      near(result.blocked_fraction.at(99), 1);
+      near(result.blocked_fraction.at(0), 0);
+      near(result.horizontal.at(99), 0);
+      near(result.vertical.at(99), 0);
+    }
     double hwire = 0, vwire = 0;
     for (int k = 0; k < 100; ++k) {
       hwire += wide.horizontal[k] * 100 * .1 * (1 - wide.blocked_fraction[k]);

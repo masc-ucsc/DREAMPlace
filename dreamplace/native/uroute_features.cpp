@@ -141,6 +141,8 @@ UrouteMaps uroute_features(const Design &d, int nx, int ny, int ox, int oy) {
         raw[3][j] += a;
     });
   }
+  for (const auto &r : d.routing_exclusions)
+    box(r[0], r[1], r[2], r[3], [&](size_t j, double) { raw[2][j] = 1; });
   UrouteMaps result{uroute_feature_channels, ox, oy, true, {}, {}};
   result.values.reserve(size_t(uroute_feature_channels) * ox * oy);
   for (const auto &channel : raw) {

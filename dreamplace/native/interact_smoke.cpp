@@ -85,6 +85,26 @@ int main() {
     check(held.node_x[3] == 50 && held.node_y[3] == 12);  // macro stayed pinned to the end
     check(held.node_x[0] != 12 || held.node_y[0] != 14);  // the released cell moved again
     check(std::abs(held.node_x[1] - plain.node_x[1]) + std::abs(held.node_y[1] - plain.node_y[1]) > 0);  // others reacted
+    // A one-shot move at the last callback updates the returned pose. When
+    // followed by more GP it is free to move away without a release.
+    for (bool extend : {false, true}) {
+      auto moved = fixture();
+      o = base();
+      o.interact_interval = 10;
+      bool applied = false;
+      o.interact = [&](const InteractView &view) {
+        InteractUpdate update;
+        if (view.finishing && !applied) {
+          applied = true;
+          update.moves = {{0, 12, 14, 0}};
+          update.extend = extend ? 10 : 0;
+        }
+        return update;
+      };
+      place(moved, o);
+      check(applied &&
+            ((moved.node_x[0] == 12 && moved.node_y[0] == 14) != extend));
+    }
     // The host extends a solve that is about to stop; the stop rules wait for the extra steps.
     auto more = fixture();
     o = base();

@@ -123,7 +123,21 @@ static RudyResult obstacle_rudy_impl(const Design &d, const RudyOptions &o,
       free[x * o.bins_y + y].push_back({l.xl + x * dx, l.yl + y * dy,
                                         l.xl + (x + 1) * dx,
                                         l.yl + (y + 1) * dy});
-  for (int i = 0; i < int(d.node_macro.size()); ++i) {
+  const auto add_obstacle = [&](Rect b) {
+    const int id = int(obstacles.size());
+    obstacles.push_back(b);
+    bins(b, [&](int k) {
+      blockers[k].push_back(id);
+      subtract(free[k], b);
+    });
+    return id;
+  };
+  for (const auto &r : d.routing_exclusions) {
+    auto b = intersect(core, {r[0], r[1], r[2], r[3]});
+    if (b.area() > 0)
+      add_obstacle(b);
+  }
+  for (int i = 0; o.macro_blockages && i < int(d.node_macro.size()); ++i) {
     if (!d.node_macro[i] || d.placement_mask(i) != PlacementMask::none)
       continue;
     // GP occupancy envelopes include halos; those halos are routing whitespace,
@@ -139,12 +153,7 @@ static RudyResult obstacle_rudy_impl(const Design &d, const RudyOptions &o,
                          d.node_y[i] + d.node_size_y[i] - py - inset_y});
     if (b.area() <= 0)
       continue;
-    macro[i] = int(obstacles.size());
-    obstacles.push_back(b);
-    bins(b, [&](int k) {
-      blockers[k].push_back(macro[i]);
-      subtract(free[k], b);
-    });
+    macro[i] = add_obstacle(b);
   }
   RudyResult r;
   if (snapshot) {
@@ -495,7 +504,7 @@ RudyMaskSnapshot::RudyMaskSnapshot(const Design &d, const RudyOptions &o,
   if (o.model == RudyModel::uroute)
     throw std::invalid_argument(
         "URoute cannot replay per-net RUDY contributions");
-  if (!o.macro_blockages)
+  if (!o.macro_blockages && d.routing_exclusions.empty())
     throw std::invalid_argument("RUDY snapshot requires obstacle-aware demand");
   auto data = std::make_shared<Data>();
   data->remaining = max_contributions;
