@@ -261,6 +261,11 @@ struct InteractView {
   bool finishing = false;
   // Current centroid of every centroid group (Options::interact_centroids), else null.
   const std::vector<CentroidSample> *centroids = nullptr;
+  // Requested via interact_optimizer_identity. Fingerprint of native GP at
+  // this callback, including private particles and solver history. Combine
+  // with the host's recipe, netlist, constraints and callback state when
+  // checking a replay. Zero means no identity was requested.
+  std::uint64_t optimizer_identity = 0;
 };
 struct CentroidTargetUpdate {
   int group = -1;
@@ -460,6 +465,7 @@ struct Options {
   // pins live only inside one call; the host re-sends the ones it still wants.
   int interact_interval = 0;
   bool interact_centroids = false; // fill InteractView::centroids (an O(nodes) pass per call)
+  bool interact_optimizer_identity = false; // read private arrays without copying at GUI polls
   std::function<InteractUpdate(const InteractView &)> interact;
   int checkpoint_interval = 0;
   // Descending density thresholds, each consumed once per stage. In this mode

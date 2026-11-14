@@ -42,6 +42,40 @@ int main() {
   try {
     auto plain = fixture();
     place(plain, base());
+    // Holding a cell at the position it already occupies changes the live
+    // optimizer (including momentum and the hold mask), not its visible pose.
+    // This must also survive the callback that exposes unpadded coordinates.
+    auto last_frame = [](bool hold, bool observe) {
+      auto d = fixture();
+      d.node_halo_x = d.node_halo_y = {0, 0, 0, 1, 0, 0};
+      auto opts = base();
+      opts.interact_interval = opts.max_iterations;
+      opts.interact_optimizer_identity = observe;
+      std::uint64_t id = 0;
+      std::vector<double> pose;
+      opts.interact = [&](const InteractView &v) {
+        InteractUpdate update;
+        if (v.iteration == opts.max_iterations) {
+          if (v.finishing) {
+            pose.assign(v.x, v.x + v.count);
+            pose.insert(pose.end(), v.y, v.y + v.count);
+            id = v.optimizer_identity;
+          } else if (hold) {
+            update.pins.push_back({0, v.x[0], v.y[0], 0});
+          }
+        }
+        return update;
+      };
+      place(d, opts);
+      check(!pose.empty());
+      return std::pair{pose, id};
+    };
+    const auto live = last_frame(false, true);
+    const auto held_frame = last_frame(true, true);
+    check(live.first == held_frame.first && live.second && held_frame.second &&
+          live.second != held_frame.second);
+    check(last_frame(false, true) == live);
+    check(last_frame(false, false) == std::pair{live.first, std::uint64_t{0}});
     // Installed but idle: identical to no hook at all.
     auto idle = fixture();
     auto o = base();

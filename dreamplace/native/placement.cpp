@@ -13,6 +13,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #include "dreamplace/native/local_density.hpp"
 #include "dreamplace/native/magnet.hpp"
@@ -88,6 +89,24 @@ int select_gp_trial(const std::vector<GpTrialScore> &scores,
   return active.front();
 }
 namespace {
+// Hash values rather than object bytes: padding, pointers and elapsed time
+// are not part of a reproducible numerical baseline.
+struct OptimizerHash {
+  std::uint64_t value = 14695981039346656037ULL;
+  template<class T> void scalar(T v) {
+    if constexpr (std::is_same_v<T, double>) {
+      scalar(std::bit_cast<std::uint64_t>(v));
+    } else {
+      value = (value ^ static_cast<std::uint64_t>(v)) * 1099511628211ULL;
+    }
+  }
+  template<class... T> void fields(T... v) { (scalar(v), ...); }
+  template<class Range> void range(const Range &r) {
+    scalar(r.size());
+    for (auto v : r) scalar(v);
+  }
+};
+
 void require(bool condition, const char *message) {
   if (!condition) {
     throw std::invalid_argument(message);
@@ -1660,7 +1679,7 @@ Result place(Design &design, const Options &options, GpState *state,
         auto update = o.interact(
             InteractView{&design, px.data(), py.data(), view.count,
                          view.iteration, view.first, view.finishing,
-                         view.centroids});
+                         view.centroids, view.optimizer_identity});
         for (auto *positions : {&update.moves, &update.pins})
           for (auto &pin : *positions) {
             require(pin.node >= 0 && pin.node < design.num_movable,
@@ -2996,6 +3015,7 @@ Result place(Design &design, const Options &options, GpState *state,
       const std::vector<std::pair<double, double>> &original;
       ~RestoreTargets() { design.centroid_targets = original; }
     } restore_targets{d, interact_orig_targets};
+    int max_iter = o.max_iterations, forced_until = 0;
     // Interactive host (Options::interact): applies pins/releases, returns the requested extension.
     const auto interact_apply = [&](int global_next, bool first, bool finishing) -> int {
       std::vector<CentroidSample> centroid_view;
@@ -3006,6 +3026,59 @@ Result place(Design &design, const Options &options, GpState *state,
                         global_next, first, finishing};
       if (!centroid_view.empty()) {
         view.centroids = &centroid_view;
+      }
+      if (o.interact_optimizer_identity) {
+        OptimizerHash h;
+        h.fields(signature, global_next, first, finishing, max_iter, forced_until,
+                 wirelength_epoch, restart, last_checkpoint, checkpoint_invoked,
+                 movable_updates_active, movable_updates_retired, pin_timing_seen,
+                 density_weight, density_initialized, t, alpha, previous_hpwl,
+                 previous_overflow, held_overflow, macro_cell_scale, macro_pull_changed,
+                 convergence.checkpoint_milestone, convergence.density_iteration,
+                 convergence.deadline, convergence.stable_samples, convergence.previous_hpwl,
+                 convergence.previous_inflation, convergence.timing_observed,
+                 convergence.timing_satisfied, active_route, route_hold, uroute_hold,
+                 probe_deadline, external_last, route_overflow, route_peak_utilization,
+                 route_blocked_pins, route_unroutable_nets, route_sampled, inflated_ratio,
+                 r.route_probed, r.route_switch_iteration, r.route_probe_overflow,
+                 r.route_uroute_switch_iteration, transparent, exclusion_scale,
+                 best_feasible_hpwl, best_feasible_iteration, reservation_accounting);
+        for (const auto *v : {&x, &y, &prev_x, &prev_y, &old_gx, &old_gy,
+                              &old_ex, &old_ey, &inflation, &routing_utilization,
+                              &best_feasible_x, &best_feasible_y}) {
+          h.range(*v);
+        }
+        h.range(interact_pins);
+        h.range(movable_holds);
+        h.range(d.net_weights);
+        h.range(d.node_size_x);
+        h.range(d.node_size_y);
+        h.fields(post_best.anchor_cost, post_best.anchor_violation, post_best.improved, post_best.model);
+        for (const auto *sample : {&post_best.shortest, &post_best.least_violation}) {
+          h.fields(sample->iteration, sample->cost, sample->violation, sample->density_weight, sample->excess);
+          h.range(sample->x);
+          h.range(sample->y);
+        }
+        h.scalar(macro_pulls.size());
+        for (const auto &p : macro_pulls) h.fields(p.node, p.x, p.y, p.weight, p.jump, p.length);
+        h.scalar(align_pairs.size());
+        for (const auto &p : align_pairs) h.fields(p.a, p.b, p.axis);
+        h.scalar(d.centroid_targets.size());
+        for (const auto &[tx, ty] : d.centroid_targets) h.fields(tx, ty);
+        h.scalar(d.density_reservations.size());
+        for (const auto &rsv : d.density_reservations)
+          h.fields(rsv.x, rsv.y, rsv.width, rsv.height, rsv.materialized_node);
+        h.scalar(bool(d.pin_timing));
+        if (const auto &p = d.pin_timing) {
+          h.fields(p->coefficient, p->maximum_gap_fraction, p->gap_pulls.size());
+          h.range(p->driver);
+          h.range(p->weight);
+          for (const auto &g : p->gap_pulls) {
+            h.fields(g.driver, g.x, g.y, g.fraction, g.critical);
+            h.range(g.suppressed_sinks);
+          }
+        }
+        view.optimizer_identity = h.value ? h.value : 1;
       }
       const auto update = o.interact(view);
       bool changed = false;
@@ -3065,7 +3138,6 @@ Result place(Design &design, const Options &options, GpState *state,
       }
       return finishing ? std::max(0, update.extend) : 0;
     };
-    int max_iter = o.max_iterations, forced_until = 0;
     const auto try_extend = [&](int next_iter, int global_next) {
       if (!o.interact || o.interact_interval <= 0) {
         return false;

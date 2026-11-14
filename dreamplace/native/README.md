@@ -300,7 +300,15 @@ with the stop rules deferred. With `interact_centroids` the view also carries ev
 centroid, and the update can set per-group world targets (`centroid_targets`, which freeze the other groups at
 their current centroids) or release them; the design's own targets are restored when the GP loop exits. An
 installed hook that returns nothing changes no result. `interact_smoke`
-covers neutrality, cell and macro pins, release and extension.
+covers neutrality, cell and macro pins, release and extension. Set
+`interact_optimizer_identity` when a host needs to verify a live GP replay.
+At each callback, `view.optimizer_identity` fingerprints private particle
+positions (including fillers), gradient and momentum history, active holds,
+and the current density, routing and convergence state. The halo wrapper
+preserves this identity while presenting physical coordinates to the host.
+The fingerprint does not serialize a continuation or include the host's
+callback state. It is zero when disabled; ordinary placement does not scan
+those arrays to produce it.
 
 `min_slice_iterations` requires that many additional steps in the current call,
 independently of the accumulated GP clock and old convergence deadline. It must
