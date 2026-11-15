@@ -495,6 +495,24 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
               AlignmentReport *report,
               const std::function<void(Design &)> &after_macro_legalize,
               bool macro_only) {
+  // Validate in host numbering before filtering pinned nodes. Otherwise a bad
+  // endpoint can be mistaken for a fixed obstacle, or index the anchor array.
+  if (snap) {
+    auto movable_macro = [&](int i) {
+      return i >= 0 && i < d.num_movable && !d.node_macro.empty() && d.node_macro[i];
+    };
+    for (const auto &g : snap->groups)
+      if (!std::isfinite(g.target) ||
+          !std::all_of(g.nodes.begin(), g.nodes.end(), movable_macro))
+        throw std::invalid_argument("snap groups must name movable macros");
+    for (const auto &t : snap->targets)
+      if (!movable_macro(t.node) || !std::isfinite(t.x) || !std::isfinite(t.y))
+        throw std::invalid_argument("snap targets must name movable macros");
+    for (const auto &c : snap->constraints)
+      if (!movable_macro(c.a) || !movable_macro(c.b) || c.a == c.b ||
+          (c.axis != 0 && c.axis != 1) || c.weight <= 0 || !std::isfinite(c.offset))
+        throw std::invalid_argument("invalid macro alignment constraint");
+  }
   if (!d.node_legalize_fixed.empty()) {
     // Kernels represent all fixed obstacles with an index suffix. The host
     // still uses the original indices and sees the complete design.
@@ -559,10 +577,6 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
     }
   if (snap)
     for (const auto &target : snap->targets) {
-      if (target.node < 0 || target.node >= d.num_movable ||
-          d.node_macro.empty() || !d.node_macro[target.node] ||
-          !std::isfinite(target.x) || !std::isfinite(target.y))
-        throw std::invalid_argument("snap targets must name movable macros");
       ix[target.node] = target.x;
       iy[target.node] = target.y;
     }

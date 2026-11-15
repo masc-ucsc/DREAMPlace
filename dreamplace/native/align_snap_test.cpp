@@ -81,6 +81,23 @@ int main() {
       rejected = true;
     }
     check(rejected);
+    // Endpoints outside the movable prefix are never valid references, even
+    // when the kernel repacks the movable prefix around an interactive hold.
+    auto held = before;
+    held.node_legalize_fixed = {1, 0};
+    for (int bad_field = 0; bad_field < 3; ++bad_field) {
+      auto bad = forced;
+      if (bad_field == 0) bad.groups[0].nodes.push_back(2);
+      if (bad_field == 1) bad.targets.push_back({2, 0, 0});
+      if (bad_field == 2) bad.constraints[0].b = 2;
+      bool refused = false;
+      try {
+        detail::legalize(held, 8, 8, &bad);
+      } catch (const std::invalid_argument &) {
+        refused = true;
+      }
+      check(refused && held.node_x == before.node_x && held.node_y == before.node_y);
+    }
     // Regularity uses an independent hierarchy/size class, ignoring the
     // deliberately conflicting synthesis-color classes. Fixed macros stay out.
     Design regular;

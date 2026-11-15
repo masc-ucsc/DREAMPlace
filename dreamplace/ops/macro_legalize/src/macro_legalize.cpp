@@ -444,7 +444,7 @@ bool macroLegalizationLauncher(LegalizationDB<T> db
 #ifdef DREAMPLACE_TORCH_FREE
     if (align) for (const auto& c : *align) {
       const T* pos = c.axis == 0 ? db.x : db.y;
-      objective += c.weight * std::abs(pos[c.a] - pos[c.b]);
+      objective += c.weight * std::abs(pos[c.b] - pos[c.a] - c.offset);
     }
 #endif
     if (legal && objective < best_objective) {
