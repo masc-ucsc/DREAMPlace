@@ -523,16 +523,24 @@ bool macroLegalizationLauncher(LegalizationDB<T> db
   }
 
   dreamplacePrint(kINFO, "Align macros to site and rows\n");
-  // align the lower left corner to row and site
-  for (unsigned int i = 0, ie = macros.size(); i < ie; ++i) {
-    int node_id = macros[i];
-    db.x[node_id] = db.align2site(db.x[node_id], db.node_size_x[node_id]);
-    db.y[node_id] = db.align2row(db.y[node_id], db.node_size_y[node_id]);
+  const auto snap_origins = [&] {
+    for (int node_id : macros) {
+      db.x[node_id] = db.align2site(db.x[node_id], db.node_size_x[node_id]);
+      db.y[node_id] = db.align2row(db.y[node_id], db.node_size_y[node_id]);
+    }
+  };
+  snap_origins();
+#ifdef DREAMPLACE_TORCH_FREE
+  if (!fixed_macros.empty()) {
+    if (check_macro_legality(db, macros, true)) return true;
+    // A continuous LP can place a movable body flush with an off-site
+    // obstacle, only for the final snap to cross that edge. Retry the
+    // separation graph with grid-safe lower bounds; never shift the obstacle.
+    lpLegalizeGraphLauncher(db, macros, fixed_macros, align, true);
+    snap_origins();
   }
-
-  legal = check_macro_legality(db, macros, false);
-
-  return legal;
+#endif
+  return check_macro_legality(db, macros, false);
 }
 
 #ifdef DREAMPLACE_TORCH_FREE

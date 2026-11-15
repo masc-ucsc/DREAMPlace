@@ -550,7 +550,8 @@ void longestPathLegalizeLauncher(LegalizationDB<T> db, const std::vector<int>& m
 template <typename T>
 void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macros,
                             const std::vector<int>& fixed_macros,
-                            const std::vector<MacroAlignConstraint>* align = nullptr) {
+                            const std::vector<MacroAlignConstraint>* align = nullptr,
+                            bool grid_fixed_edges = false) {
     std::array<lemon::ListDigraph, 2> cg;
     unsigned int source, terminal;
     longestPathLegalizeLauncher(db, macros, fixed_macros, cg, source, terminal);
@@ -584,7 +585,15 @@ void lpLegalizeGraphLauncher(LegalizationDB<T> db, const std::vector<int>& macro
                     }
                 } else if (v != source && v != terminal && u < macros.size()) {
                     int fixed = fixed_macros.at(v-macros.size());
-                    lp.lower[u] = std::max(lp.lower[u], MacroDifferenceLP::coordinate(std::ceil(pos[fixed]+size[fixed])));
+                    T edge = pos[fixed] + size[fixed];
+                    if (grid_fixed_edges) {
+                        // Final snapping rounds origins down. A macro to the
+                        // right/above a fixed edge needs the first site/row
+                        // outside it, relative to this core's grid origin.
+                        const T pitch = xy == kX ? db.site_width : db.row_height;
+                        edge = lo + std::ceil((edge - lo) / pitch) * pitch;
+                    }
+                    lp.lower[u] = std::max(lp.lower[u], MacroDifferenceLP::coordinate(std::ceil(edge)));
                 }
             }
             if (align) {

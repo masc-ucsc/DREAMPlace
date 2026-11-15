@@ -1120,6 +1120,30 @@ void run_global_swap(Design &d, int bx, int by) {
   DreamPlace::globalSwapCPULauncher(db, 2);
 }
 
+// A movable macro flush with an off-site obstacle is legal before final
+// site snapping. Both axes must leave the fixed physical origin untouched.
+void offgrid_fixed_macro_edge() {
+  for (bool vertical : {false, true}) {
+    Design d;
+    d.layout = {2, 3, vertical ? 14. : 42., vertical ? 43. : 15., 4, 4};
+    d.num_movable = 1;
+    d.node_macro = {1, 1};
+    d.node_size_x = vertical ? std::vector<double>{12, 12} : std::vector<double>{8, 9};
+    d.node_size_y = vertical ? std::vector<double>{8, 9} : std::vector<double>{12, 12};
+    d.node_x = vertical ? std::vector<double>{2, 2} : std::vector<double>{13, 4};
+    d.node_y = vertical ? std::vector<double>{14, 5} : std::vector<double>{3, 3};
+    d.build_maps();
+    Options o;
+    o.max_iterations = 0;
+    o.macro_only_legalize = true;
+    o.detailed_place = false;
+    auto result = place(d, o);
+    check(result.legal && is_legal(d), "legal row and site exist beyond the fixed edge");
+    check(d.node_x[1] == (vertical ? 2 : 4) && d.node_y[1] == (vertical ? 5 : 3), "off-site obstacle moved");
+    check(d.node_x[0] == (vertical ? 2 : 14) && d.node_y[0] == (vertical ? 15 : 3), "wrong nearest legal origin");
+  }
+}
+
 void offgrid_macro_swap() {
   Design d;
   d.layout = {0, 0, 16, 2, 1, 1};
@@ -3224,6 +3248,7 @@ int main() {
     vanished_memories();
     moving_cells();
     moving_terminals();
+    offgrid_fixed_macro_edge();
     offgrid_macro_swap();
     same_bin_swap();
     weighted_detailed_placement();
