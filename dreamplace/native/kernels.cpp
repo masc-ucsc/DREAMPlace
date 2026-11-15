@@ -26,19 +26,20 @@ bool macroLegalizationLauncher(
     LegalizationDB<T>, const std::vector<MacroAlignConstraint> * = nullptr);
 } // namespace DreamPlace
 namespace DreamPlace::native::detail {
-// Legacy row kernels infer movable identity from an index prefix. Present only
-// standard cells in that prefix; even one-row macros remain exact obstacles.
-struct CellMovableView {
+// The native kernels infer mobility from an index prefix. Present only free
+// nodes in that prefix, and keep the original connectivity and obstacle poses.
+struct KernelMovableView {
   Design design;
   std::vector<int> original;
-  explicit CellMovableView(const Design &source) {
+  template <typename Free>
+  KernelMovableView(const Design &source, Free free, std::vector<int> *remap = nullptr) {
     design.layout = source.layout;
     for (int i = 0; i < source.num_movable; ++i)
-      if (!source.node_macro[i])
+      if (free(i))
         original.push_back(i);
     design.num_movable = original.size();
     for (int i = 0; i < source.num_movable; ++i)
-      if (source.node_macro[i])
+      if (!free(i))
         original.push_back(i);
     for (size_t i = source.num_movable; i < source.node_x.size(); ++i)
       original.push_back(i);
@@ -63,6 +64,8 @@ struct CellMovableView {
       inverse[original[i]] = i;
     for (auto &node : design.pin2node)
       node = inverse[node];
+    if (remap)
+      *remap = std::move(inverse);
     design.pin_offset_x = source.pin_offset_x;
     design.pin_offset_y = source.pin_offset_y;
     design.flat_net2pin = source.flat_net2pin;
@@ -492,6 +495,60 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
               AlignmentReport *report,
               const std::function<void(Design &)> &after_macro_legalize,
               bool macro_only) {
+  if (!d.node_legalize_fixed.empty()) {
+    // Kernels represent all fixed obstacles with an index suffix. The host
+    // still uses the original indices and sees the complete design.
+    auto free = [&](int i) { return !d.legalization_fixed(i); };
+    std::vector<int> inverse;
+    KernelMovableView view(d, free, snap ? &inverse : nullptr);
+    AlignmentSnap local;
+    if (snap) {
+      for (auto t : snap->targets)
+        if (free(t.node)) {
+          t.node = inverse.at(t.node);
+          local.targets.push_back(t);
+        }
+      for (auto g : snap->groups) {
+        std::erase_if(g.nodes, [&](int i) { return !free(i); });
+        for (auto &i : g.nodes)
+          i = inverse.at(i);
+        local.groups.push_back(std::move(g));
+      }
+      for (auto c : snap->constraints)
+        if (free(c.a) && free(c.b)) {
+          c.a = inverse.at(c.a);
+          c.b = inverse.at(c.b);
+          local.constraints.push_back(c);
+        }
+    }
+    auto host = [&](Design &kernel) {
+      view.writeback(d);
+      after_macro_legalize(d);
+      d.validate();
+      for (size_t j = kernel.num_movable; j < view.original.size(); ++j) {
+        const auto i = view.original[j];
+        if (d.node_x.at(i) != kernel.node_x[j] || d.node_y.at(i) != kernel.node_y[j])
+          throw std::runtime_error("macro refinement displaced a fixed legalization obstacle");
+      }
+      // The host may update macro geometry and pin offsets as well as origins.
+      auto fresh = KernelMovableView(d, free);
+      if (fresh.original != view.original || fresh.design.num_movable != kernel.num_movable)
+        throw std::runtime_error("macro refinement changed legalization mobility");
+      kernel = std::move(fresh.design);
+      // The row kernels ignore soft keepouts even if the host rebuilt arrays.
+      for (size_t i = 0; i < kernel.node_placement_mask.size(); ++i)
+        if (kernel.placement_mask(i) == PlacementMask::soft)
+          kernel.node_size_x[i] = kernel.node_size_y[i] = 0;
+    };
+    if (view.design.num_movable)
+      legalize(view.design, bx, by, snap ? &local : nullptr, report,
+               after_macro_legalize ? std::function<void(Design &)>(host) : nullptr,
+               macro_only);
+    else if (after_macro_legalize)
+      host(view.design);
+    view.writeback(d);
+    return;
+  }
   SoftMaskSizes masks(d);
   auto ix = d.node_x, iy = d.node_y;
   if (snap)
@@ -581,7 +638,7 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
     }
   }
   if ((snap || after_macro_legalize) && has_movable_macro(d)) {
-    CellMovableView cells(d);
+    KernelMovableView cells(d, [&](int i) { return !d.node_macro[i]; });
     if (cells.design.num_movable)
       legalize(cells.design, bx, by);
     cells.writeback(d);
@@ -649,9 +706,16 @@ void legalize(Design &d, int bx, int by, const AlignmentSnap *snap,
 void detailed_place(Design &d, int bx, int by, int threads,
                     bool preserve_macros, int iterations,
                     std::vector<DetailedSample> *history) {
+  if (!d.node_legalize_fixed.empty()) {
+    KernelMovableView view(d, [&](int i) { return !d.legalization_fixed(i); });
+    if (view.design.num_movable)
+      detailed_place(view.design, bx, by, threads, preserve_macros, iterations, history);
+    view.writeback(d);
+    return;
+  }
   SoftMaskSizes masks(d);
   if (preserve_macros && has_movable_macro(d)) {
-    CellMovableView cells(d);
+    KernelMovableView cells(d, [&](int i) { return !d.node_macro[i]; });
     if (cells.design.num_movable)
       detailed_place(cells.design, bx, by, threads, false, iterations, history);
     cells.writeback(d);

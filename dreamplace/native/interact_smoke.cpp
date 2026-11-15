@@ -76,6 +76,75 @@ int main() {
           live.second != held_frame.second);
     check(last_frame(false, true) == live);
     check(last_frame(false, false) == std::pair{live.first, std::uint64_t{0}});
+    // GP pins survive row packing and detailed placement. A host can change
+    // the active set at the final gate; it sees its original node numbering
+    // and physical origins even on a halo-padded solve.
+    for (bool release : {false, true}) {
+      auto d = fixture();
+      d.node_halo_x = d.node_halo_y = {0, 0, 0, 1, 0, 0};
+      auto opts = base();
+      opts.legalize = opts.detailed_place = opts.macro_snap = true;
+      opts.interact_interval = 1;
+      opts.interact = [](const InteractView &v) {
+        InteractUpdate u;
+        if (v.first)
+          u.pins = {{0, 12, 14, 0}, {3, 50, 12, 0}};
+        return u;
+      };
+      opts.before_legalize = [&](Design &physical) {
+        check(physical.legalization_fixed(0) && physical.legalization_fixed(3));
+        check(physical.node_x[0] == 12 && physical.node_y[0] == 14);
+        check(physical.node_x[3] == 50 && physical.node_y[3] == 12);
+        // Put another cell on the pinned cell. Switch which one owns this
+        // anchor on release; in both cases the other must move to a free site.
+        physical.node_x[1] = 12;
+        physical.node_y[1] = 14;
+        if (release) {
+          physical.node_legalize_fixed[0] = 0;
+          physical.node_legalize_fixed[1] = 1;
+        }
+      };
+      int refinements = 0;
+      opts.after_macro_legalize = [&](Design &physical) {
+        ++refinements;
+        check(physical.num_movable == 4 && physical.node_size_x[3] == 8 &&
+              physical.node_x[3] == 50 && physical.node_y[3] == 12);
+        check(physical.legalization_fixed(release ? 1 : 0));
+      };
+      place(d, opts);
+      int held = release ? 1 : 0, free = 1 - held;
+      check(refinements == 1 && is_legal(d) && d.node_legalize_fixed.empty());
+      check(d.node_x[3] == 50 && d.node_y[3] == 12);
+      check(d.node_x[held] == 12 && d.node_y[held] == 14);
+      check(d.node_x[free] != 12 || d.node_y[free] != 14);
+    }
+    // At a zero-iteration gate the host can pin every movable, including
+    // fractional macro locations. There is no free row or detail work.
+    {
+      auto d = fixture();
+      d.node_x[3] = 40.5;
+      auto opts = base();
+      opts.max_iterations = 0;
+      opts.legalize = opts.detailed_place = true;
+      opts.before_legalize = [](Design &physical) {
+        physical.node_legalize_fixed.assign(physical.node_x.size(), 1);
+      };
+      opts.after_macro_legalize = [](Design &physical) {
+        check(physical.legalization_fixed(3) && physical.node_x[3] == 40.5);
+      };
+      const auto initial = d;
+      place(d, opts);
+      check(d.node_x == initial.node_x && d.node_y == initial.node_y &&
+            d.node_legalize_fixed.empty() && is_legal(d));
+      opts.after_macro_legalize = [](Design &physical) { ++physical.node_x[3]; };
+      bool refused = false;
+      try {
+        place(d, opts);
+      } catch (const std::runtime_error &e) {
+        refused = std::string(e.what()).find("fixed legalization obstacle") != std::string::npos;
+      }
+      check(refused && d.node_x == initial.node_x);
+    }
     // Installed but idle: identical to no hook at all.
     auto idle = fixture();
     auto o = base();

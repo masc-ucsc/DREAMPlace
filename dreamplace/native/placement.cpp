@@ -753,6 +753,8 @@ void Design::validate() const {
               node_size_x.size() == node_x.size() &&
               node_size_y.size() == node_x.size(),
           "node array size mismatch");
+  require(node_legalize_fixed.empty() || node_legalize_fixed.size() == node_x.size(),
+          "legalization hold size mismatch");
   require(node_legalize_weights.empty() ||
               node_legalize_weights.size() == node_x.size(),
           "legalization weight array size mismatch");
@@ -4440,6 +4442,7 @@ Result place(Design &design, const Options &options, GpState *state,
           Design candidate = std::move(*update.replacement);
           candidate.pin_timing.reset();
           candidate.validate();
+          std::vector<char> new_pins(candidate.num_movable);
           const auto &a = d.layout;
           const auto &b = candidate.layout;
           require(a.xl == b.xl && a.yl == b.yl && a.xh == b.xh &&
@@ -4504,6 +4507,8 @@ Result place(Design &design, const Options &options, GpState *state,
                         "GP replacement moved a fixed node");
               }
             }
+            if (i < candidate.num_movable)
+              new_pins[i] = interact_pins.at(old);
             candidate.node_x[i] = x[old];
             candidate.node_y[i] = y[old];
             next_inflation[i] = inflation[old];
@@ -4524,6 +4529,7 @@ Result place(Design &design, const Options &options, GpState *state,
           d = std::move(candidate);
           original = size;
           movable_holds.assign(d.num_movable, 0);
+          interact_pins = std::move(new_pins);
           n = count(d.node_x.size());
           inflation = std::move(next_inflation);
           x = d.node_x;
@@ -5262,6 +5268,14 @@ Result place(Design &design, const Options &options, GpState *state,
     if (state) {
       next = save_state(offset + r.iterations);
     }
+    // An earlier objective sample can win selection. Its pose may predate a
+    // still-active pin, so retain the actual anchors across that selection.
+    std::vector<MovablePosition> final_pins;
+    if (o.interact) {
+      for (int i = 0; i < d.num_movable; ++i)
+        if (interact_pins[i])
+          final_pins.push_back({i, x[i], y[i], 0});
+    }
     r.selected_iteration =
         restored_selection ? restored_selection : offset + r.iterations;
     if (keep_feasible && !pin_timing_seen && inflated_ratio == 1 &&
@@ -5308,6 +5322,14 @@ Result place(Design &design, const Options &options, GpState *state,
         r.selected_iteration = chosen->iteration;
         r.post_density_best_iteration = chosen->iteration;
       }
+    }
+    if (!final_pins.empty() && o.legalize && d.node_legalize_fixed.empty())
+      d.node_legalize_fixed.resize(original);
+    for (const auto &pin : final_pins) {
+      x[pin.node] = pin.x;
+      y[pin.node] = pin.y;
+      if (o.legalize)
+        d.node_legalize_fixed[pin.node] = 1;
     }
     d.node_x = std::move(x);
     d.node_y = std::move(y);
@@ -5421,6 +5443,7 @@ Result place(Design &design, const Options &options, GpState *state,
       throw std::runtime_error("kernel moved a fixed node");
     }
   }
+  d.node_legalize_fixed.clear();
   if (o.observer) {
     o.observer(d, PlacementStage::finished, completed_iteration);
   }

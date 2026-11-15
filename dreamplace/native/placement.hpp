@@ -153,6 +153,14 @@ struct Design {
   std::vector<double> node_x, node_y, node_size_x, node_size_y;
   // Optional timing displacement costs; empty preserves the legacy solver.
   std::vector<double> node_legalize_weights;
+  // Transient mobility at the legalization boundary. GP supplies active
+  // interactive pins; before_legalize may replace them (including at zero GP
+  // iterations). The host sees original indices; placement clears this on exit.
+  std::vector<std::uint8_t> node_legalize_fixed;
+  bool legalization_fixed(size_t i) const {
+    return i >= static_cast<size_t>(num_movable) ||
+           (!node_legalize_fixed.empty() && node_legalize_fixed.at(i));
+  }
   // Defer characterized constant sources until functional users own their
   // sites.
   std::vector<std::uint8_t> node_legalize_last;
