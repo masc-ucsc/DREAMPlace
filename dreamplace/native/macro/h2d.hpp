@@ -4,7 +4,7 @@
 #include "dreamplace/native/macro/toposearch.hpp"
 #include "dreamplace/native/rudy.hpp"
 namespace DreamPlace::native::macro {
-// Macro merit scores RSMT and URoute stages with RSMT RUDY, others with the
+// Macro merit scores RSMT stages with RSMT RUDY, others with the
 // bounding-box model. Hosts recomputing the merit must use the same mapping.
 RudyModel route_score_model(RouteModel active);
 struct Iteration {

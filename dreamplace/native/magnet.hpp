@@ -178,8 +178,6 @@ public:
     int probe_deadline = 0, route_switch_iteration = -1;
     double route_switch_rudy = -1, route_switch_rsmt = -1;
     bool route_probed = false;
-    int route_uroute_switch_iteration = -1;
-    double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
     double route_probe_overflow = -1;
   };
   std::optional<RouteProgress> routing;

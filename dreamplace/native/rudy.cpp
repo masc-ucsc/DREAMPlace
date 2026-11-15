@@ -11,7 +11,6 @@
 namespace DreamPlace::native {
 RudyResult obstacle_rudy(const Design &, const RudyOptions &);
 RudyResult rsmt_rudy(const Design &, const RudyOptions &);
-RudyResult uroute_rudy(const Design &, const RudyOptions &);
 namespace {
 template <typename T> inline DEFINE_NET_WIRING_DISTRIBUTION_MAP_WEIGHT;
 }
@@ -50,8 +49,6 @@ void detail::accumulate_overflow(RudyResult &r) {
 }
 RudyResult rudy(const Design &d, const RudyOptions &o) {
   detail::validate_rudy(d, o);
-  if (o.model == RudyModel::uroute)
-    return uroute_rudy(d, o);
   RudyResult r;
   r.horizontal.resize(o.bins_x * o.bins_y);
   r.vertical.resize(o.bins_x * o.bins_y);

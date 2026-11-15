@@ -218,7 +218,7 @@ int main() {
     }
     // Removing a corner from the floorplan applies to every route model
     // even when ordinary macro blockage modeling is disabled.
-    for (auto model : {RudyModel::bbox, RudyModel::rsmt, RudyModel::uroute}) {
+    for (auto model : {RudyModel::bbox, RudyModel::rsmt}) {
       auto corner = corridor;
       corner.routing_exclusions = {{40, 40, 100, 100}};
       auto opts = hard;

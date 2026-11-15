@@ -11,9 +11,7 @@
 #include <stdexcept>
 namespace DreamPlace::native::macro {
 RudyModel route_score_model(RouteModel active) {
-  return active == RouteModel::rsmt || active == RouteModel::uroute
-             ? RudyModel::rsmt
-             : RudyModel::bbox;
+  return active == RouteModel::rsmt ? RudyModel::rsmt : RudyModel::bbox;
 }
 Result place_h2d(Design &design, std::span<const NodeInfo> info,
                  const Parameters &parameters, const Topology &input,
@@ -113,31 +111,8 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
   };
   // Every legal cells-only pass (each round and the coarse-pitch recompaction)
   // uses the same resolved controls and keeps solver frames private.
-  const auto final_cells_options = [&](const Abstracted &frozen,
-                                       const Topology &topology,
-                                       const Design &physical_source) {
-    const auto &frozen_design = frozen.design;
+  const auto final_cells_options = [&](const Design &frozen_design) {
     Options cells = cell_options;
-    if (cell_options.route.probe &&
-        cell_options.route.probe_model == RouteModel::uroute) {
-      const auto expand_snapshot = [frozen, topology,
-                                    physical_source](const Design &snapshot) {
-        auto abstracted = frozen;
-        abstracted.design = snapshot;
-        auto expanded = physical_source;
-        expand(abstracted, topology, expanded);
-        return expanded;
-      };
-      if (cell_options.uroute)
-        cells.route_physical_snapshot = expand_snapshot;
-      else if (cell_options.route_probe_observer) {
-        cells.route_probe_observer =
-            [expand_snapshot, observer = cell_options.route_probe_observer](
-                const Design &snapshot, int nx, int ny) {
-              observer(expand_snapshot(snapshot), nx, ny);
-            };
-      }
-    }
     cells.seed = p.seed;
     cells.num_threads = p.threads;
     cells.target_density = p.target_density;
@@ -150,9 +125,8 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     cells.detailed_place = true;
     cells.observer = {};
     cells.route.probe = cell_options.route.probe && !route_probed;
-    if (latches_route && (active_route == RouteModel::rsmt ||
-                          active_route == RouteModel::uroute))
-      cells.route.model = active_route;
+    if (latches_route && active_route == RouteModel::rsmt)
+      cells.route.model = RouteModel::rsmt;
     return cells;
   };
   Parameters realization_parameters = p;
@@ -174,14 +148,10 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     route_probed |= result.route_probed;
     if (result.route_probed && result.route_probe_overflow >= 0)
       route_progress = result;
-    const auto rank = [](RouteModel model) {
-      return model == RouteModel::uroute ? 2
-             : model == RouteModel::rsmt ? 1
-                                         : 0;
-    };
-    if (!latches_route || rank(result.route_model) <= rank(active_route))
+    if (!latches_route || active_route == RouteModel::rsmt ||
+        result.route_model != RouteModel::rsmt)
       return;
-    active_route = result.route_model;
+    active_route = RouteModel::rsmt;
     if (std::isfinite(best_merit)) {
       const auto [value, route] = merit(best);
       best_merit = value;
@@ -229,13 +199,8 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     control.route_capacity_h = p.route_cap_h;
     control.route_capacity_v = p.route_cap_v;
     control.observer = {};
-    // The abstract macro geometry contains meta-macros and pseudo pins. The
-    // learned feature contract applies only to expanded physical candidates;
-    // final_cells_options performs that one-shot probe and bounded feedback.
-    control.route.probe = cell_options.route.probe && !route_probed &&
-                          cell_options.route.probe_model != RouteModel::uroute;
-    if (latches_route && (active_route == RouteModel::rsmt ||
-                          active_route == RouteModel::uroute))
+    control.route.probe = cell_options.route.probe && !route_probed;
+    if (latches_route && active_route == RouteModel::rsmt)
       control.route.model = RouteModel::rsmt;
     // A refreshed pseudo-net endpoint can change the abstract connectivity.
     // Reuse full GP history only when that solver topology still matches.
@@ -291,7 +256,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
     Topology candidate = realized.topology;
     candidate.realized_graph = realized.graph;
     auto frozen = abstract_design(working, info, candidate, p, true);
-    const Options cells = final_cells_options(frozen, candidate, working);
+    const Options cells = final_cells_options(frozen.design);
     DreamPlace::native::Result cell_placement;
     try {
       cell_placement = place(frozen.design, cells);
@@ -347,7 +312,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
         (last - value) <= p.eps * std::max(1., std::abs(last)))
       break;
     last = value;
-    if (latches_route && active_route != RouteModel::uroute)
+    if (latches_route && active_route != RouteModel::rsmt)
       last_design = working;
   }
   // L22: coarse-pitch compaction on the accepted topology, followed by a fresh
@@ -359,8 +324,7 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
           compact(a, best_topology, p, position_graph(a, best_topology));
       if (snapped.legal) {
         auto frozen = abstract_design(best, info, snapped.topology, p, true);
-        const Options cells =
-            final_cells_options(frozen, snapped.topology, best);
+        const Options cells = final_cells_options(frozen.design);
         const auto snapped_placement = place(frozen.design, cells);
         observe_route(snapped_placement);
         auto candidate = best;
@@ -407,11 +371,6 @@ Result place_h2d(Design &design, std::span<const NodeInfo> info,
   out.placement.route_probed |= route_probed;
   if (route_probed) {
     out.placement.route_probe_overflow = route_progress.route_probe_overflow;
-    out.placement.route_uroute_switch_iteration =
-        route_progress.route_uroute_switch_iteration;
-    out.placement.route_switch_uroute_rsmt =
-        route_progress.route_switch_uroute_rsmt;
-    out.placement.route_switch_uroute = route_progress.route_switch_uroute;
   }
   design = std::move(best);
   return out;

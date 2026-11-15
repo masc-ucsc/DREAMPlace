@@ -291,9 +291,8 @@ struct InteractUpdate {
   bool release_centroids = false;
   std::vector<MovablePosition> moves; // one-shot origins, never install a hold
 };
-class UrouteContext;
 struct RudyResult;
-enum class RouteModel { off, rudy, rsmt, automatic, uroute, external };
+enum class RouteModel { off, rudy, rsmt, automatic, external };
 const char *route_model_name(RouteModel model);
 struct RoutePolicy {
   RouteModel model = RouteModel::rudy;
@@ -301,22 +300,12 @@ struct RoutePolicy {
   int hold = 1, degree = 40, accuracy = 3;
   bool probe = false;
   int probe_iterations = 100;
-  RouteModel probe_model = RouteModel::rsmt;
-  double uroute_switch_overflow = .01;
-  int uroute_hold = 2;
-  // Only the final cell stage enables the automatic third rung. FP/macro may
-  // still request a one-shot URoute convergence probe.
-  bool uroute_ladder = false;
 };
 // Inverse of route_model_name. Throws invalid_argument for an unknown name.
 RouteModel route_model_from_name(std::string_view name);
 // The checks Options validation applies to Options::route, for hosts that
 // resolve stage policies before placement. Throws invalid_argument.
 void validate_route_policy(const RoutePolicy &);
-// The policy can evaluate the learned model: an explicit URoute rung, the
-// automatic ladder or a URoute convergence probe. A missing context is the
-// caller's skip/fallback decision.
-bool uroute_requested(const RoutePolicy &);
 // The active model can change within the stage (automatic switch or probe
 // latch), so stage reports and caches record the model actually used.
 bool route_latches(const RoutePolicy &);
@@ -652,10 +641,6 @@ struct Options {
   // First active step, then this many cumulative GP steps between samples;
   // retained slices keep the cadence, while a physical rebind samples afresh.
   int route_external_interval = 50;
-  std::shared_ptr<const UrouteContext> uroute;
-  std::string uroute_identity, uroute_skipped;
-  std::function<void(const Design &, int bins_x, int bins_y)>
-      route_probe_observer;
   // Optional expansion of contracted macro geometry for routing measurement.
   // Inflation still consumes the resulting utilization on the same core grid.
   std::function<Design(const Design &)> route_physical_snapshot;
@@ -739,9 +724,7 @@ struct GpSample {
   bool route_sampled = false, route_probe = false;
   int route_blocked_pins = 0, route_unroutable_nets = 0, route_calls = 0;
   double route_rudy_seconds = 0, route_rsmt_seconds = 0,
-         route_uroute_seconds = 0, route_external_seconds = 0;
-  int route_uroute_switch_iteration = -1;
-  double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
+         route_external_seconds = 0;
   double route_probe_overflow = -1;
   int magnet_round = 0, magnet_groups = 0;
   double macro_move_max = 0, macro_move_rms = 0;
@@ -822,11 +805,7 @@ struct Result {
   int route_switch_iteration = -1;
   double route_switch_rudy = -1, route_switch_rsmt = -1;
   bool route_probed = false;
-  int route_uroute_switch_iteration = -1;
-  double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
   double route_probe_overflow = -1;
-  std::string uroute_skipped;
-  std::vector<std::string> uroute_sample_ids;
   int filler_count = 0;
   double filler_area = 0;
   double filler_size_x = 0, filler_size_y = 0;
@@ -863,12 +842,9 @@ struct Result {
 struct GpState {
   GpConvergence convergence;
   RouteModel route_model = RouteModel::rudy;
-  int route_uroute_hold = 0;
   int route_hold = 0, route_switch_iteration = -1, route_probe_deadline = 0;
   double route_switch_rudy = -1, route_switch_rsmt = -1;
   bool route_probed = false;
-  int route_uroute_switch_iteration = -1;
-  double route_switch_uroute_rsmt = -1, route_switch_uroute = -1;
   double route_probe_overflow = -1;
   std::uint64_t signature = 0;
   int route_external_last_iteration = -1;

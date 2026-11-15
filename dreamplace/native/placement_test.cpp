@@ -130,7 +130,7 @@ void external_route_inflates_only_its_local_bin() {
   check(route_model_from_name("external") == RouteModel::external &&
             std::string(route_model_name(RouteModel::external)) == "external",
         "external route model name does not round-trip");
-  for (int invalid = 0; invalid < 8; ++invalid) {
+  for (int invalid = 0; invalid < 7; ++invalid) {
     auto bad = o;
     bad.route_external = [invalid](const Design &, int bx, int by) {
       RudyResult result;
@@ -151,8 +151,6 @@ void external_route_inflates_only_its_local_bin() {
         result.unroutable_nets = -1;
       if (invalid == 6)
         result.horizontal[0] = 2; // summary must not hide pressure
-      if (invalid == 7)
-        result.drc_density.assign(1, 0);
       return result;
     };
     auto candidate = original;
@@ -3188,28 +3186,21 @@ void gp_ab_search() {
 }
 void route_policy_helpers() {
   for (auto model : {RouteModel::off, RouteModel::rudy, RouteModel::rsmt,
-                     RouteModel::automatic, RouteModel::uroute})
+                     RouteModel::automatic, RouteModel::external})
     check(route_model_from_name(route_model_name(model)) == model,
           "route model name does not round-trip");
   rejects([] { route_model_from_name("automatic"); });
   RoutePolicy p;
   validate_route_policy(p);
-  check(!route_latches(p) && !uroute_requested(p), "default policy latches");
+  check(!route_latches(p), "default policy latches");
   p.probe = true;
-  check(route_latches(p) && !uroute_requested(p), "RUDY probe must latch");
+  check(route_latches(p), "RUDY probe must latch");
   p.model = RouteModel::rsmt;
   check(!route_latches(p), "explicit RSMT probe must not latch");
-  p.probe_model = RouteModel::uroute;
-  check(route_latches(p) && uroute_requested(p), "URoute probe must latch");
   p = {};
-  p.uroute_ladder = true;
-  check(!uroute_requested(p), "ladder needs the automatic model");
   p.model = RouteModel::automatic;
-  check(route_latches(p) && uroute_requested(p), "automatic ladder");
-  p.uroute_switch_overflow = p.switch_overflow * 2;
-  rejects([&] { validate_route_policy(p); });
-  p = {};
-  p.probe_model = RouteModel::rudy;
+  check(route_latches(p), "automatic ladder must latch");
+  p.target_overflow = p.switch_overflow * 2;
   rejects([&] { validate_route_policy(p); });
 }
 int main() {

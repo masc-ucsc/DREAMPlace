@@ -245,15 +245,6 @@ Result magnet_place(Design &design, const Options &options) {
   }
   Options control = options;
   control.magnet.enabled = false;
-  if (options.uroute && uroute_requested(options.route)) {
-    control.route_physical_snapshot = [&](const Design &snapshot) {
-      const auto unpadded = unpad_snapshot(snapshot, grouped);
-      auto expanded = expand_macros(unpadded, source, mapping);
-      return options.route_physical_snapshot
-                 ? options.route_physical_snapshot(expanded)
-                 : expanded;
-    };
-  }
   // The shared rigid runtime already delivers physical-member telemetry.
   control.macro_step_observer = nullptr;
   if (!options.magnet.before_snap)
