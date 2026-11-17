@@ -163,6 +163,14 @@ cc_test(
 )
 
 cc_test(
+    name = "sp_legalize_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["sp_legalize_test.cpp"],
+    deps = ["//dreamplace/ops:native_kernels"],
+)
+
+cc_test(
     name = "magnet_test",
     size = "small",
     timeout = "short",

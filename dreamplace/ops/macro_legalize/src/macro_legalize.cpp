@@ -15,6 +15,7 @@
 // local dependency
 #include "macro_legalize/src/hannan_legalize.h"
 #include "macro_legalize/src/lp_legalize.h"
+#include "macro_legalize/src/sp_legalize.h"
 
 DREAMPLACE_BEGIN_NAMESPACE
 
@@ -540,6 +541,32 @@ bool macroLegalizationLauncher(LegalizationDB<T> db
     snap_origins();
   }
 #endif
+  if (check_macro_legality(db, macros, true)) return true;
+  // The Hannan search is greedy and the LPs keep the placer's relations: a dense
+  // but packable macro set can defeat both. Search the relations (sequence pair).
+  if (spLegalizeLauncher(db, macros, fixed_macros)) {
+    std::vector<T> sp_x(macros.size()), sp_y(macros.size());
+    for (size_t i = 0; i < macros.size(); ++i) {
+      sp_x[i] = db.x[macros[i]];
+      sp_y[i] = db.y[macros[i]];
+    }
+    // the separation LP keeps the packed relations and only reduces displacement
+#ifdef DREAMPLACE_TORCH_FREE
+    lpLegalizeLauncher(db, macros, fixed_macros, align);
+#else
+    lpLegalizeLauncher(db, macros, fixed_macros);
+#endif
+    snap_origins();
+    bool inside = true;
+    for (int id : macros)
+      inside = inside && db.x[id] >= db.xl && db.y[id] >= db.yl && db.x[id] + db.node_size_x[id] <= db.xh &&
+               db.y[id] + db.node_size_y[id] <= db.yh;
+    if (!inside || !check_macro_legality(db, macros, true))
+      for (size_t i = 0; i < macros.size(); ++i) {
+        db.x[macros[i]] = sp_x[i];
+        db.y[macros[i]] = sp_y[i];
+      }
+  }
   return check_macro_legality(db, macros, false);
 }
 
