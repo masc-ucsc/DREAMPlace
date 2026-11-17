@@ -17,6 +17,12 @@ struct RudyOptions {
   std::function<void()> initialize;
   double fixed_macro_scale =
       1; // centered exclusion footprint; physical pins unchanged
+  // Standard-cell pins per layout unit^2 a bin can give access to (pin_access
+  // counts macro pins only). Positive: every non-macro pin of a routed net adds
+  // 1 / (bin area * cell_pin_capacity) to its bin's pin_utilization, so dense
+  // pin clusters (flop arrays, mux trees) inflate like congested bins even when
+  // their wires are short. 0 ignores standard-cell pins.
+  double cell_pin_capacity = 0;
 };
 struct RudyResult {
   // X-major bin index = x*bins_y+y. Directional utilization is demand

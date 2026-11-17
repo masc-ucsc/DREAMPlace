@@ -647,6 +647,9 @@ struct Options {
   std::function<void()> route_initialize;
   bool routability = false;
   double route_capacity_h = 1, route_capacity_v = 1;
+  // RudyOptions::cell_pin_capacity for the routability estimate (standard-cell
+  // pins per layout unit^2); 0 leaves standard-cell pins out of the pin map.
+  double route_cell_pin_capacity = 0;
   // Experimental filler-free upper-bound penalty. Underfull bins contribute
   // no charge; fixed obstacles alone must not push cells into whitespace.
   bool density_upper_bound = false;

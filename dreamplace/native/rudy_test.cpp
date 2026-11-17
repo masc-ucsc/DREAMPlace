@@ -409,6 +409,30 @@ int main() {
         }
       }
     }
+    // Standard-cell pins: each pin of a routed net adds 1 / (bin area * capacity)
+    // to its bin; the overflow summary follows the raised utilization.
+    {
+      RudyOptions plain;
+      plain.bins_x = plain.bins_y = 2;
+      plain.horizontal_capacity = .025;
+      plain.vertical_capacity = .05;
+      auto dense = plain;
+      dense.cell_pin_capacity = .001;  // tiny capacity: every pinned bin overflows
+      const auto base = rudy(d, plain), pinned = rudy(d, dense);
+      const double bin_area = (40. / 2) * (24. / 2);
+      double added_pins = 0;
+      for (size_t k = 0; k < base.pin_utilization.size(); ++k) {
+        check(pinned.pin_utilization[k] >= base.pin_utilization[k]);
+        added_pins += (pinned.pin_utilization[k] - base.pin_utilization[k]) * bin_area * dense.cell_pin_capacity;
+      }
+      int routed_pins = 0;
+      for (int p = 0; p < int(d.pin2node.size()); ++p)
+        routed_pins += d.net_mask[d.pin2net[p]] != 0;
+      near(added_pins, routed_pins);
+      check(pinned.overflow > base.overflow && pinned.max_utilization > base.max_utilization);
+      dense.cell_pin_capacity = -1;
+      rejects([&] { rudy(d, dense); });
+    }
     Design empty;
     empty.layout = {0, 0, 10, 10, 1, 1};
     empty.build_maps();

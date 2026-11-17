@@ -470,6 +470,8 @@ void options_check(const Options &o) {
               (finite(o.route_capacity_h) && o.route_capacity_h > 0 &&
                finite(o.route_capacity_v) && o.route_capacity_v > 0),
           "invalid routing capacity");
+  require(finite(o.route_cell_pin_capacity) && o.route_cell_pin_capacity >= 0,
+          "invalid standard-cell pin capacity");
   require(finite(o.routability_macro_weight) &&
               o.routability_macro_weight >= 0 &&
               finite(o.routability_macro_range) &&
@@ -1872,6 +1874,7 @@ Result place(Design &design, const Options &options, GpState *state,
     if (o.improved_routability) {
       salt(std::bit_cast<std::uint64_t>(o.route_capacity_h));
       salt(std::bit_cast<std::uint64_t>(o.route_capacity_v));
+      salt(std::bit_cast<std::uint64_t>(o.route_cell_pin_capacity));
       for (const auto *values :
            {&design.node_blocked_capacity_h, &design.node_blocked_capacity_v}) {
         for (double v : *values) {
@@ -2518,6 +2521,7 @@ Result place(Design &design, const Options &options, GpState *state,
       route_options.accuracy = o.route.accuracy;
       route_options.initialize = o.route_initialize;
       route_options.fixed_macro_scale = exclusion_scale;
+      route_options.cell_pin_capacity = o.route_cell_pin_capacity;
       if (transparent) {
         route_options.macro_blockages = false;
         route_options.pin_access = false;

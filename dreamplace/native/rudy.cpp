@@ -27,6 +27,8 @@ void detail::validate_rudy(const Design &d, const RudyOptions &o) {
   if (!std::isfinite(o.fixed_macro_scale) || o.fixed_macro_scale < 0 ||
       o.fixed_macro_scale > 1)
     throw std::invalid_argument("invalid fixed macro exclusion scale");
+  if (!std::isfinite(o.cell_pin_capacity) || o.cell_pin_capacity < 0)
+    throw std::invalid_argument("invalid standard-cell pin capacity");
   const auto &l = d.layout;
   const double dx = (l.xh - l.xl) / o.bins_x, dy = (l.yh - l.yl) / o.bins_y;
   if (!std::isfinite(dx * dy * o.horizontal_capacity) ||
@@ -47,7 +49,51 @@ void detail::accumulate_overflow(RudyResult &r) {
     r.overflow += std::max(0., u - 1) / count;
   }
 }
+namespace {
+// Standard-cell pin access (RudyOptions::cell_pin_capacity), added on top of
+// whichever wire model ran; the overflow summary follows each bin's new
+// max(horizontal, vertical, pin_utilization).
+void add_cell_pins(const Design &d, const RudyOptions &o, RudyResult &r) {
+  if (o.cell_pin_capacity <= 0)
+    return;
+  const auto &l = d.layout;
+  const int count = o.bins_x * o.bins_y;
+  const double dx = (l.xh - l.xl) / o.bins_x, dy = (l.yh - l.yl) / o.bins_y;
+  const double unit = 1 / (dx * dy * o.cell_pin_capacity);
+  std::vector<double> add(count, 0);
+  for (int p = 0; p < static_cast<int>(d.pin2node.size()); ++p) {
+    const int node = d.pin2node[p];
+    if ((!d.node_macro.empty() && d.node_macro[node]) ||
+        !d.net_mask[d.pin2net[p]])
+      continue;
+    const double x = std::clamp(d.node_x[node] + d.pin_offset_x[p], l.xl, l.xh),
+                 y = std::clamp(d.node_y[node] + d.pin_offset_y[p], l.yl, l.yh);
+    add[detail::clamped_bin(x, l.xl, dx, o.bins_x) * o.bins_y +
+        detail::clamped_bin(y, l.yl, dy, o.bins_y)] += unit;
+  }
+  for (int k = 0; k < count; ++k) {
+    if (add[k] == 0)
+      continue;
+    const double before =
+        std::max({r.horizontal[k], r.vertical[k], r.pin_utilization[k]});
+    r.pin_utilization[k] += add[k];
+    const double after =
+        std::max({r.horizontal[k], r.vertical[k], r.pin_utilization[k]});
+    if (!std::isfinite(after))
+      throw std::invalid_argument("RUDY pin demand overflow");
+    r.overflow += (std::max(0., after - 1) - std::max(0., before - 1)) / count;
+    r.max_utilization = std::max(r.max_utilization, after);
+  }
+}
+RudyResult rudy_models(const Design &d, const RudyOptions &o);
+} // namespace
 RudyResult rudy(const Design &d, const RudyOptions &o) {
+  auto r = rudy_models(d, o);
+  add_cell_pins(d, o, r);
+  return r;
+}
+namespace {
+RudyResult rudy_models(const Design &d, const RudyOptions &o) {
   detail::validate_rudy(d, o);
   RudyResult r;
   r.horizontal.resize(o.bins_x * o.bins_y);
@@ -146,4 +192,5 @@ RudyResult rudy(const Design &d, const RudyOptions &o) {
   }
   return r;
 }
+} // namespace
 } // namespace DreamPlace::native
