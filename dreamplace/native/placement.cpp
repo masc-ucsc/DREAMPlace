@@ -2654,6 +2654,23 @@ Result place(Design &design, const Options &options, GpState *state,
                                              : std::vector<MacroPull>{};
     std::vector<double> best_feasible_x, best_feasible_y;
     int best_feasible_iteration = 0;
+    // Runaway guard: when the target density is infeasible for the fixed
+    // geometry (blocked area the overflow floor does not see), the density
+    // weight grows without bound and drags the iterate far from the best
+    // spread it already reached (vortex with 5 um macro halos: overflow 0.13
+    // at 1.75M um HPWL, then 0.30 at 101M um and a weight of 1e6). With no
+    // density-feasible sample to fall back on, keep the least-overflow sample
+    // and return it instead of the runaway. Only for a static solve whose
+    // trajectory nothing outside observes (as the feasible record above).
+    // Timing checkpoints may reweight nets mid-solve; the least-overflow
+    // coordinates stay a valid pose for the same cells (checked at restore).
+    const bool guard_runaway = !state && !o.magnet_runtime && !o.trial_tuning &&
+                               !o.interact && !centroids;
+    std::vector<double> least_x, least_y;
+    double least_overflow = std::numeric_limits<double>::infinity();
+    double least_hpwl = 0, least_weight = 0;
+    int least_iteration = 0;
+    bool runaway = false;
     // Post-density continuation record (see Options::post_density_patience):
     // the feasible samples with the least wirelength and the least routing
     // violation, and the anchors that define meaningful progress. Restoring
@@ -3410,6 +3427,26 @@ Result place(Design &design, const Options &options, GpState *state,
         for (int i = 0; i < d.num_movable; ++i) {
           inflation[i] += budget * (proposed[i] - inflation[i]);
           inflated += d.node_size_x[i] * d.node_size_y[i] * inflation[i];
+        }
+        // Inflation lowers the effective target to target/ratio. It must stay
+        // within what the free core (outside fixed, padded bodies) can hold at
+        // the requested target, or no spread meets it: the density weight then
+        // grows without bound and drags the cells apart (vortex with 5 um
+        // macro halos inflated to 2.4x where 1.5x fits, overflow 0.13 -> 0.30
+        // and 1.75M -> 101M um HPWL). Scale every cell's extra charge back
+        // proportionally to that ceiling.
+        if (o.improved_routability && area > 0 && inflated > area) {
+          const double cap = std::max(
+              1., .95 * std::max(0., width * height - fixed_area) *
+                      o.target_density / area);
+          if (inflated > cap * area) {
+            const double f = (cap * area - area) / (inflated - area);
+            inflated = 0;
+            for (int i = 0; i < d.num_movable; ++i) {
+              inflation[i] = 1 + f * (inflation[i] - 1);
+              inflated += d.node_size_x[i] * d.node_size_y[i] * inflation[i];
+            }
+          }
         }
         inflated_ratio = area ? inflated / area : 1;
       }
@@ -4700,6 +4737,22 @@ Result place(Design &design, const Options &options, GpState *state,
                                                fixed_macro_weight)
                        .value
                  : 0);
+        if (guard_runaway && global_iter >= 39) {
+          if (r.overflow < least_overflow - 1e-4) {
+            least_overflow = r.overflow;
+            least_hpwl = current_hpwl;
+            least_weight = density_weight;
+            least_x = x;
+            least_y = y;
+            least_iteration = global_iter + 1;
+          } else if (least_iteration && best_feasible_x.empty() &&
+                     excess > o.stop_overflow &&
+                     r.overflow > least_overflow + .05 &&
+                     current_hpwl > 4 * least_hpwl &&
+                     density_weight > 100 * std::max(least_weight, 1e-12)) {
+            runaway = true;
+          }
+        }
         if (keep_feasible && !pin_timing_seen && opacity_settled &&
             global_iter >= 39 && inflated_ratio == 1 &&
             (!fixed_macro_weight || progress >= 1) &&
@@ -5081,6 +5134,10 @@ Result place(Design &design, const Options &options, GpState *state,
             break;
           }
         }
+        if (runaway) {  // see guard_runaway: stop pushing an infeasible spread
+          r.density_stalled = true;
+          break;
+        }
         if (separate_circles && global_iter + 1 >= o.centroid_ramp &&
             !r.centroid.circles_converged) {
           const double improvement =
@@ -5175,6 +5232,25 @@ Result place(Design &design, const Options &options, GpState *state,
     }
     r.selected_iteration =
         restored_selection ? restored_selection : offset + r.iterations;
+    if (guard_runaway && least_iteration && !restored_selection &&
+        best_feasible_x.empty() && !r.history.empty() &&
+        least_x.size() == x.size() && least_y.size() == y.size() &&
+        (runaway || (r.history.back().overflow >= least_overflow &&
+                     r.history.back().hpwl > 4 * least_hpwl))) {
+      std::fprintf(stderr,
+                   "[WARNING] GP runaway: overflow %.3f at %.4g HPWL (weight "
+                   "%.3g) after the least-overflow sample %.3f at %.4g "
+                   "(iteration %d); returning that sample\n",
+                   r.history.back().overflow, r.history.back().hpwl,
+                   density_weight, least_overflow, least_hpwl,
+                   least_iteration);
+      x = std::move(least_x);
+      y = std::move(least_y);
+      r.density_weight = least_weight;
+      r.selected_iteration = least_iteration;
+      r.density_stalled = true;
+      r.converged = false;
+    } else
     if (keep_feasible && !pin_timing_seen && inflated_ratio == 1 &&
         !best_feasible_x.empty()) {
       x = std::move(best_feasible_x);
