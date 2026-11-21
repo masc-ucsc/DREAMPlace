@@ -46,6 +46,11 @@ struct Layout {
 // Disjoint physical color/region groups. Explicit rigid offsets below permit
 // logical member aliases after contraction. Empty areas use width*height.
 // Optional areas preserve physical weighting when occupancy is halo padded.
+struct PairAnchor {
+  int first, second;
+  double weight;
+  bool operator==(const PairAnchor &) const = default;
+};
 struct CohesionGroup {
   std::vector<int> nodes;
   double weight = 1;
@@ -123,6 +128,7 @@ struct ReservationCharge {
 struct Design {
   Layout layout;
   std::vector<CohesionGroup> cohesion_groups;
+  std::vector<PairAnchor> pair_anchors; // optimizer only, never part of physical connectivity
   std::vector<CentroidGroup> centroid_groups;
   // Optional frozen world-coordinate targets, one per candidate. Empty keeps
   // the original moving-centroid attraction exactly. Targets are not fences.
@@ -240,6 +246,7 @@ struct GpUpdate {
   // nullopt preserves the complete reservation list; an empty list clears it.
   // Replacement must carry its own freshly rebound list, never stale node IDs.
   std::optional<std::vector<DensityReservation>> density_reservations;
+  std::optional<std::vector<PairAnchor>> pair_anchors; // replace or clear at a checkpoint
   // Retain the accepted full optimizer/filler/objective state, or restore it.
   // Restore cannot carry other updates; spent iterations never rewind.
   GpCheckpointAction action = GpCheckpointAction::update;

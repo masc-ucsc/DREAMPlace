@@ -937,6 +937,12 @@ void Design::validate() const {
       }
     }
   }
+  for (const auto &anchor : pair_anchors) {
+    require(anchor.first >= 0 && anchor.first < num_movable &&
+                anchor.second >= 0 && anchor.second < num_movable &&
+                anchor.first != anchor.second && finite(anchor.weight) && anchor.weight >= 0,
+            "invalid placement pair anchor");
+  }
   for (const auto &group : cohesion_groups) {
     require(finite(group.weight) && group.weight >= 0,
             "invalid cohesion group weight");
@@ -1825,6 +1831,11 @@ Result place(Design &design, const Options &options, GpState *state,
   }
   for (int v : design.flat_net2pin_start) {
     salt(v);
+  }
+  for (const auto &a : design.pair_anchors) {
+    salt(a.first);
+    salt(a.second);
+    salt(std::bit_cast<std::uint64_t>(a.weight));
   }
   if (o.cohesion_weight > 0) {
     salt(std::bit_cast<std::uint64_t>(o.cohesion_weight));
@@ -3926,6 +3937,23 @@ Result place(Design &design, const Options &options, GpState *state,
                                           align_start)
                 .count();
       }
+      // Derivative of the smoothed two-pin Manhattan distance. These pairs
+      // affect optimization only; reported HPWL and routing use the real nets.
+      if (!d.pair_anchors.empty()) {
+        const double ramp = std::clamp(1.0 - previous_overflow, 0.0, 1.0);
+        const double smooth = std::max(d.layout.row_height, d.layout.site_width);
+        for (const auto &a : d.pair_anchors) {
+          const int i = a.first, j = a.second;
+          const double dx = d.node_x[i] - d.node_x[j] + .5 * (d.node_size_x[i] - d.node_size_x[j]);
+          const double dy = d.node_y[i] - d.node_y[j] + .5 * (d.node_size_y[i] - d.node_size_y[j]);
+          const double gx = ramp * a.weight * dx / std::hypot(dx, smooth);
+          const double gy = ramp * a.weight * dy / std::hypot(dy, smooth);
+          wg.x[i] += gx;
+          wg.x[j] -= gx;
+          wg.y[i] += gy;
+          wg.y[j] -= gy;
+        }
+      }
       if (o.cohesion_weight > 0 && progress > 0 && !d.cohesion_groups.empty()) {
         const auto cg = detail::cohesion(d, o.cohesion_weight * progress);
         for (int i = 0; i < original; ++i) {
@@ -4333,7 +4361,7 @@ Result place(Design &design, const Options &options, GpState *state,
                   "GP rollback has no retained checkpoint");
           require(!update.stop_movable_updates && !update.timing_violation &&
                       update.net_weights.empty() && !update.pin_timing &&
-                      !update.density_reservations,
+                      !update.density_reservations && !update.pair_anchors,
                   "GP restore cannot carry objective updates");
           const auto &saved = *retained_checkpoint;
           const auto &s = saved.state;
@@ -4403,7 +4431,7 @@ Result place(Design &design, const Options &options, GpState *state,
                       update.node_size_y.empty() &&
                       update.pin_offset_x.empty() &&
                       update.pin_offset_y.empty() && !update.pin_timing &&
-                      !update.density_reservations,
+                      !update.density_reservations && !update.pair_anchors,
                   "GP replacement cannot be combined with field updates");
           Design candidate = std::move(*update.replacement);
           candidate.pin_timing.reset();
@@ -4528,6 +4556,8 @@ Result place(Design &design, const Options &options, GpState *state,
           assign(candidate.net_weights, update.net_weights);
           if (update.pin_timing)
             candidate.pin_timing = update.pin_timing;
+          if (update.pair_anchors)
+            candidate.pair_anchors = std::move(*update.pair_anchors);
           if (update.density_reservations)
             candidate.density_reservations = *update.density_reservations;
           assign(candidate.node_size_x, update.node_size_x);
@@ -4557,7 +4587,13 @@ Result place(Design &design, const Options &options, GpState *state,
           const bool pin_timing_changed = candidate.pin_timing != d.pin_timing;
           const bool reservations_changed =
               candidate.density_reservations != d.density_reservations;
-          const bool weights_changed = candidate.net_weights != d.net_weights;
+          const bool anchors_changed = candidate.pair_anchors != d.pair_anchors;
+          const bool weights_changed = candidate.net_weights != d.net_weights || anchors_changed;
+          if (anchors_changed) {
+            d.pair_anchors = candidate.pair_anchors;
+            model.pair_anchors = candidate.pair_anchors;
+            forget_feasible();
+          }
           const bool geometry_changed =
               reservations_changed || pin_timing_changed ||
               candidate.node_size_x != model.node_size_x ||
